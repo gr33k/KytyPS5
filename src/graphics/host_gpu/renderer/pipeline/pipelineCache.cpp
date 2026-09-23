@@ -348,8 +348,16 @@ struct PipelineCache::ProgramCache {
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		if (entry == programs.end()) {
 			auto resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-			                                                    specialization));
+			if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+			                                                specialization)) {
+				LOGF("Resource materialization failed: hash=0x%016llx buffers=%zu images=%zu "
+				     "samplers=%zu\n",
+				     static_cast<unsigned long long>(params.hash),
+				     translated.program.info.buffers.size(),
+				     translated.program.info.images.size(),
+				     translated.program.info.samplers.size());
+				EXIT_IF(true);
+			}
 			entry = programs.try_emplace(lookup_key, std::move(resource_plan)).first;
 		}
 		entry->second.permutations.push_back(CompilePermutation(

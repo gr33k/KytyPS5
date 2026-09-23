@@ -969,9 +969,14 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	MaterializedSnapshot materialized;
 	if (!MaterializeSnapshot(program, runtime, materialized)) {
+		LOGF("Resource materialization failed in snapshot stage\n");
 		return false;
 	}
-	return BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization);
+	if (!BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization)) {
+		LOGF("Resource materialization failed in specialization stage\n");
+		return false;
+	}
+	return true;
 }
 
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
