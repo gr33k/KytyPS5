@@ -872,6 +872,28 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return;
 	}
 	const auto atomic_opcode = ImageAtomicOpcode(op);
+	if (op == IR::ValueOpcode::ImageAtomicFMin32 || op == IR::ValueOpcode::ImageAtomicFMax32) {
+		// No native float image atomics: emulate with a compare-exchange loop over
+		// the ordered bit representation (same approach as buffer float atomics).
+		const auto dimension = image.dimension;
+		ctx.Define(inst, EmitValueOrZeroIfCondition(state, ctx.Arg(inst, 3), [&]() {
+			           const auto pointer = state.builder.AllocateId();
+			           const auto pointer_type =
+			               state.builder.Type(spv::OpTypePointer, spv::StorageClassImage,
+			                                  TypeU32(state));
+			           state.builder.AddFunction(spv::OpImageTexelPointer, pointer_type, pointer,
+			                                     StorageImageDescriptorPointer(state, mem.resource),
+			                                     CoordU32(ctx, mem, *address, dimension),
+			                                     ConstantU32(state, 0));
+			           const bool max_value = op == IR::ValueOpcode::ImageAtomicFMax32;
+			           return AtomicUpdate(state, pointer, IR::ResourceKind::Image,
+			                               [&](uint32_t old) {
+				                               return EmitFloatAtomicReplacement(
+				                                   state, old, ctx.Arg(inst, 2), max_value);
+			                               });
+		           }));
+		return;
+	}
 	if (atomic_opcode != spv::OpNop) {
 		const auto dimension = image.dimension;
 		ctx.Define(inst, EmitValueOrZeroIfCondition(state, ctx.Arg(inst, 3), [&]() {
