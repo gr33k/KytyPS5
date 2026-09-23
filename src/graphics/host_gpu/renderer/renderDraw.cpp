@@ -310,7 +310,8 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 
 static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuffer vk_buffer,
                                      const ShaderVertexInputInfo& vs_input_info,
-                                     const RenderDepthInfo& depth, const RenderState& rendering) {
+                                     const RenderDepthInfo& depth, const RenderState& rendering,
+                                     bool has_dynamic_color_write) {
 	KYTY_PROFILER_FUNCTION();
 
 	const auto& ctx = buffer.GetRegisters();
@@ -409,12 +410,14 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 	// MoltenVK has no VK_EXT_color_write_enable; the pipeline is created without the
 	// eColorWriteEnableEXT dynamic state and relies on the static colorWriteMask instead.
 #else
-	vk::Bool32 enable[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	for (uint32_t slot = 0; slot < rendering.num_color_attachments; slot++) {
-		enable[slot] = rendering.color_attachments[slot].image_view != nullptr;
-	}
-	if (rendering.num_color_attachments != 0) {
-		vk_buffer.setColorWriteEnableEXT(rendering.num_color_attachments, enable);
+	if (has_dynamic_color_write) {
+		vk::Bool32 enable[RENDER_COLOR_ATTACHMENTS_MAX] = {};
+		for (uint32_t slot = 0; slot < rendering.num_color_attachments; slot++) {
+			enable[slot] = rendering.color_attachments[slot].image_view != nullptr;
+		}
+		if (rendering.num_color_attachments != 0) {
+			vk_buffer.setColorWriteEnableEXT(rendering.num_color_attachments, enable);
+		}
 	}
 #endif
 }
@@ -1132,7 +1135,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
 
-	SetGraphicsDynamicParams(buffer, vk_buffer, vertex_stages.back(), state.depth_info, rendering);
+	SetGraphicsDynamicParams(buffer, vk_buffer, vertex_stages.back(), state.depth_info, rendering,
+	                         pipeline.has_dynamic_color_write);
 	if (m_context.GetGraphics().attachment_feedback_loop_enabled) {
 		vk_buffer.setAttachmentFeedbackLoopEnableEXT(
 		    rendering.depth_stencil_attachment.image_layout ==

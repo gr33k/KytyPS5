@@ -115,6 +115,10 @@ public:
 		vk::Pipeline            pipeline              = nullptr;
 		vk::DescriptorSetLayout descriptor_set_layout = nullptr;
 		bool                    uses_push_descriptors = false;
+		// False when the pipeline was built without the
+		// VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT state (driver fallback);
+		// the static color-write masks apply instead.
+		bool has_dynamic_color_write = true;
 	};
 
 	struct GraphicsPrograms {

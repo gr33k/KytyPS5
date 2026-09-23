@@ -550,6 +550,33 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	}
+	if (result != vk::Result::eSuccess && rendering.color_count != 0) {
+		// Some drivers reject specific dynamic-state combinations with ErrorUnknown
+		// while validation stays silent. The static color-write masks already carry
+		// equivalent state, so retry once without VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT
+		// instead of aborting the game.
+		const auto end = std::remove(dynamic_states.begin(), dynamic_states.end(),
+		                             vk::DynamicState::eColorWriteEnableEXT);
+		if (end != dynamic_states.end()) {
+			dynamic_states.erase(end, dynamic_states.end());
+			dynamic_state.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
+			color_blending.pNext            = nullptr;
+			if (graphics_debug_dump_enabled()) {
+				LOGF("PipelineTrace: vkCreateGraphicsPipelines retry without dynamic "
+				     "color-write\n");
+			}
+			result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
+			                                                 nullptr, &pipeline.pipeline);
+			if (graphics_debug_dump_enabled()) {
+				LOGF("PipelineTrace: vkCreateGraphicsPipelines retry done result=%s "
+				     "pipeline=%p\n",
+				     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
+			}
+			if (result == vk::Result::eSuccess) {
+				pipeline.has_dynamic_color_write = false;
+			}
+		}
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
