@@ -577,15 +577,26 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 			}
 		}
 	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
-	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
-
 	if (tess_control_shader_module != nullptr) {
 		graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
 	}
 	if (tess_eval_shader_module != nullptr) {
 		graphics.device.destroyShaderModule(tess_eval_shader_module, nullptr);
+	}
+
+	if (result != vk::Result::eSuccess || pipeline.pipeline == nullptr) {
+		// Some drivers reject valid pipelines (observed: AMD ErrorUnknown on
+		// barycentric fragment inputs with triangle strips, validation silent).
+		// Skip draws using this pipeline instead of aborting the game; the null
+		// pipeline is cached so each unique pipeline logs once here.
+		static std::atomic_uint skipped_count = 0;
+		if (skipped_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+			LOGF("Pipeline: skipping draws with failed graphics pipeline VS=%" PRIu64
+			     " PS=%" PRIu64 " result=%s\n",
+			     vertex_program.id, ps_active ? pixel_program.id : 0,
+			     vk::to_string(result).c_str());
+		}
+		return;
 	}
 }
 
@@ -646,9 +657,14 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	                                                &pipeline.pipeline);
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
-	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
+	if (result != vk::Result::eSuccess || pipeline.pipeline == nullptr) {
+		static std::atomic_uint skipped_cs_count = 0;
+		if (skipped_cs_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+			LOGF("Pipeline: skipping dispatches with failed compute pipeline result=%s\n",
+			     vk::to_string(result).c_str());
+		}
+		return;
+	}
 }
 
 } // namespace Libs::Graphics

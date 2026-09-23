@@ -819,9 +819,8 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	                       ps_input_info, programs, static_params, m_driver_cache);
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 
-	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
-	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
-
+	// A null pipeline means creation failed and was logged; it is cached so
+	// draws using it are skipped instead of aborting the game.
 	auto [iter, inserted] = m_graphics_pipelines.emplace(std::move(key), std::move(cached));
 	EXIT_IF(!inserted);
 
@@ -848,9 +847,6 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 
 	auto cached = std::make_unique<Pipeline>();
 	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
-
-	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
-	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
 
 	auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(cached));
 	EXIT_IF(!inserted);

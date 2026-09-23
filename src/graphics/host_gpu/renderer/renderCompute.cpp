@@ -361,6 +361,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
+	if (pipeline.pipeline == nullptr) {
+		// Creation failed and was logged; skip the dispatch so the game continues.
+		return;
+	}
 	auto bindings = PrepareBindings(input_info.stage);
 	FindBuffers(bindings);
 	if (program.info.uses_dma) {
