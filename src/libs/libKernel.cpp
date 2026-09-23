@@ -2961,6 +2961,51 @@ int KYTY_SYSV_ABI KernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* use
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelAioWaitRequests(int32_t id[], int32_t num, int32_t state[], uint32_t mode,
+                                        uint32_t* usec) {
+	PRINT_NAME();
+
+	if (state == nullptr) {
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	if (num < 0 || num > KERNEL_AIO_MAX_QUEUE) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	uint32_t waited     = 0;
+	bool     timeout    = false;
+	bool     completion = false;
+	for (int32_t i = 0; i < num; i++) {
+		if (!kernel_aio_is_valid_id(id[i])) {
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+		if (!completion && !timeout) {
+			auto current = g_kernel_aio_state[id[i]].load(std::memory_order_acquire);
+			while (current == KERNEL_AIO_STATE_PROCESSING) {
+				if (usec != nullptr && *usec != 0 && waited >= *usec) {
+					timeout = true;
+					break;
+				}
+
+				Common::Thread::SleepMicro(10);
+				waited += 10;
+				current = g_kernel_aio_state[id[i]].load(std::memory_order_acquire);
+			}
+		}
+
+		const auto final_state = g_kernel_aio_state[id[i]].load(std::memory_order_acquire);
+		if (mode == 0x02u && final_state == KERNEL_AIO_STATE_COMPLETED) {
+			completion = true;
+		}
+		state[i] = final_state;
+	}
+
+	if (timeout) {
+		return LibKernel::KERNEL_ERROR_ETIMEDOUT;
+	}
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelAioDeleteRequest(int32_t id, int32_t* ret) {
 	PRINT_NAME();
 
@@ -3313,6 +3358,7 @@ LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("HgX7+AORI58", KernelAioSubmitReadCommands);
 	LIB_FUNC("2pOuoWoCxdk", KernelAioPollRequest);
 	LIB_FUNC("KOF-oJbQVvc", KernelAioWaitRequest);
+	LIB_FUNC("lgK+oIWkJyA", KernelAioWaitRequests);
 	LIB_FUNC("XQ8C8y+de+E", KernelAioSubmitWriteCommands);
 	LIB_FUNC("nu4a0-arQis", KernelAioInitializeParam);
 	LIB_FUNC("il03nluKfMk", LibKernel::KernelRaiseException);
