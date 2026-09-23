@@ -1,3 +1,4 @@
+#define SDL_MAIN_HANDLED
 #include "SDL.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -470,6 +471,7 @@ void CheckSocketWakeup() {
 } // namespace
 
 int main() {
+  SDL_SetMainReady();
   Common::InitializeThreads();
   Common::Subsystems subsystems;
   subsystems.Initialize<Config::Lifecycle>();

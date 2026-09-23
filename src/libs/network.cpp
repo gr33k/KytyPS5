@@ -2214,7 +2214,32 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 	SocketLength     host_addrlen = sizeof(host_addr);
 	int64_t          result       = 0;
 	if (addr == nullptr) {
+#if defined(_WIN32)
+		if ((host_flags & MSG_PEEK) != 0 && (host_flags & MSG_WAITALL) != 0) {
+			// Winsock rejects MSG_PEEK combined with MSG_WAITALL
+			// (WSAEOPNOTSUPP), while the PS5 stack allows peeking the full
+			// request. Emulate the blocking WAITALL behavior by peeking
+			// until the whole buffer is available; the data stays queued.
+			const int peek_flags = host_flags & ~MSG_WAITALL;
+			for (;;) {
+				result = ::recv(socket, static_cast<char*>(buf), host_len, peek_flags);
+				if (result <= 0 || result >= host_len) {
+					break;
+				}
+				fd_set read_set;
+				FD_ZERO(&read_set);
+				FD_SET(socket, &read_set);
+				if (::select(0, &read_set, nullptr, nullptr, nullptr) == SOCKET_ERROR) {
+					result = -1;
+					break;
+				}
+			}
+		} else {
+			result = ::recv(socket, static_cast<char*>(buf), host_len, host_flags);
+		}
+#else
 		result = ::recv(socket, static_cast<char*>(buf), host_len, host_flags);
+#endif
 	} else {
 		result = ::recvfrom(socket, static_cast<char*>(buf), host_len, host_flags,
 		                    reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen);

@@ -523,8 +523,14 @@ add_kyty_full_emulator_test(virtual_memory_allocation_tests "${KYTY_TESTS_DIR}/V
 target_compile_definitions(virtual_memory_allocation_tests PRIVATE
 	KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS=1)
 
-# These tests use exceptions.
-if(NOT KYTY_CLANG_CL)
+# These tests use exceptions. clang-cl disables exceptions by default,
+# so enable them explicitly instead of relying on the driver default.
+if(KYTY_CLANG_CL)
+	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
+			virtual_memory_allocation_tests)
+		target_compile_options(${kyty_exception_test} PRIVATE /EHsc)
+	endforeach()
+else()
 	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
 			virtual_memory_allocation_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
@@ -621,6 +627,7 @@ if(BUILD_TESTING)
 		shader_recompiler_compute_tests
 		virtual_memory_allocation_tests
 		audio_out2_port_tests
+		save_data_memory_tests
 	)
 endif()
 
@@ -641,6 +648,9 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 endif()
 
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
+if(WIN32)
+	target_sources(kyty_emulator PRIVATE "${KYTY_SOURCE_DIR}/emulator.rc")
+endif()
 configure_macos_guest_address_space(kyty_emulator)
 
 target_link_libraries(kyty_emulator ${kyty_emulator_link_libraries})
