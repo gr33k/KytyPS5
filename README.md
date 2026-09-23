@@ -1,5 +1,9 @@
 # KytyPS5
 
+<p align="center">
+  <img src="docs/banner.png" width="800" alt="KytyPS5 — Play Beyond">
+</p>
+
 [![Build KytyPS5 (Windows)](https://img.shields.io/github/actions/workflow/status/KytyPS5/KytyPS5/build.yml?branch=main&event=push&label=Build%20KytyPS5%20%28Windows%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
 [![Build KytyPS5 (Linux)](https://img.shields.io/github/actions/workflow/status/KytyPS5/KytyPS5/build.yml?branch=main&event=push&label=Build%20KytyPS5%20%28Linux%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
 [![Build KytyPS5 (macOS)](https://img.shields.io/github/actions/workflow/status/KytyPS5/KytyPS5/build.yml?branch=main&event=push&label=Build%20KytyPS5%20%28macOS%29)](https://github.com/KytyPS5/KytyPS5/actions/workflows/build.yml)
@@ -75,6 +79,19 @@ graphical glitches, low compatibility, and poor performance.
 </table>
 
 <p align="center"><em>And many more...</em></p>
+
+## Launcher
+
+<p align="center">
+  <img src="docs/screenshots/launcher.png" width="800" alt="KytyPS5 Launcher (dark mode)">
+</p>
+
+The graphical launcher is a full application window: menu bar and toolbar (Run,
+Rescan, game folders, global settings, input mapping), live game search,
+System/Light/Dark themes, toggleable columns with a persistent layout, and a
+status bar with library stats and emulator version. Game runs log to per-game
+files (`_Logs/<title-id>.log` next to the emulator); starting another game stops
+the previous run first, and failed runs point straight at their log.
 
 ## Contributing
 

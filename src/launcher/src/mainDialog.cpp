@@ -400,19 +400,13 @@ void MainDialogPrivate::BuildChrome() {
 	m_status_games->setAlignment(Qt::AlignVCenter);
 	m_status_selected = new QLabel(window);
 	m_status_selected->setTextFormat(Qt::RichText);
-	m_status_selected->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+	m_status_selected->setAlignment(Qt::AlignVCenter);
 	m_status_selected->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	m_status_emulator = new QLabel(window);
 	m_status_emulator->setAlignment(Qt::AlignVCenter);
 	m_status_emulator->setTextInteractionFlags(Qt::TextSelectableByMouse);
-	auto* status_left_spacer  = new QWidget(window);
-	status_left_spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-	auto* status_right_spacer = new QWidget(window);
-	status_right_spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 	window->statusBar()->addWidget(m_status_games);
-	window->statusBar()->addWidget(status_left_spacer, 1);
-	window->statusBar()->addWidget(m_status_selected);
-	window->statusBar()->addWidget(status_right_spacer, 1);
+	window->statusBar()->addWidget(m_status_selected, 1);
 	window->statusBar()->addPermanentWidget(m_status_emulator);
 
 	auto* action_status_bar = new QAction(tr("Status Bar"), window);
@@ -516,8 +510,7 @@ void MainDialogPrivate::FindInterpreter() {
 			if (ver_match.hasMatch()) {
 				ver_short = ver_match.captured(1).trimmed();
 			}
-			m_status_emulator->setText(
-			    tr("Emulator: %1 (%2)").arg(QFileInfo(m_interpreter).fileName(), ver_short));
+			m_status_emulator->setText(tr("Version: %1").arg(ver_short));
 			m_status_emulator->setToolTip(m_interpreter + QStringLiteral("\n") + m_version);
 		} else {
 			found = false;
@@ -949,7 +942,7 @@ void MainDialogPrivate::Update() {
 	m_action_trophies->setEnabled(item != nullptr && has_trophies);
 
 	const int games = m_ui->widget->GetGameCount();
-	m_status_games->setText(games == 1 ? tr("1 game") : tr("%1 games").arg(games));
+	m_status_games->setText(games == 1 ? tr("1 game   •") : tr("%1 games   •").arg(games));
 	m_status_selected->setText(selected_text);
 }
 

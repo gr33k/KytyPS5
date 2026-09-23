@@ -201,7 +201,5 @@ QStatusBar::item {
 
 QStatusBar QLabel {
     color: palette(window-text);
-    padding-bottom: 2px;
     padding-right: 12px;
-    padding-top: 2px;
 }
