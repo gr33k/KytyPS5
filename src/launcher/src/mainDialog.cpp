@@ -140,7 +140,6 @@ private:
 	QMenu*    m_menu_columns         = nullptr;
 	QLineEdit* m_search_edit         = nullptr;
 	QLabel*   m_status_games         = nullptr;
-	QLabel*   m_status_selected      = nullptr;
 	QLabel*   m_status_emulator      = nullptr;
 };
 
@@ -397,16 +396,13 @@ void MainDialogPrivate::BuildChrome() {
 	menu_view->addAction(m_toolbar->toggleViewAction());
 
 	m_status_games    = new QLabel(window);
+	m_status_games->setTextFormat(Qt::RichText);
 	m_status_games->setAlignment(Qt::AlignVCenter);
-	m_status_selected = new QLabel(window);
-	m_status_selected->setTextFormat(Qt::RichText);
-	m_status_selected->setAlignment(Qt::AlignVCenter);
-	m_status_selected->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	m_status_games->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	m_status_emulator = new QLabel(window);
 	m_status_emulator->setAlignment(Qt::AlignVCenter);
 	m_status_emulator->setTextInteractionFlags(Qt::TextSelectableByMouse);
-	window->statusBar()->addWidget(m_status_games);
-	window->statusBar()->addWidget(m_status_selected, 1);
+	window->statusBar()->addWidget(m_status_games, 1);
 	window->statusBar()->addPermanentWidget(m_status_emulator);
 
 	auto* action_status_bar = new QAction(tr("Status Bar"), window);
@@ -902,7 +898,10 @@ void MainDialogPrivate::Update() {
 	bool    folder_open = false;
 	bool    has_patches = false;
 	bool    has_trophies = false;
-	QString selected_text;
+	QString status_text;
+
+	const int games = m_ui->widget->GetGameCount();
+	status_text     = games == 1 ? tr("1 game") : tr("%1 games").arg(games);
 
 	if (item != nullptr) {
 		const auto& info = item->GetInfo();
@@ -917,13 +916,13 @@ void MainDialogPrivate::Update() {
 			if (item->IsRunning()) {
 				const QString accent =
 				    m_main_dialog->palette().color(QPalette::Highlight).name();
-				selected_text =
-				    tr("<span style='color:%1'>●</span> <b>%2</b> (%3) — running")
+				status_text +=
+				    tr("   •   <span style='color:%1'>●</span> <b>%2</b> (%3) — running")
 				        .arg(accent, name, serial);
 			} else if (serial.isEmpty()) {
-				selected_text = tr("<b>%1</b>").arg(name);
+				status_text += tr("   •   <b>%1</b>").arg(name);
 			} else {
-				selected_text = tr("<b>%1</b> (%2)").arg(name, serial);
+				status_text += tr("   •   <b>%1</b> (%2)").arg(name, serial);
 			}
 		}
 		has_patches  = PatchesDialog::IsSupportedTitleId(info.title_id);
@@ -941,9 +940,7 @@ void MainDialogPrivate::Update() {
 	m_action_patches->setEnabled(item != nullptr && !item_busy && has_patches);
 	m_action_trophies->setEnabled(item != nullptr && has_trophies);
 
-	const int games = m_ui->widget->GetGameCount();
-	m_status_games->setText(games == 1 ? tr("1 game   •") : tr("%1 games   •").arg(games));
-	m_status_selected->setText(selected_text);
+	m_status_games->setText(status_text);
 }
 
 #include "mainDialog.moc"
