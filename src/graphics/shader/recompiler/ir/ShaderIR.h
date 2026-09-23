@@ -427,7 +427,11 @@ struct BindingLayout {
 };
 
 struct ShaderInfo {
-	static constexpr uint32_t MaxBuffers      = 32;
+	// Raised from 32: real shaders (e.g. Mortal Kombat 11 compute) reference
+	// more distinct buffers. Buffers are described through dynamically sized
+	// layouts and the flattened table, so no fixed-size host structure
+	// depends on this value.
+	static constexpr uint32_t MaxBuffers      = 64;
 	static constexpr uint32_t MaxImages       = 64;
 	static constexpr uint32_t MaxSamplers     = 32;
 	static constexpr uint32_t MaxSampledPairs = 64;
