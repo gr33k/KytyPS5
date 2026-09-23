@@ -3358,8 +3358,15 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 			case 0x4000: {
 				EXIT_NOT_IMPLEMENTED(!Ngs2RackIsCustom(voice->rack->type));
 				const auto index = param->id & 0x1fu;
-				EXIT_NOT_IMPLEMENTED((param->id & 0xffffffe0u) != 0x40001f00u ||
-				                     index >= voice->modules.size());
+				if ((param->id & 0xffffffe0u) != 0x40001f00u ||
+				    index >= voice->modules.size()) {
+					// Unknown custom effect parameters (e.g. 0x40001d00 sent by
+					// LEGO Star Wars) only tune audio effects; warn and continue
+					// instead of aborting the game.
+					LOGF("\t unsupported custom voice param: id = 0x%08" PRIx32 "\n",
+					     param->id);
+					break;
+				}
 				struct FxParam {
 					Ngs2VoiceParamHeader header;
 					const void*          data;
