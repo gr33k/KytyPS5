@@ -17,6 +17,7 @@ add_executable(launcher WIN32
 	${launcher_src}
 	${launcher_forms}
 	resources.qrc
+	$<IF:$<BOOL:${WIN32}>,launcher.rc,>
 )
 
 

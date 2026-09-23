@@ -39,30 +39,34 @@ public:
 	bool EnsureGameDirectory();
 	void ScanGameDirectory();
 	void ViewTrophies();
+	void EditPatches();
+
+	[[nodiscard]] int GetGameCount() const;
+	[[nodiscard]] int GetColumnCount() const;
+	[[nodiscard]] QString GetColumnTitle(int section) const;
+	[[nodiscard]] bool IsColumnVisible(int section) const;
+	void SetColumnVisible(int section, bool visible);
 
 signals:
 
 	void Run();
 	void Select();
 
-protected:
-	void changeEvent(QEvent* event) override;
-
 public slots:
 	void WriteSettings();
 	void ReadSettings();
-
-protected slots:
-
 	void edit_configuration();
 	void delete_configuartion();
 	void edit_global_settings();
 	void edit_input_mapping();
-	void list_itemDoubleClicked(QTreeWidgetItem* witem, int column);
-	void show_context_menu(const QPoint& pos);
 	void open_game_folder();
 	void remove_save_data();
 	void filter_configurations(const QString& text);
+
+protected slots:
+
+	void list_itemDoubleClicked(QTreeWidgetItem* witem, int column);
+	void show_context_menu(const QPoint& pos);
 
 private:
 	void               SelectItem(QTreeWidgetItem* witem);
@@ -74,6 +78,7 @@ private:
 	bool                          m_run_enabled   = true;
 	Ui::ConfigurationListWidget*  m_ui            = nullptr;
 	QString                       m_settings_file;
+	QString                       m_filter_text;
 	QStringList                   m_game_dirs;
 	Configuration                 m_global_info;
 	QMap<QString, Configuration*> m_custom_infos;

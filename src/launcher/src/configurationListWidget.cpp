@@ -56,6 +56,7 @@ constexpr char CONF_SECTION_NAME[] = "GameConfigurations";
 constexpr char CONF_LAUNCHER[]     = "Launcher";
 constexpr char CONF_GAME_DIR[]     = "game_dir";
 constexpr char CONF_GAME_DIRS[]    = "game_dirs";
+constexpr char CONF_LIST_HEADER[]  = "game_list_header";
 constexpr char CONF_GLOBAL[]       = "GlobalConfiguration";
 constexpr char SAVE_DATA_DIR[]     = "_SaveData";
 
@@ -205,15 +206,8 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 	ConfigureGameList(m_ui);
 
 	m_ui->refresh_action->setShortcuts(QKeySequence::Refresh);
-	m_ui->refresh_button->setDefaultAction(m_ui->refresh_action);
+	m_ui->refresh_action->setIcon(QIcon(QStringLiteral(":/icons/refresh.svg")));
 	addAction(m_ui->refresh_action);
-
-	UpdateToolbarIcons();
-	m_ui->global_settings_button->setToolTip(tr("Edit global settings and game folders"));
-	m_ui->input_mapping_button->setToolTip(tr("Edit global input mapping"));
-
-	m_ui->delete_button->setEnabled(false);
-	m_ui->edit_button->setEnabled(false);
 
 	m_ui->cfgs_list->setContextMenuPolicy(Qt::CustomContextMenu);
 	m_ui->cfgs_list->setIconSize(QSize(48, 48));
@@ -232,22 +226,12 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 
 	connect(m_ui->refresh_action, &QAction::triggered, this,
 	        &ConfigurationListWidget::ScanGameDirectory);
-	connect(m_ui->global_settings_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::edit_global_settings);
-	connect(m_ui->input_mapping_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::edit_input_mapping);
-	connect(m_ui->edit_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::edit_configuration);
-	connect(m_ui->delete_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::delete_configuartion);
 	connect(m_ui->cfgs_list, &QTreeWidget::currentItemChanged, this,
 	        &ConfigurationListWidget::SelectItem);
 	connect(m_ui->cfgs_list, &QTreeWidget::itemDoubleClicked, this,
 	        &ConfigurationListWidget::list_itemDoubleClicked);
 	connect(m_ui->cfgs_list, &QTreeWidget::customContextMenuRequested, this,
 	        &ConfigurationListWidget::show_context_menu);
-	connect(m_ui->search_line_edit, &QLineEdit::textChanged, this,
-	        &ConfigurationListWidget::filter_configurations);
 	connect(m_compatibility, &CompatibilityDatabase::Updated, this,
 	        &ConfigurationListWidget::ApplyCompatibility);
 
@@ -266,32 +250,6 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 ConfigurationListWidget::~ConfigurationListWidget() {
 	qDeleteAll(m_custom_infos);
 	delete m_ui;
-}
-
-void ConfigurationListWidget::changeEvent(QEvent* event) {
-	QWidget::changeEvent(event);
-	if (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange) {
-		UpdateToolbarIcons();
-	}
-}
-
-void ConfigurationListWidget::UpdateToolbarIcons() {
-	const auto color = palette().color(QPalette::Window).lightness() < 128 ? QColor(Qt::white)
-	                                                                      : QColor(Qt::black);
-	const auto set_icon = [&color](QToolButton* button, const QString& resource) {
-		auto pixmap = QIcon(resource).pixmap(button->iconSize(), button->devicePixelRatioF());
-		QPainter painter(&pixmap);
-		painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-		painter.fillRect(pixmap.rect(), color);
-		button->setIcon(QIcon(pixmap));
-	};
-
-	set_icon(m_ui->refresh_button, QStringLiteral(":/icons/refresh.svg"));
-	m_ui->refresh_action->setIcon(m_ui->refresh_button->icon());
-	set_icon(m_ui->global_settings_button, QStringLiteral(":/icons/global-settings.svg"));
-	set_icon(m_ui->input_mapping_button, QStringLiteral(":/icons/input-mapping.svg"));
-	set_icon(m_ui->edit_button, QStringLiteral(":/icons/edit-configuration.svg"));
-	set_icon(m_ui->delete_button, QStringLiteral(":/icons/remove-configuration.svg"));
 }
 
 void ConfigurationListWidget::WriteSettings() {
@@ -316,6 +274,7 @@ void ConfigurationListWidget::WriteSettings() {
 	m_game_dirs = NormalizeGameDirectories(m_game_dirs);
 	s->setValue(CONF_GAME_DIRS, m_game_dirs);
 	s->remove(CONF_GAME_DIR);
+	s->setValue(CONF_LIST_HEADER, m_ui->cfgs_list->header()->saveState());
 	s->endGroup();
 
 	s->remove(CONF_GLOBAL);
@@ -358,6 +317,7 @@ void ConfigurationListWidget::ReadSettings() {
 	if (m_game_dirs.isEmpty()) {
 		m_game_dirs = NormalizeGameDirectories(SettingsStringList(s->value(CONF_GAME_DIR)));
 	}
+	m_ui->cfgs_list->header()->restoreState(s->value(CONF_LIST_HEADER).toByteArray());
 	s->endGroup();
 
 	s->beginGroup(CONF_GLOBAL);
@@ -708,7 +668,7 @@ void ConfigurationListWidget::ScanGameDirectory() {
 	if (sorting_enabled) {
 		m_ui->cfgs_list->sortItems(sort_column, sort_order);
 	}
-	filter_configurations(m_ui->search_line_edit->text());
+	filter_configurations(m_filter_text);
 
 	ConfigurationItem* selected_item = nullptr;
 	for (int index = 0; index < m_ui->cfgs_list->topLevelItemCount(); index++) {
@@ -799,6 +759,39 @@ void ConfigurationListWidget::ViewTrophies() {
 	TrophyViewerDialog::ShowForGame(&item->GetInfo(), this);
 }
 
+void ConfigurationListWidget::EditPatches() {
+	auto* current = static_cast<ConfigurationItem*>(m_ui->cfgs_list->currentItem());
+	auto* item    = current != nullptr ? current : m_selected_item;
+	if (item == nullptr ||
+	    !PatchesDialog::IsSupportedTitleId(item->GetInfo().title_id)) {
+		return;
+	}
+
+	auto* dialog = new PatchesDialog(item->GetInfo(), this);
+	dialog->show();
+}
+
+int ConfigurationListWidget::GetGameCount() const {
+	return m_ui->cfgs_list->topLevelItemCount();
+}
+
+int ConfigurationListWidget::GetColumnCount() const {
+	return m_ui->cfgs_list->columnCount();
+}
+
+QString ConfigurationListWidget::GetColumnTitle(int section) const {
+	const auto* header_item = m_ui->cfgs_list->headerItem();
+	return header_item != nullptr ? header_item->text(section) : QString();
+}
+
+bool ConfigurationListWidget::IsColumnVisible(int section) const {
+	return !m_ui->cfgs_list->isColumnHidden(section);
+}
+
+void ConfigurationListWidget::SetColumnVisible(int section, bool visible) {
+	m_ui->cfgs_list->setColumnHidden(section, !visible);
+}
+
 void ConfigurationListWidget::open_game_folder() {
 	auto* item = static_cast<ConfigurationItem*>(m_ui->cfgs_list->currentItem());
 	if (item == nullptr) {
@@ -854,8 +847,9 @@ void ConfigurationListWidget::remove_save_data() {
 }
 
 void ConfigurationListWidget::filter_configurations(const QString& text) {
-	const auto query              = text.trimmed();
-	const bool has_query          = !query.isEmpty();
+	m_filter_text               = text;
+	const auto query            = text.trimmed();
+	const bool has_query        = !query.isEmpty();
 	bool       selection_is_shown = false;
 
 	for (int item_index = 0; item_index < m_ui->cfgs_list->topLevelItemCount(); item_index++) {
@@ -886,14 +880,9 @@ void ConfigurationListWidget::SelectItem(QTreeWidgetItem* witem) {
 	if (item == nullptr) {
 		m_selected_item = nullptr;
 		m_ui->cfgs_list->SetBackgroundImage({});
-		m_ui->edit_button->setEnabled(false);
-		m_ui->delete_button->setEnabled(false);
 		emit Select();
 		return;
 	}
-
-	m_ui->delete_button->setEnabled(!item->IsRunning() && item->GetInfo().custom_settings);
-	m_ui->edit_button->setEnabled(!item->IsRunning());
 
 	m_selected_item = item;
 	m_ui->cfgs_list->SetBackgroundImage(GetPic0Path(item->GetInfo()));
@@ -931,12 +920,7 @@ void ConfigurationListWidget::show_context_menu(const QPoint& pos) {
 	        &ConfigurationListWidget::ViewTrophies);
 	QAction* action_patches = menu.addAction(tr("Cheats (experimental)..."));
 	connect(action_patches, &QAction::triggered, this,
-	        [this, item = QPointer<ConfigurationItem>(item)]() {
-		        if (item != nullptr) {
-			        auto* dialog = new PatchesDialog(item->GetInfo(), this);
-			        dialog->show();
-		        }
-	        });
+	        &ConfigurationListWidget::EditPatches);
 	action_patches->setVisible(item != nullptr &&
 	                           PatchesDialog::IsSupportedTitleId(item->GetInfo().title_id));
 	QAction* action_remove_save_data =
