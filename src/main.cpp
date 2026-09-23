@@ -228,6 +228,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				}
 
 				options.elf = std::filesystem::path("/app0") / path.filename();
+			} else if (Common::File::IsFileExisting(path / "eboot.bin")) {
+				// Some network filesystems report directories inconsistently;
+				// accept the directory when its eboot.bin is directly readable.
+				options.app0_dir = path;
+				options.elf      = "/app0/eboot.bin";
 			} else {
 				::printf("--game must point to an existing directory or ELF: %s\n", value.c_str());
 				return false;
