@@ -995,6 +995,140 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 	                  draw.index_count, index_addr);
 }
 
+namespace {
+
+// AMD Windows drivers reject valid barycentric fragment pipelines with triangle
+// strips (ErrorUnknown, validation silent) while the same shaders work as lists.
+// Expand strips/fans to lists for barycentric draws on AMD hardware. Winding flips
+// preserve facing; the odd-triangle order preserves the provoking vertex convention.
+constexpr uint32_t kAmdVendorId = 0x1002u;
+
+bool PixelShaderUsesBarycentrics(const DrawRenderState& state) {
+	if (!state.ps_active) {
+		return false;
+	}
+	const auto* program = state.ps_input_info.stage.program;
+	if (program == nullptr) {
+		return false;
+	}
+	using Kind = ShaderRecompiler::IR::StageInputKind;
+	for (const auto& input: program->info.inputs) {
+		if (input.kind == Kind::BaryCoordSmooth || input.kind == Kind::BaryCoordSmoothCentroid ||
+		    input.kind == Kind::BaryCoordNoPerspective) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Expands a strip/fan index sequence into a triangle list. Returns false when the
+// draw does not need conversion or its indices cannot be read.
+bool ExpandStripDrawToList(std::vector<uint32_t>& out, vk::PrimitiveTopology topology,
+                           const DrawCallInfo& draw, const DrawEmitInfo& emit,
+                           const DrawIndexBufferSource& source, bool primitive_restart_enable,
+                           bool provoking_vtx_last) {
+	if (topology != vk::PrimitiveTopology::eTriangleStrip &&
+	    topology != vk::PrimitiveTopology::eTriangleFan) {
+		return false;
+	}
+	const bool indexed = draw.IsIndexed();
+	const uint32_t count = draw.index_count;
+	if (count < 3u || count > 0x400000u) {
+		return false;
+	}
+	const bool is_strip = topology == vk::PrimitiveTopology::eTriangleStrip;
+
+	std::vector<uint32_t> src;
+	src.reserve(count);
+	if (indexed) {
+		const uint32_t elem_bytes = (source.type == vk::IndexType::eUint32) ? 4u : 2u;
+		if (source.host_data != nullptr) {
+			const auto* bytes = static_cast<const uint8_t*>(source.host_data);
+			for (uint32_t i = 0; i < count; i++) {
+				uint32_t v = 0;
+				std::memcpy(&v, bytes + static_cast<size_t>(i) * elem_bytes, elem_bytes);
+				src.push_back(v);
+			}
+		} else {
+			const uint64_t need = static_cast<uint64_t>(count) * elem_bytes;
+			if (source.size < need) {
+				return false;
+			}
+			std::vector<uint8_t> staging(static_cast<size_t>(need));
+			if (!Libs::LibKernel::Memory::TryReadGpuCleanBacking(source.address, staging.data(),
+			                                                     staging.size())) {
+				return false;
+			}
+			for (uint32_t i = 0; i < count; i++) {
+				uint32_t v = 0;
+				std::memcpy(&v, staging.data() + static_cast<size_t>(i) * elem_bytes, elem_bytes);
+				src.push_back(v);
+			}
+		}
+	} else {
+		if (emit.first_vertex > UINT32_MAX - count) {
+			return false;
+		}
+		for (uint32_t i = 0; i < count; i++) {
+			src.push_back(emit.first_vertex + i);
+		}
+	}
+
+	const bool     use_restart = primitive_restart_enable && indexed;
+	const uint32_t restart =
+	    (source.type == vk::IndexType::eUint32) ? 0xffffffffu : 0xffffu;
+	out.clear();
+	if (!is_strip) {
+		for (uint32_t i = 2; i < count; i++) {
+			const uint32_t a = src[0], b = src[i - 1], c = src[i];
+			if (use_restart && (a == restart || b == restart || c == restart)) {
+				continue;
+			}
+			out.push_back(a);
+			out.push_back(b);
+			out.push_back(c);
+		}
+		return !out.empty();
+	}
+	uint32_t w0 = 0, w1 = 0, have = 0, pos = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		const uint32_t v = src[i];
+		if (use_restart && v == restart) {
+			have = 0;
+			pos  = 0;
+			continue;
+		}
+		if (have < 2) {
+			if (have == 0) {
+				w0 = v;
+			} else {
+				w1 = v;
+			}
+			have++;
+			continue;
+		}
+		if ((pos & 1u) == 0u) {
+			out.push_back(w0);
+			out.push_back(w1);
+			out.push_back(v);
+		} else if (provoking_vtx_last) {
+			out.push_back(w1);
+			out.push_back(w0);
+			out.push_back(v);
+		} else {
+			out.push_back(w0);
+			out.push_back(v);
+			out.push_back(w1);
+		}
+		w0 = w1;
+		w1 = v;
+		pos++;
+	}
+	return !out.empty();
+}
+
+} // namespace
+
 static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_buffer,
                                const DrawCallInfo& draw, const DrawEmitInfo& emit) {
 	switch (ucfg.GetPrimType()) {
@@ -1089,12 +1223,44 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	// AMD Windows drivers reject valid barycentric fragment pipelines with triangle
+	// strips; the same shaders work as lists. Expand the draw on AMD hardware.
+	bool                        strip_converted      = false;
+	uint32_t                    converted_count      = 0;
+	std::vector<uint32_t>       converted_indices;
+	DrawIndexBufferSource       converted_source {};
+	const DrawIndexBufferSource* active_index_source = &index_source;
+	if (!mesh_active &&
+	    (topology == vk::PrimitiveTopology::eTriangleStrip ||
+	     topology == vk::PrimitiveTopology::eTriangleFan) &&
+	    buffer.GetGraphics().GetPhysicalDeviceProperties().vendorID == kAmdVendorId &&
+	    PixelShaderUsesBarycentrics(state)) {
+		static std::atomic_uint converted_logged = 0;
+		const bool provoking_last =
+		    buffer.GetRegisters().GetModeControl().provoking_vtx_last;
+		if (ExpandStripDrawToList(converted_indices, topology, draw, emit, index_source,
+		                          primitive_restart_enable, provoking_last)) {
+			converted_count         = static_cast<uint32_t>(converted_indices.size());
+			converted_source.host_data = converted_indices.data();
+			converted_source.size =
+			    static_cast<uint64_t>(converted_indices.size()) * sizeof(uint32_t);
+			converted_source.type            = vk::IndexType::eUint32;
+			converted_source.guest_element_size = sizeof(uint32_t);
+			active_index_source                  = &converted_source;
+			topology                             = vk::PrimitiveTopology::eTriangleList;
+			strip_converted                      = true;
+			if (converted_logged.fetch_add(1, std::memory_order_relaxed) < 2) {
+				LOGF("Render: expanded barycentric strip/fan draw to a list (%u indices)\n",
+				     converted_count);
+			}
+		}
+	}
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
-		index_binding   = PrepareIndexBuffer(buffer, index_source);
+		index_binding   = PrepareIndexBuffer(buffer, *active_index_source);
 	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
@@ -1160,6 +1326,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+	} else if (strip_converted) {
+		vk_buffer.drawIndexed(converted_count, draw.instance_count, 0,
+		                      draw.IsIndexed() ? emit.vertex_offset : 0, emit.first_instance);
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
