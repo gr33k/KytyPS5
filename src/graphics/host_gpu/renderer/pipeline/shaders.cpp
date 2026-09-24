@@ -577,6 +577,22 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 			}
 		}
 	}
+	if (result != vk::Result::eSuccess) {
+		// Last resort for drivers that reject a valid pipeline in their optimizer
+		// (observed AMD ErrorUnknown): retry without optimization. An unoptimized
+		// pipeline is slower to create but semantically identical.
+		pipeline_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+		if (graphics_debug_dump_enabled()) {
+			LOGF("PipelineTrace: vkCreateGraphicsPipelines retry without optimization\n");
+		}
+		result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
+		                                                 nullptr, &pipeline.pipeline);
+		if (graphics_debug_dump_enabled()) {
+			LOGF("PipelineTrace: vkCreateGraphicsPipelines unoptimized retry done result=%s "
+			     "pipeline=%p\n",
+			     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
+		}
+	}
 	if (tess_control_shader_module != nullptr) {
 		graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
 	}
