@@ -538,11 +538,16 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	if (graphics_debug_dump_enabled()) {
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines begin VS=%" PRIu64 " PS=%" PRIu64
 		     " topology=%" PRIu32 " color_mask=0x%08" PRIx32
-		     " depth=%s blend=%s dyn_states=%" PRIu32 "\n",
+		     " depth=%s blend=%s dyn_states=%" PRIu32
+		     " provoking_last=%s restart=%s cull=0x%x polymode=%u samples=%u\n",
 		     vertex_program.id, ps_active ? pixel_program.id : 0,
 		     static_cast<uint32_t>(static_params.topology), static_params.color_mask[0],
 		     (with_depth ? "true" : "false"), (static_params.blend_enable[0] ? "true" : "false"),
-		     dynamic_state.dynamicStateCount);
+		     dynamic_state.dynamicStateCount,
+		     (static_params.provoking_vtx_last ? "true" : "false"),
+		     (static_params.primitive_restart_enable ? "true" : "false"),
+		     static_cast<uint32_t>(cull_mode),
+		     static_cast<uint32_t>(static_params.polygon_mode), static_params.samples);
 	}
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 	                                                 &pipeline.pipeline);

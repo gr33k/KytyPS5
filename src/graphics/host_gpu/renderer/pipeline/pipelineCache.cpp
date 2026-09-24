@@ -254,6 +254,11 @@ struct PipelineCache::ProgramCache {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
 		}
+		if (graphics_debug_dump_enabled()) {
+			LOGF("PipelineTrace: program id=%llu stage=%s hash=0x%016llx\n",
+			     static_cast<unsigned long long>(next_shader_id + 1), stage_name,
+			     static_cast<unsigned long long>(options.shader_hash));
+		}
 		return {
 		    .specialization = std::move(specialization),
 		    .program        = std::move(result.program).TakeCompiledInfo(),
