@@ -804,6 +804,34 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 	// Report whatever guest context can be read safely before terminating: which guest thread
 	// faulted, the register file, the faulting code bytes and the top of its stack.
 	{
+#if defined(_WIN32)
+		// Host backtrace: identifies crashes inside host/system code (where the
+		// guest pc points at a system DLL instead of game code).
+		void* host_frames[32] = {};
+		const auto host_depth = RtlCaptureStackBackTrace(0, 32, host_frames, nullptr);
+		const auto exe_base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+		std::printf("host backtrace (exe base 0x%016llx):", exe_base);
+		for (DWORD i = 0; i < host_depth; i++) {
+			const auto addr = reinterpret_cast<uint64_t>(host_frames[i]);
+			HMODULE      module = nullptr;
+			wchar_t      module_name[MAX_PATH] = {};
+			const wchar_t* short_name          = nullptr;
+			if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			                       reinterpret_cast<LPCWSTR>(addr), &module) != 0 &&
+			    GetModuleFileNameW(module, module_name, MAX_PATH) != 0) {
+				short_name = wcsrchr(module_name, L'\\');
+				short_name = short_name != nullptr ? short_name + 1 : module_name;
+			}
+			if (short_name != nullptr) {
+				std::printf("%s%ls+0x%llx", (i % 2 == 0) ? "\n " : " ", short_name,
+				            addr - reinterpret_cast<uint64_t>(module));
+			} else {
+				std::printf("%s0x%llx", (i % 2 == 0) ? "\n " : " ", addr);
+			}
+		}
+		std::printf("\n");
+#endif
 		char thread_name[64] = "(host thread)";
 		if (auto self = Libs::LibKernel::PthreadSelfOrNull(); self != nullptr) {
 			if (Libs::LibKernel::PthreadGetname(self, thread_name) != 0) {
