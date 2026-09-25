@@ -18,6 +18,7 @@
 #include <QDialog>
 #include <QDesktopServices>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -122,6 +123,7 @@ private:
 	QProcess m_process;
 	bool     m_expect_kill  = false;
 	QString  m_last_log_path;
+	QElapsedTimer m_run_timer;
 
 	QPointer<ConfigurationItem> m_running_item;
 
@@ -836,6 +838,7 @@ void MainDialogPrivate::Run() {
 	m_running_item->SetRunning(true);
 
 	auto info = m_ui->widget->CreateConfiguration(*m_running_item);
+	m_run_timer.start();
 	m_main_dialog->RunInterpreter(&m_process, *info);
 
 	if (m_process.state() == QProcess::NotRunning && m_running_item != nullptr) {
@@ -880,9 +883,30 @@ void MainDialogPrivate::ShowFailureDialog(int exitCode, QProcess::ExitStatus exi
 	    (exitStatus == QProcess::CrashExit)
 	        ? tr("The emulator crashed.")
 	        : tr("The emulator exited with code %1.").arg(exitCode);
-	QMessageBox box(QMessageBox::Warning, tr("Game failed"),
-	                reason + tr("\n\nFull output was saved to:\n%1").arg(m_last_log_path),
-	                QMessageBox::Ok, m_main_dialog);
+	QString detail = tr("\n\nFull output was saved to:\n%1").arg(m_last_log_path);
+	if (m_run_timer.isValid()) {
+		const qint64 ms    = m_run_timer.elapsed();
+		const qint64 total = ms / 1000;
+		const QString elapsed =
+		    tr("%1:%2:%3")
+		        .arg(total / 3600)
+		        .arg((total / 60) % 60, 2, 10, QLatin1Char('0'))
+		        .arg(total % 60, 2, 10, QLatin1Char('0'));
+		const int64_t log_bytes = QFileInfo(m_last_log_path).size();
+		QString       log_size;
+		if (log_bytes < 0) {
+			log_size = tr("unknown size");
+		} else if (log_bytes < 1024) {
+			log_size = tr("%1 B").arg(log_bytes);
+		} else if (log_bytes < 1024 * 1024) {
+			log_size = tr("%1 KiB").arg(log_bytes / 1024);
+		} else {
+			log_size = tr("%1 MiB").arg(log_bytes / (1024 * 1024));
+		}
+		detail += tr("\n\nRan %1 • log %2").arg(elapsed, log_size);
+	}
+	QMessageBox box(QMessageBox::Warning, tr("Game failed"), reason + detail, QMessageBox::Ok,
+	                m_main_dialog);
 	box.addButton(tr("Open Log Folder"), QMessageBox::ActionRole);
 	box.exec();
 	auto* clicked = box.clickedButton();
