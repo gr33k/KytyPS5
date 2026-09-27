@@ -3,7 +3,7 @@
 #include "common/emulatorConfig.h"
 #include "configuration.h"
 #include "mandatoryLineEdit.h"
-#include "SDL.h"
+#include <SDL3/SDL.h>
 
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -173,17 +173,18 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	microphone->clear();
 	microphone->addItem(tr("None"), QString {});
 	microphone->setToolTip(tr("Microphone used by games. None supplies silence."));
-	SDL_SetMainReady();
-	if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
-		const int device_count = SDL_GetNumAudioDevices(SDL_TRUE);
+	if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+		int                device_count = 0;
+		SDL_AudioDeviceID* devices      = SDL_GetAudioRecordingDevices(&device_count);
 		for (int i = 0; i < device_count; i++) {
-			if (const auto* device = SDL_GetAudioDeviceName(i, SDL_TRUE); device != nullptr) {
+			if (const auto* device = SDL_GetAudioDeviceName(devices[i]); device != nullptr) {
 				const auto name = QString::fromUtf8(device);
 				if (microphone->findData(name) < 0) {
 					microphone->addItem(name, name);
 				}
 			}
 		}
+		SDL_free(devices);
 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
 	} else {
 		microphone->setToolTip(tr("Microphones could not be listed: %1")
@@ -439,6 +440,14 @@ void ConfigurationEditDialog::add_game_directory() {
 		start_dir = m_game_dirs_list->item(m_game_dirs_list->count() - 1)->text();
 	}
 
+#if defined(__APPLE__)
+	// Use the native macOS picker to browse mounted volumes.
+	const auto dir = QFileDialog::getExistingDirectory(this, tr("Select game folder"), start_dir);
+	if (dir.isEmpty()) {
+		return;
+	}
+	AddGameDirectoryItem(dir);
+#else
 	QFileDialog dialog(this, tr("Select game folders"), start_dir);
 	dialog.setFileMode(QFileDialog::Directory);
 	dialog.setOption(QFileDialog::ShowDirsOnly, true);
@@ -461,6 +470,7 @@ void ConfigurationEditDialog::add_game_directory() {
 	for (const auto& dir: dialog.selectedFiles()) {
 		AddGameDirectoryItem(dir);
 	}
+#endif
 
 	update_game_directory_buttons();
 }

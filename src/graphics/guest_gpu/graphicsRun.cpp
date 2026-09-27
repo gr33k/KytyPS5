@@ -874,13 +874,11 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
-	CheckBuffer();
-
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
 	}
-	if (args.base_vertex != 0 || args.first_instance != 0) {
+	if (GraphicsRunDebugDumpEnabled() && (args.base_vertex != 0 || args.first_instance != 0)) {
 		LOGF("\t draw indexed offsets: base_vertex = %" PRId32 ", first_instance = %" PRIu32 "\n",
 		     args.base_vertex, args.first_instance);
 	}
@@ -978,6 +976,16 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
 	EXIT_NOT_IMPLEMENTED(stride_in_bytes < args_size);
 
+	uint64_t index_size = 0;
+	if (indexed) {
+		switch (m_index_type_and_size) {
+			case 0: index_size = 2; break;
+			case 1: index_size = 4; break;
+			case 2: index_size = 1; break;
+			default: EXIT("unknown index_type_and_size: %u\n", m_index_type_and_size);
+		}
+	}
+
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto args_addr = m_draw_indirect_args_base_addr + data_offset +
 		                       static_cast<uint64_t>(i) * stride_in_bytes;
@@ -994,14 +1002,6 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		}
 
 		auto* args = reinterpret_cast<const DrawIndexedIndirectArgs*>(args_addr);
-
-		uint64_t index_size = 0;
-		switch (m_index_type_and_size) {
-			case 0: index_size = 2; break;
-			case 1: index_size = 4; break;
-			case 2: index_size = 1; break;
-			default: EXIT("unknown index_type_and_size: %u\n", m_index_type_and_size);
-		}
 
 		auto* index_addr = reinterpret_cast<const void*>(
 		    m_index_base_addr + static_cast<uint64_t>(args->start_index_location) * index_size);
@@ -1039,7 +1039,6 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	// uint32_t local_z   = 1;
 
 	{
-		CheckBuffer();
 		frame_num = m_renderer.GetGpu().GetFrameNum();
 		if (GraphicsRunDebugDumpEnabled()) {
 			static std::atomic<uint32_t> log_count {0};
@@ -1090,24 +1089,18 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	}*/
 }
 
-void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode) {
-	struct DispatchIndirectArgs {
-		uint32_t thread_group_x;
-		uint32_t thread_group_y;
-		uint32_t thread_group_z;
-	};
-
-	EXIT_NOT_IMPLEMENTED(m_dispatch_indirect_args_base_addr == 0);
-
-	const auto args_addr = m_dispatch_indirect_args_base_addr + data_offset;
-	auto*      args      = reinterpret_cast<const DispatchIndirectArgs*>(args_addr);
-
-	DispatchDirect(args->thread_group_x, args->thread_group_y, args->thread_group_z, mode);
+void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
+	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
+	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
+		const auto* args = reinterpret_cast<const vk::DispatchIndirectCommand*>(args_addr);
+		DispatchDirect(args->x, args->y, args->z, mode);
+		return;
+	}
+	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	m_renderer.GetRenderExecutor().DispatchIndirect(m_submit_id, CurrentBuffer(), args_addr, mode);
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
-	CheckBuffer();
-
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
 	}
@@ -1129,7 +1122,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
                                         uint32_t interrupt_context_id) {
 	static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t));
 
-	CheckBuffer();
+	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
 		const auto bits      = static_cast<unsigned>(sizeof(T) * 8u);
@@ -1160,7 +1153,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 		case 0x03: with_interrupt = false; break;
 		case 0x01:
 			if (!IsAsyncComputeQueue()) {
-				Sync::TriggerEopEventAtEndOfPipe(CurrentBuffer(), m_interrupt_event_id,
+				Sync::TriggerEopEventAtEndOfPipe(command, m_interrupt_event_id,
 				                                 interrupt_context_id);
 				return;
 			}
@@ -1177,17 +1170,17 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 
 		if (with_interrupt) {
 			if (with_writeback) {
-				Sync::WriteAtEndOfPipeWithInterruptWriteBack32(m_submit_id, CurrentBuffer(), dst,
+				Sync::WriteAtEndOfPipeWithInterruptWriteBack32(m_submit_id, command, dst,
 				                                               data, m_interrupt_event_id,
 				                                               interrupt_context_id);
 			} else {
-				Sync::WriteAtEndOfPipeWithInterrupt32(m_submit_id, CurrentBuffer(), dst, data,
+				Sync::WriteAtEndOfPipeWithInterrupt32(m_submit_id, command, dst, data,
 				                                      m_interrupt_event_id, interrupt_context_id);
 			}
 		} else if (with_writeback) {
-			Sync::WriteAtEndOfPipeWithWriteBack32(m_submit_id, CurrentBuffer(), dst, data);
+			Sync::WriteAtEndOfPipeWithWriteBack32(m_submit_id, command, dst, data);
 		} else {
-			Sync::WriteAtEndOfPipe32(m_submit_id, CurrentBuffer(), dst, data);
+			Sync::WriteAtEndOfPipe32(m_submit_id, command, dst, data);
 		}
 	};
 
@@ -1199,7 +1192,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					SynchronizeGpu();
 					Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, value & 0xffffu,
 					              value >> 16u);
-					Sync::WriteAtEndOfPipeGds32(m_submit_id, CurrentBuffer(), dst, value & 0xffffu,
+					Sync::WriteAtEndOfPipeGds32(m_submit_id, command, dst, value & 0xffffu,
 					                            value >> 16u);
 					if (with_interrupt) {
 						m_renderer.TriggerInterrupt(m_interrupt_event_id, interrupt_context_id);
@@ -1212,8 +1205,9 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			}
 			break;
 		case 0x02:
+		case 0x04:
 			if constexpr (sizeof(T) == sizeof(uint32_t)) {
-				if (eop_event_type == 0x2f && event_index == 0x06) {
+				if (event_write_source == 0x02 && eop_event_type == 0x2f && event_index == 0x06) {
 					switch (cache_action) {
 						case 0x00: write32(false); return;
 						case 0x38: write32(true); return;
@@ -1221,6 +1215,9 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					}
 				}
 			} else {
+				if (event_write_source == 0x04) {
+					value = Sync::ReadReferenceClock();
+				}
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
 					std::memcpy(dst, &value, sizeof(value));
@@ -1228,18 +1225,18 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					if (with_interrupt) {
 						if (with_writeback) {
 							Sync::WriteAtEndOfPipeWithInterruptWriteBack64(
-							    m_submit_id, CurrentBuffer(), dst, value, m_interrupt_event_id,
+							    m_submit_id, command, dst, value, m_interrupt_event_id,
 							    interrupt_context_id);
 						} else {
-							Sync::WriteAtEndOfPipeWithInterrupt64(m_submit_id, CurrentBuffer(), dst,
+							Sync::WriteAtEndOfPipeWithInterrupt64(m_submit_id, command, dst,
 							                                      value, m_interrupt_event_id,
 							                                      interrupt_context_id);
 						}
 					} else if (with_writeback) {
-						Sync::WriteAtEndOfPipeWithWriteBack64(m_submit_id, CurrentBuffer(), dst,
+						Sync::WriteAtEndOfPipeWithWriteBack64(m_submit_id, command, dst,
 						                                      value);
 					} else {
-						Sync::WriteAtEndOfPipe64(m_submit_id, CurrentBuffer(), dst, value);
+						Sync::WriteAtEndOfPipe64(m_submit_id, command, dst, value);
 					}
 				};
 
@@ -1277,7 +1274,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 							case 0x14:
 							case 0x28:
 								if (((eop_event_type == 0x04 || eop_event_type == 0x28) &&
-								     event_index == 0x05 && !with_interrupt) ||
+								     event_index == 0x05) ||
 								    (event_index == 0x00)) {
 									write64(true);
 									return;
@@ -1302,45 +1299,6 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					case 0x3b:
 						if (eop_event_type == 0x04 && event_index == 0x05 && with_interrupt) {
 							write64(true);
-							return;
-						}
-						break;
-					default: break;
-				}
-			}
-			break;
-		case 0x04:
-			if constexpr (sizeof(T) == sizeof(uint64_t)) {
-				const auto clock = Sync::ReadReferenceClock();
-				auto*      dst   = static_cast<uint64_t*>(dst_gpu_addr);
-				std::memcpy(dst, &clock, sizeof(clock));
-				switch (cache_action) {
-					case 0x00:
-						if ((eop_event_type == 0x04 && event_index == 0x05) ||
-						    (eop_event_type == 0x28 && event_index == 0x00)) {
-							if (with_interrupt) {
-								Sync::WriteAtEndOfPipeWithInterrupt64(
-								    m_submit_id, CurrentBuffer(), dst, clock, m_interrupt_event_id,
-								    interrupt_context_id);
-							} else {
-								Sync::WriteAtEndOfPipeClockCounter(m_submit_id, CurrentBuffer(),
-								                                   dst, clock);
-							}
-							return;
-						}
-						break;
-					case 0x38:
-						if ((eop_event_type == 0x04 &&
-						     (event_index == 0x00 || event_index == 0x05)) ||
-						    (eop_event_type == 0x28 && event_index == 0x00)) {
-							if (with_interrupt) {
-								Sync::WriteAtEndOfPipeWithInterruptWriteBack64(
-								    m_submit_id, CurrentBuffer(), dst, clock, m_interrupt_event_id,
-								    interrupt_context_id);
-							} else {
-								Sync::WriteAtEndOfPipeClockCounterWithWriteBack(
-								    m_submit_id, CurrentBuffer(), dst, clock);
-							}
 							return;
 						}
 						break;
@@ -1377,8 +1335,6 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 }
 
 void CommandProcessor::EmitGlobalBarrier() {
-	CheckBuffer();
-
 	Common::LockGuard lock(m_renderer.GetMutex());
 
 	vk::MemoryBarrier2 barrier {};
@@ -1395,8 +1351,6 @@ void CommandProcessor::EmitGlobalBarrier() {
 }
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {
-	CheckBuffer();
-
 	Sync::TriggerEopEventAtEndOfPipe(CurrentBuffer(), m_interrupt_event_id, interrupt_context_id);
 }
 
@@ -1480,8 +1434,6 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 }
 
 void CommandProcessor::Flip() {
-	CheckBuffer();
-
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::Flip()\n");
 	}
@@ -1495,7 +1447,7 @@ void CommandProcessor::Flip() {
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
-	CheckBuffer();
+	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::Flip()\n"
@@ -1505,7 +1457,6 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	}
 
 	std::memcpy(dst_gpu_addr, &value, sizeof(value));
-	auto& command = CurrentBuffer();
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	Sync::WriteAtEndOfPipeWithFlip32(m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr),
@@ -1516,7 +1467,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action,
                                          void* dst_gpu_addr, uint32_t value) {
-	CheckBuffer();
+	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::FlipWithInterrupt()\n"
@@ -1531,7 +1482,6 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		EXIT("unknown event type\n");
 	}
 	std::memcpy(dst_gpu_addr, &value, sizeof(value));
-	auto& command = CurrentBuffer();
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	Sync::WriteAtEndOfPipeWithInterruptWriteBackFlip32(
@@ -1541,7 +1491,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 }
 
 void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
-	CheckBuffer();
+	auto& command = CurrentBuffer();
 	if (g_current_processor != nullptr) {
 		EXIT("invalid graphics-thread CPU flip preparation\n");
 	}
@@ -1551,9 +1501,10 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 	};
 	ProcessorScope processor_scope(*this);
 
-	m_renderer.GetVideoOut().PrepareFlip(request_id, CurrentBuffer());
+	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
+	GetScheduler().DeferPriorityOperation(
+	    [this, request_id] { m_renderer.GetVideoOut().CompleteFlip(request_id); });
 	GetScheduler().Flush();
-	m_renderer.GetVideoOut().CompleteFlip(request_id);
 }
 
 void CommandProcessor::SynchronizeGpu() {

@@ -58,7 +58,7 @@ std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 
 	EXIT_IF(!vs_input_info.stage);
 	const auto& program   = *vs_input_info.stage.program;
-	const auto& resources = vs_input_info.stage.resources;
+	const auto& resources = *vs_input_info.stage.resources;
 	if (index_offset == 0 &&
 	    program.info.vertex_offset_sgpr >= static_cast<int32_t>(program.user_data_base)) {
 		const auto index =
@@ -456,8 +456,10 @@ struct DrawCallInfo {
 
 RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
                                                  uint32_t color_count, RenderDepthInfo& depth,
-                                                 const std::optional<PreparedBindings>& pixel) {
+                                                 vk::ImageAspectFlags& feedback_aspects,
+                                                 std::span<PreparedBindings* const> stages) {
 	EXIT_IF(colors == nullptr || color_count > RENDER_COLOR_ATTACHMENTS_MAX);
+	feedback_aspects = {};
 	auto&       cache = m_context.GetTextureCache();
 	RenderState state {};
 	state.width                 = std::numeric_limits<uint32_t>::max();
@@ -474,15 +476,6 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		}
 		const auto image_view = cache.FindRenderTarget(target.image_id, target.desc);
 		auto&      image      = cache.GetImage(target.image_id);
-		SetVulkanObjectNameF(m_context.GetGraphics().device, image.backing.image,
-		                     "Kyty.MRT{}.Image[guest=0x{:016x} size=0x{:x} format={}]",
-		                     target.target_slot, image.info.data.address, image.info.data.size,
-		                     static_cast<uint32_t>(image.info.pixel_format));
-		SetVulkanObjectNameF(m_context.GetGraphics().device, image_view,
-		                     "Kyty.MRT{}.View[guest=0x{:016x} mip={} layer={}+{}]",
-		                     target.target_slot, image.info.data.address,
-		                     target.desc.view_info.base_level, target.desc.view_info.base_layer,
-		                     target.desc.view_info.layer_count);
 		EXIT_IF(image.backing.samples != target.desc.info.samples || image_view == nullptr);
 		const auto& view   = target.desc.view_info;
 		const auto  layout = image.binding.is_bound ? vk::ImageLayout::eGeneral
@@ -523,37 +516,30 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 			EXIT("failed to consume HTile clear state\n");
 		}
 		auto& image = cache.GetImage(depth.image_id);
-		SetVulkanObjectNameF(m_context.GetGraphics().device, image.backing.image,
-		                     "Kyty.DepthTarget.Image[guest=0x{:016x} size=0x{:x} format={}]",
-		                     image.info.data.address, image.info.data.size,
-		                     static_cast<uint32_t>(image.info.pixel_format));
-		SetVulkanObjectNameF(m_context.GetGraphics().device, image_view,
-		                     "Kyty.DepthTarget.View[guest=0x{:016x} layer={}+{}]",
-		                     image.info.data.address, depth.desc.view_info.base_layer,
-		                     depth.desc.view_info.layer_count);
 		EXIT_IF(image_view == nullptr || image.backing.samples != depth.desc.info.samples);
-		const bool feedback = depth.depth_write_enable && pixel &&
-		    std::ranges::any_of(pixel->images, [&](const TextureBinding& binding) {
-			    if (binding.image_id != depth.image_id ||
-			        binding.desc.type != TextureCache::BindingType::Texture) {
-				    return false;
-			    }
-			    const auto native =
-			        std::ranges::find(image.views, binding.image_view, &CachedImageView::view);
-			    EXIT_IF(native == image.views.end());
-			    const auto& sampled = native->info;
-			    const auto& target = depth.desc.view_info;
-			    return (sampled.aspect & vk::ImageAspectFlagBits::eDepth) &&
-			           ImageRangeOverlaps(sampled.base_level, sampled.level_count,
-			                              target.base_level, target.level_count) &&
-			           ImageRangeOverlaps(sampled.base_layer, sampled.layer_count,
-			                              target.base_layer, target.layer_count);
-		    });
-		if (feedback && !m_context.GetGraphics().attachment_feedback_loop_enabled) {
+		const auto draw_writes = depth.AttachmentWriteAspects();
+		vk::ImageAspectFlags sampled_aspects;
+		for (const auto* stage: stages) {
+			for (const auto& binding: stage->images) {
+				if (binding.image_id != depth.image_id ||
+				    binding.desc.type != TextureCache::BindingType::Texture) continue;
+				const auto native =
+				    std::ranges::find(image.views, binding.image_view, &CachedImageView::view);
+				EXIT_IF(native == image.views.end());
+				sampled_aspects |= native->info.aspect;
+				feedback_aspects |= DepthFeedbackAspects(draw_writes, depth.desc.view_info,
+				                                         native->info);
+			}
+		}
+		if (feedback_aspects && !m_context.GetGraphics().attachment_feedback_loop_enabled) {
 			EXIT("depth attachment feedback loop is not supported by the host\n");
 		}
-		const auto layout = feedback ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
-		                             : depth_attachment_layout(depth);
+		auto layout = depth_attachment_layout(depth);
+		if (sampled_aspects & ~DepthReadableAspects(layout)) {
+			layout = m_context.GetGraphics().attachment_feedback_loop_enabled
+			             ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
+			             : vk::ImageLayout::eGeneral;
+		}
 		// The attachment store writes even when guest depth/stencil tests do not.
 		const auto access = vk::AccessFlagBits2::eDepthStencilAttachmentRead |
 		                    vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
@@ -686,11 +672,13 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 	        vs_input_info.buffers_num > ShaderVertexInputInfo::RES_MAX);
 
 	// Collect the non-empty guest vertex ranges.
+	std::array<uint64_t, ShaderVertexInputInfo::RES_MAX>          sizes {};
 	std::array<VertexBufferRange, ShaderVertexInputInfo::RES_MAX> ranges {};
 	uint32_t                                                      range_count = 0;
 	for (int i = 0; i < vs_input_info.buffers_num; i++) {
 		const auto& vertex = vs_input_info.buffers[i];
 		const auto  size   = VertexBufferDescriptorSize(vertex, vs_input_info);
+		sizes[i]           = size;
 		if (size == 0) {
 			continue;
 		}
@@ -739,7 +727,7 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 	vk::Buffer null_buffer = nullptr;
 	for (int i = 0; i < vs_input_info.buffers_num; i++) {
 		const auto& vertex = vs_input_info.buffers[i];
-		const auto  size   = VertexBufferDescriptorSize(vertex, vs_input_info);
+		const auto  size   = sizes[i];
 		if (size == 0) {
 			if (null_buffer == nullptr) {
 				null_buffer = cache.GetBuffer(NULL_BUFFER_ID).Handle();
@@ -1210,15 +1198,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                              index_source.guest_element_size);
 	}
 	LogDrawPhase(draw.Name(), "PrepareBindings");
-	GraphicsBindings                 bindings;
+	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
 	uint32_t                         stage_count = 0;
 	for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-		bindings.vertex[i]               = PrepareBindings(state.vertex_info[i].stage);
+		PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
 		descriptor_stages[stage_count++] = &bindings.vertex[i];
 	}
 	if (state.ps_active) {
-		bindings.pixel.emplace(PrepareBindings(state.ps_input_info.stage));
+		if (!bindings.pixel) bindings.pixel.emplace();
+		PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
 		descriptor_stages[stage_count++] = &*bindings.pixel;
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
@@ -1273,9 +1262,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		// Creation failed and was logged; skip the draw so the game continues.
 		return;
 	}
+	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
-	                         bindings.pixel);
+	                         feedback_aspects, stages);
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
@@ -1285,7 +1275,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
-	if (bindings.pixel && !draw.IsIndexed()) {
+	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
@@ -1308,11 +1298,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	SetGraphicsDynamicParams(buffer, vk_buffer, vertex_stages.back(), state.depth_info, rendering,
 	                         pipeline.has_dynamic_color_write);
 	if (m_context.GetGraphics().attachment_feedback_loop_enabled) {
-		vk_buffer.setAttachmentFeedbackLoopEnableEXT(
-		    rendering.depth_stencil_attachment.image_layout ==
-		            vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
-		        ? vk::ImageAspectFlags {vk::ImageAspectFlagBits::eDepth}
-		        : vk::ImageAspectFlags {});
+		vk_buffer.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
 	}
 
 	LogDrawPhase(draw.Name(), "BeginRendering");
