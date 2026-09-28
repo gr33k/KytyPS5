@@ -91,9 +91,9 @@ private:
 	};
 
 	using ImageIds       = InlinePageOwnerList<ImageId, 16>;
-	using ImagePageTable = MultiLevelPageTable<ImageIds, 20, 40, 10>;
+	using ImagePageTable = MultiLevelPageTable<ImageIds, 20, 44, 14>;
 
-	// Callers have validated the nonempty 40-bit range with TryGetPageRange.
+	// Callers have validated the nonempty 44-bit range with TryGetPageRange.
 	template <typename Func>
 	static void ForEachPage(uint64_t address, size_t size, Func&& func) {
 		using FuncReturn = typename std::invoke_result<Func, uint64_t>::type;
@@ -139,7 +139,7 @@ private:
 	                                                ImageId cached);
 	[[nodiscard]] ImageId       ExpandImage(const ImageInfo& info, ImageId source);
 	void                        RefreshImage(ImageId id);
-	void                        MaterializeDccClear(ImageId id, const ImageDesc& desc,
+	void                        MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	                                                uint32_t metadata_base_layer);
 	void                        InitializeImage(ImageId id);
 	[[nodiscard]] TextureTransfer

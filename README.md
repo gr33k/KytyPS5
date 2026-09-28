@@ -11,6 +11,10 @@
 [![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#current-status)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 
+**[Weekly updates](https://github.com/KytyPS5/KytyPS5/discussions/862)** — game progress, recent fixes and ongoing development.
+
+**[Development on Discord](https://discord.gg/UNrkMqGaBg)** — KytyPS5 development.
+
 KytyPS5 is a free and open-source PlayStation 5 emulator written in C++ for Windows and Linux,
 with experimental macOS support. It is based on a heavily modified version of
 [Kyty](https://github.com/InoriRus/Kyty). The project is in active development, and behavior
@@ -72,8 +76,8 @@ or graphical glitches, so please include the version you tested when reporting a
       <img src="docs/screenshots/ps5-02.png" width="300" alt="Demon's Souls running in KytyPS5">
     </td>
     <td align="center">
-      <strong>Hellboy</strong><br>
-      <img src="docs/screenshots/ps5-06.png" width="300" alt="Hellboy running in KytyPS5">
+      <strong>UFC 5</strong><br>
+      <img src="docs/screenshots/ps5-06.png" width="300" alt="UFC 5 running in KytyPS5">
     </td>
   </tr>
 </table>
