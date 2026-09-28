@@ -84,6 +84,20 @@ static std::atomic<uint32_t> g_mrt_state_log_count    = 0;
 
 static std::atomic<uint32_t> g_framebuffer_skip_log_count = 0;
 
+// Always-on draw census: indexed vs auto draws, silent skip reasons, and the
+// last completed draw's target. Cheap (one log per 1000 completed draws) so
+// real-game runs stay at full speed while remaining diagnosable.
+static std::atomic<uint64_t> g_census_index_calls   = 0;
+static std::atomic<uint64_t> g_census_auto_calls    = 0;
+static std::atomic<uint64_t> g_census_empty         = 0;
+static std::atomic<uint64_t> g_census_resolved      = 0;
+static std::atomic<uint64_t> g_census_no_vs         = 0;
+static std::atomic<uint64_t> g_census_topology_fail = 0;
+static std::atomic<uint64_t> g_census_state_fail    = 0;
+static std::atomic<uint64_t> g_census_rectlist_skip = 0;
+static std::atomic<uint64_t> g_census_pipeline_null = 0;
+static std::atomic<uint64_t> g_census_complete      = 0;
+
 static float ConvertPolygonOffsetConstantFactor(float guest_factor, const HW::PolyOffset& offset,
                                                 vk::Format host_depth_format) {
 	if (offset.db_is_float_fmt) {
@@ -589,6 +603,22 @@ static uint32_t DrawColorOutputMask(const HW::Context& ctx) {
 		}
 	}
 	return output_mask;
+}
+
+static void LogStateFailTarget(CommandBuffer& buffer, const DrawCallInfo& draw) {
+	static std::atomic_uint n = 0;
+	if (n.fetch_add(1, std::memory_order_relaxed) % 2000 != 0) {
+		return;
+	}
+	const auto& hw   = buffer.GetRegisters();
+	const auto  mask = DrawColorOutputMask(hw);
+	LOGF("RenderStateFail: #%u %s count=%u color_mask=0x%x targets=[0x%llx,0x%llx,"
+	     "0x%llx,0x%llx]\n",
+	     n.load(std::memory_order_relaxed), draw.Name(), draw.index_count, mask,
+	     static_cast<unsigned long long>(hw.GetRenderTarget(0).base.addr),
+	     static_cast<unsigned long long>(hw.GetRenderTarget(1).base.addr),
+	     static_cast<unsigned long long>(hw.GetRenderTarget(2).base.addr),
+	     static_cast<unsigned long long>(hw.GetRenderTarget(3).base.addr));
 }
 
 enum class CbColorMode : uint8_t {
@@ -1270,6 +1300,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    state.programs);
 	if (pipeline.pipeline == nullptr) {
 		// Creation failed and was logged; skip the draw so the game continues.
+		g_census_pipeline_null.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 	vk::ImageAspectFlags feedback_aspects;
@@ -1349,6 +1380,28 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
+	const auto completed = g_census_complete.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (completed % 1000 == 0) {
+		const auto extent = state.color_count > 0 ? state.color_info[0].Extent() : vk::Extent2D {};
+		LOGF("RenderCensus: idx_calls=%llu auto_calls=%llu complete=%llu (idx_empty=%llu "
+		     "resolved=%llu no_vs=%llu topo_fail=%llu state_fail=%llu rectlist_skip=%llu "
+		     "pipeline_null=%llu) last=%s count=%u colors=%u addr=0x%010llx extent=%ux%u\n",
+		     static_cast<unsigned long long>(g_census_index_calls.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_auto_calls.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(completed),
+		     static_cast<unsigned long long>(g_census_empty.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_resolved.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_no_vs.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_topology_fail.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_state_fail.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_rectlist_skip.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_pipeline_null.load(std::memory_order_relaxed)),
+		     draw.Name(), draw.index_count, state.color_count,
+		     static_cast<uint64_t>(state.color_count > 0
+		                               ? state.color_info[0].desc.info.data.address
+		                               : 0u),
+		     extent.width, extent.height);
+	}
 }
 
 void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
@@ -1357,6 +1410,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	g_census_index_calls.fetch_add(1, std::memory_order_relaxed);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -1367,16 +1421,19 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	Common::LockGuard lock(m_context.GetMutex());
 	if (args.index_count == 0 || args.instance_count == 0) {
+		g_census_empty.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
+		g_census_resolved.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return;
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		g_census_no_vs.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 
@@ -1403,6 +1460,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
 	if (!GetDrawTopology(ucfg, topology)) {
+		g_census_topology_fail.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 
@@ -1441,6 +1499,8 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	                        args.instance_count, args.first_instance};
 	DrawRenderState state {};
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+		g_census_state_fail.fetch_add(1, std::memory_order_relaxed);
+		LogStateFailTarget(buffer, draw);
 		ResetBindings();
 		return;
 	}
@@ -1468,6 +1528,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	g_census_auto_calls.fetch_add(1, std::memory_order_relaxed);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -1478,16 +1539,19 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	Common::LockGuard lock(m_context.GetMutex());
 	if (args.vertex_count == 0 || args.instance_count == 0) {
+		g_census_empty.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
+		g_census_resolved.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return;
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		g_census_no_vs.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 
@@ -1513,11 +1577,14 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
 	if (!GetDrawTopology(ucfg, topology)) {
+		g_census_topology_fail.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return;
 	}
 	DrawRenderState state {};
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+		g_census_state_fail.fetch_add(1, std::memory_order_relaxed);
+		LogStateFailTarget(buffer, draw);
 		ResetBindings();
 		return;
 	}
@@ -1532,6 +1599,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 			     state.ps_input_info.input_num, sh_ctx.GetPs().ps_regs.data_addr,
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
+		g_census_rectlist_skip.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return;
 	}
