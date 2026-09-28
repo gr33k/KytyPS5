@@ -1826,7 +1826,9 @@ int KYTY_SYSV_ABI AvPlayerAddSource(AvPlayerInternal* h, const char* filename) {
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
 	LOGF("\t filename = %s\n", filename);
-	return add_source(h, filename, AvPlayerSourceUnknown);
+	const int rc = add_source(h, filename, AvPlayerSourceUnknown);
+	LOGF("\t [diag] AvPlayerAddSource -> %d\n", rc);
+	return rc;
 }
 int KYTY_SYSV_ABI AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type,
                                       const void* source_details) {
@@ -1849,17 +1851,22 @@ int KYTY_SYSV_ABI AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type,
 }
 int KYTY_SYSV_ABI AvPlayerStreamCount(AvPlayerInternal* h) {
 	PRINT_NAME();
-	return h == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS
-	                    : (h->source == nullptr ? 0 : h->source->StreamCount());
+	const int count =
+	    h == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS
+	                 : (h->source == nullptr ? 0 : h->source->StreamCount());
+	LOGF("\t [diag] AvPlayerStreamCount -> %d\n", count);
+	return count;
 }
 int KYTY_SYSV_ABI AvPlayerGetStreamInfo(AvPlayerInternal* h, uint32_t stream_id, void* info) {
 	PRINT_NAME();
 	if (h == nullptr || info == nullptr) {
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
-	return h->source == nullptr
-	           ? AVPLAYER_ERROR_OPERATION_FAILED
-	           : h->source->Info(stream_id, static_cast<AvPlayerStreamInfo*>(info));
+	const int rc = h->source == nullptr
+	                   ? AVPLAYER_ERROR_OPERATION_FAILED
+	                   : h->source->Info(stream_id, static_cast<AvPlayerStreamInfo*>(info));
+	LOGF("\t [diag] AvPlayerGetStreamInfo(%u) -> %d\n", stream_id, rc);
+	return rc;
 }
 int KYTY_SYSV_ABI AvPlayerGetStreamInfoEx(AvPlayerInternal* h, uint32_t stream_id, void* info) {
 	PRINT_NAME();
