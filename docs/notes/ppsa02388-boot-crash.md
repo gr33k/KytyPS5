@@ -97,3 +97,32 @@ Black-screen forensics (draw census + flip-buffer hashing + VRAM writeback):
 - Open: why the game never issues its final composite (waiting on streaming
   from slow Z:? 30-min soak test running), and whether the offscreen scene
   itself is black (needs synchronous VRAM readback to confirm).
+
+## Update 2026-09-29 (evening): black screen root narrowed, working reference
+
+- Videos verified to contain real bright pictures (decoded on PC: Focus logo
+  with embers, SpeedTree/Wwise/Quixel credits). Black screen during playback
+  is a genuine display bug, not dark content.
+- Flip-targeted fullscreen quads (4 verts, opaque, full 3840x2160 viewport,
+  1 sampled texture, real vertex data incl. positions) complete regularly in
+  boot, video, and menu phases — but output black. Points at black sampled
+  textures or zero fragment output, not missing draws.
+- Texture null-descriptor rate is only ~4% (normal unused slots); descriptor
+  fetch and pipeline creation are healthy. Validation layer is clean apart
+  from 2 benign depth-compare sampler warnings.
+- Present path serves a single stable flip image per buffer (no
+  thrash/aliasing); flip guest memory stays all-zero all run.
+- Scene target format mapped: 2560x1440 R16G16B16A16Uint MRT-4, lighting in
+  B10G11R11Ufloat, final 3840x2160 R8G8B8A8 post buffer; ~300k compute
+  dispatches run the full post chain. Nothing reaches the flip buffers.
+- RenderDoc capture is blocked on this machine: its layer caps devices to
+  Vulkan 1.2 and hides `fragmentShaderBarycentric`, failing device selection
+  (workarounds staged on `diag/plague-black-screen`, device still rejected on
+  apiVersion). GTX 970 present as second GPU; --rd selected it and device-lost.
+- All session diagnostics preserved on branch `diag/plague-black-screen`
+  (draw/compute census, format survey, null-rate, alias tracking, RD
+  workarounds); main kept clean.
+- Surviving hypotheses: (a) scene/post shaders output zero (miscompilation or
+  black sampled textures cache-wide), (b) nothing rasterizes despite healthy
+  state (vertex-output/depth). Next: fragment-output bisection (e.g. clear-
+  color/statistics probe) or external capture once RenderDoc attaches.
