@@ -124,6 +124,9 @@ public:
 	struct GraphicsPrograms {
 		std::array<ShaderProgram, 3> vertex;
 		ShaderProgram pixel;
+		// Set when the draw must be skipped (e.g. mesh shading with no host
+		// support): the game continues without that geometry.
+		bool skip_draw = false;
 
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};

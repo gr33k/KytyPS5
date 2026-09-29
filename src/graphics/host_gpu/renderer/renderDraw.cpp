@@ -95,6 +95,7 @@ static std::atomic<uint64_t> g_census_no_vs         = 0;
 static std::atomic<uint64_t> g_census_topology_fail = 0;
 static std::atomic<uint64_t> g_census_state_fail    = 0;
 static std::atomic<uint64_t> g_census_rectlist_skip = 0;
+static std::atomic<uint64_t> g_census_mesh_skip      = 0;
 static std::atomic<uint64_t> g_census_pipeline_null = 0;
 static std::atomic<uint64_t> g_census_complete      = 0;
 
@@ -1169,6 +1170,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable) {
+	if (state.programs.skip_draw) {
+		g_census_mesh_skip.fetch_add(1, std::memory_order_relaxed);
+		ResetBindings();
+		return;
+	}
 	auto& ucfg = buffer.GetUserConfig();
 	const auto vertex_stages =
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
@@ -1356,7 +1362,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		const auto extent = state.color_count > 0 ? state.color_info[0].Extent() : vk::Extent2D {};
 		LOGF("RenderCensus: idx_calls=%llu auto_calls=%llu complete=%llu (idx_empty=%llu "
 		     "resolved=%llu no_vs=%llu topo_fail=%llu state_fail=%llu rectlist_skip=%llu "
-		     "pipeline_null=%llu) last=%s count=%u colors=%u addr=0x%010llx extent=%ux%u\n",
+		     "mesh_skip=%llu pipeline_null=%llu) last=%s count=%u colors=%u addr=0x%010llx "
+		     "extent=%ux%u\n",
 		     static_cast<unsigned long long>(g_census_index_calls.load(std::memory_order_relaxed)),
 		     static_cast<unsigned long long>(g_census_auto_calls.load(std::memory_order_relaxed)),
 		     static_cast<unsigned long long>(completed),
@@ -1366,6 +1373,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		     static_cast<unsigned long long>(g_census_topology_fail.load(std::memory_order_relaxed)),
 		     static_cast<unsigned long long>(g_census_state_fail.load(std::memory_order_relaxed)),
 		     static_cast<unsigned long long>(g_census_rectlist_skip.load(std::memory_order_relaxed)),
+		     static_cast<unsigned long long>(g_census_mesh_skip.load(std::memory_order_relaxed)),
 		     static_cast<unsigned long long>(g_census_pipeline_null.load(std::memory_order_relaxed)),
 		     draw.Name(), draw.index_count, state.color_count,
 		     static_cast<uint64_t>(state.color_count > 0

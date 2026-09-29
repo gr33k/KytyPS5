@@ -581,7 +581,18 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
-	if (mesh_active) {
+	bool       skip_draw  = false;
+	if (mesh_active && !m_graphics.mesh_shader_enabled) {
+		// No host mesh support (e.g. pre-RDNA GPUs): flag the draw for skipping
+		// so the game continues without that geometry instead of aborting.
+		static std::atomic_bool logged = false;
+		if (!logged.exchange(true, std::memory_order_relaxed)) {
+			std::printf("Warning: mesh draws are not supported by the host; "
+			            "continuing without mesh geometry\n");
+		}
+		skip_draw = true;
+	}
+	if (mesh_active && !skip_draw) {
 		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
 		mesh.host_subgroup_size = m_graphics.subgroup_size;
@@ -636,6 +647,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
 	GraphicsPrograms  result;
+	result.skip_draw = skip_draw;
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 	}
