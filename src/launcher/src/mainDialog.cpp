@@ -3,6 +3,7 @@
 #include "configuration.h"
 #include "configurationItem.h"
 #include "configurationListWidget.h"
+#include "gameContent.h"
 #include "launcherTheme.h"
 #include "patchesDialog.h"
 #include "trophyViewerDialog.h"
@@ -593,7 +594,7 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	}
 
 	QString game = info.basedir;
-	if (!info.elf.isEmpty()) {
+	if (!info.elf.isEmpty() && !GameContent::IsArchive(info.basedir)) {
 		game = QDir(info.basedir).filePath(info.elf);
 	}
 	args << "--game" << game;
@@ -929,10 +930,10 @@ void MainDialogPrivate::Update() {
 
 	if (item != nullptr) {
 		const auto& info = item->GetInfo();
+		auto        dir  = info.basedir;
+		run_enabled      = !dir.isEmpty() && (QDir(dir).exists() || GameContent::IsArchive(dir));
 		if (!info.basedir.isEmpty() && QDir(info.basedir).exists()) {
 			folder_open = true;
-		} else {
-			run_enabled = false;
 		}
 		if (!info.name.isEmpty()) {
 			const QString name   = info.name.toHtmlEscaped();

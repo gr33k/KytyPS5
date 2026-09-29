@@ -1830,6 +1830,14 @@ public:
     m_physical_device.getProperties2(&properties);
     return subgroup.subgroupSize;
   }
+  // A consumer GPU may lack the production rasterization features the fragment
+  // cases need. The compute cases still run on such a device, so the harness reports
+  // the capability instead of failing the whole binary before the first case.
+  [[nodiscard]] bool RasterizationSupported() const {
+    return m_rasterization_supported;
+  }
+  void SkipRasterizationCases(u32 count) { m_skipped_cases += count; }
+  [[nodiscard]] u32 SkippedCaseCount() const { return m_skipped_cases; }
   [[nodiscard]] GraphicContext &RuntimeContext() {
     EnsureRuntimeContext();
     return m_runtime_context;
@@ -6169,7 +6177,11 @@ public:
                   !texture_cache.GetImage(fault_a_image).IsTracked() &&
                   !texture_cache.GetImage(fault_b_image).IsTracked() &&
                   texture_cache.GetImage(fault_a_image).IsMaybeCpuDirty() &&
-                  texture_cache.GetImage(fault_b_image).IsMaybeCpuDirty(),
+                  texture_cache.GetImage(fault_b_image).IsMaybeCpuDirty() &&
+                  texture_cache.IsRegionGpuModified(base + 0x8000,
+                                                    sizeof(fault_a)) &&
+                  texture_cache.IsRegionGpuModified(base + 0x8010,
+                                                    sizeof(fault_b)),
               "a byte-disjoint CPU write discarded authoritative images");
       const auto retracked_a = texture_cache.FindImage(fault_a_desc);
       const auto retracked_b = texture_cache.FindImage(fault_b_desc);
@@ -7288,12 +7300,16 @@ public:
               "failed to create the overlapping dirty Buffer owner");
       exact_buffer.first->Fill(exact_buffer.second, sizeof(uint32_t),
                                dirty_sibling_value);
+      texture_cache.InvalidateMemoryFromGPU(base + exact_image_offset,
+                                            sizeof(uint32_t));
       Libs::Graphics::Buffer exact_download(
           m_runtime_context, scheduler, MemoryUsage::DeviceLocal,
           base + exact_image_offset, AllFlags, sizeof(uint32_t));
       Require(name, "overlapping buffer ownership rejection",
               !texture_cache.FindImageFromRange(base + exact_image_offset,
                                                 sizeof(uint32_t)) &&
+                  !TextureCacheTestAccess::TryDownload(texture_cache,
+                                                       exact_image) &&
                   !BufferCacheTestAccess::SynchronizeBufferFromImage(
                       resources.GetBufferCache(), exact_download,
                       base + exact_image_offset, sizeof(uint32_t)),
@@ -7342,17 +7358,31 @@ public:
       Require(name, "GPU image range validity",
               texture_cache.FindImageFromRange(
                   gc_image_desc_a.info.data.address,
-                  gc_image_desc_a.info.data.size) == gc_images[0],
+                  gc_image_desc_a.info.data.size) == gc_images[0] &&
+                  texture_cache.IsRegionGpuModified(
+                      gc_image_desc_a.info.data.address,
+                      gc_image_desc_a.info.data.size),
               "FindImageFromRange rejected a clean GPU-current image");
-      texture_cache.GetImage(gc_images[0])
-          .InvalidateCpuWrite(gc_image_desc_a.info.data.address,
-                              gc_image_desc_a.info.data.size);
+      auto &gc_native = texture_cache.GetImage(gc_images[0]);
+      texture_cache.InvalidateMemory(gc_image_desc_a.info.data.address,
+                                     gc_image_desc_a.info.data.size);
       Require(
           name, "CPU-dirty image range validity",
           !texture_cache.FindImageFromRange(gc_image_desc_a.info.data.address,
-                                            gc_image_desc_a.info.data.size),
-          "FindImageFromRange accepted CPU-dirty native contents");
+                                            gc_image_desc_a.info.data.size) &&
+              !TextureCacheTestAccess::TryDownload(texture_cache, gc_images[0]) &&
+              !texture_cache.IsRegionGpuModified(
+                  gc_image_desc_a.info.data.address,
+                  gc_image_desc_a.info.data.size) &&
+              gc_native.IsDefinitelyCpuDirty() && gc_native.IsGpuModified() &&
+              !gc_native.IsTracked(),
+          "CPU writes did not supersede native contents while retaining GPU history");
       texture_cache.MarkGpuWritten(gc_images[0]);
+      Require(name, "GPU image reacquisition",
+              texture_cache.IsRegionGpuModified(
+                  gc_image_desc_a.info.data.address,
+                  gc_image_desc_a.info.data.size),
+              "a new GPU write did not reclaim image authority");
       for (size_t index = 0; index < gc_image_offsets.size(); index++) {
         Libs::LibKernel::Memory::WriteBacking(base + gc_image_offsets[index],
                                               &gc_stale_values[index],
@@ -7440,11 +7470,33 @@ public:
       TextureCacheTestAccess::SetLinearReadback(texture_cache, true);
       const auto submit_readback_image =
           texture_cache.FindImage(submit_readback_desc);
+      auto submit_buffer = resources.GetBufferCache().ObtainBuffer(
+          submit_readback_desc.info.data.address,
+          submit_readback_desc.info.data.size, true);
+      Require(name, "linear submit dirty buffer allocation",
+              submit_buffer.first != nullptr,
+              "failed to create the older GPU Buffer contents");
+      submit_buffer.first->Fill(submit_buffer.second, sizeof(uint32_t),
+                                submit_readback_stale);
+      texture_cache.InvalidateMemoryFromGPU(
+          submit_readback_desc.info.data.address,
+          submit_readback_desc.info.data.size);
+      (void)texture_cache.FindTexture(submit_readback_image,
+                                      submit_readback_desc);
       Require(name, "linear submit image clear",
               texture_cache.ClearImageFromBuffer(
                   command, submit_readback_desc.info.data.address,
                   submit_readback_desc.info.data.size, submit_readback_value),
               "failed to create GPU-current linear storage contents");
+      Require(name, "older buffer permits current image readback",
+              resources.GetBufferCache().HasGpuDirtyBytes(
+                  submit_readback_desc.info.data.address,
+                  submit_readback_desc.info.data.size) &&
+                  texture_cache.FindImageFromRange(
+                      submit_readback_desc.info.data.address,
+                      submit_readback_desc.info.data.size) ==
+                      submit_readback_image,
+              "historical GPU Buffer dirtiness rejected newer image contents");
       TextureCacheTestAccess::TrackDownload(texture_cache,
                                             submit_readback_image);
       Libs::LibKernel::Memory::WriteBacking(
@@ -8536,6 +8588,121 @@ public:
             Libs::LibKernel::Memory::KernelReleaseDirectMemory(
                 direct_offset, allocation_size) == 0,
             "color direct-memory allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  void CheckRenderExecutorColor1DArrayDiscovery() {
+    constexpr const char *name = "RenderExecutorColor1DArrayDiscovery";
+    constexpr uintptr_t base = 0x0000000203a00000ull;
+    constexpr uint32_t width = 512;
+    constexpr uint32_t height = 1;
+    constexpr uint32_t bytes_per_element = 4;
+    constexpr uint32_t first_slice = 2;
+    constexpr uint32_t last_slice = 5;
+    constexpr uint32_t image_layers = last_slice + 1;
+    constexpr uint32_t view_layers = last_slice - first_slice + 1;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    EnsureRuntimeContext();
+
+    const auto pitch = TileGetRenderTargetPitch(width, bytes_per_element, 0);
+    TileSizeAlign layout{};
+    Require(name, "tile layout",
+            pitch == width &&
+                TileGetRenderTargetSize(width, height, pitch,
+                                        bytes_per_element, layout, 0) &&
+                layout.size == 0x40000 &&
+                layout.align == allocation_alignment,
+            "1D-array render-target layout is unavailable");
+    const auto allocation_size = layout.size * image_layers;
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "1D-array color direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "1D-array color fixed mapping failed");
+    std::memset(mapped, 0, allocation_size);
+
+    {
+      RenderContext context(m_runtime_context);
+      auto &scheduler = context.GetCommandScheduler();
+      HW::Context registers{};
+      HW::UserConfig user_config{};
+      HW::Shader shaders{};
+      registers.SetColorBase(0, {.addr = base});
+      registers.SetColorInfo(
+          0, {.format = Prospero::ChannelLayout::k8_8_8_8,
+              .channel_type = Prospero::ChannelType::kSrgb,
+              .channel_order = Prospero::ChannelOrder::kStandard});
+      registers.SetColorView(
+          0, {.base_array_slice_index = first_slice,
+              .last_array_slice_index = last_slice});
+      registers.SetColorAttrib2(0, {.height = height - 1, .width = width - 1});
+      registers.SetColorAttrib3(0,
+                                {.tile_mode = Prospero::TileMode::kRenderTarget,
+                                 .dimension = 0,
+                                 .metadata_pipe_aligned = true});
+      registers.SetRenderTargetMask(0x0f);
+      scheduler.Begin(registers, user_config, shaders);
+
+      auto &resources = context;
+      auto &texture_cache = resources.GetTextureCache();
+      auto &executor = context.GetRenderExecutor();
+      resources.MapMemory(base, allocation_size);
+
+      RenderColorInfo color{};
+      RenderExecutorTestAccess::ResolveRenderColorTarget(
+          executor, scheduler.Current(), color, 0);
+      const auto attachment =
+          texture_cache.FindRenderTarget(color.image_id, color.desc);
+      const auto &image = texture_cache.GetImage(color.image_id);
+      RenderDepthInfo no_depth{};
+      const auto rendering = RenderExecutorTestAccess::AcquireRenderTargets(
+          executor, scheduler.Current(), &color, 1, no_depth);
+      scheduler.Current().BeginRendering(rendering);
+      scheduler.Current().EndRendering();
+      Require(
+          name, "captured 1D-array target",
+          color.image_id && attachment != nullptr &&
+              rendering.color_attachments[0].image_view == attachment &&
+              color.guest_array_layer == first_slice &&
+              color.desc.info.type == Prospero::ImageType::kColor1D &&
+              color.desc.info.extent == vk::Extent3D{width, height, 1} &&
+              color.desc.info.resources == ImageSubresources{1, image_layers} &&
+              color.desc.info.pitch == pitch &&
+              color.desc.info.data.size == allocation_size &&
+              color.desc.info.mip_layout[0].offset == 0 &&
+              color.desc.info.mip_layout[0].size == allocation_size &&
+              color.desc.view_info.type == vk::ImageViewType::e1DArray &&
+              color.desc.view_info.base_layer == first_slice &&
+              color.desc.view_info.layer_count == view_layers &&
+              image.backing.image_type == vk::ImageType::e1D &&
+              image.backing.layers == image_layers &&
+              rendering.width == width && rendering.height == height &&
+              rendering.num_layers == view_layers &&
+              rendering.num_color_attachments == 1,
+          "SDK dimension=0 slice range did not create a Vulkan 1D-array "
+          "attachment view");
+
+      RenderExecutorTestAccess::ResetBindings(executor);
+      resources.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "1D-array color direct mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "1D-array color direct-memory allocation release failed");
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
@@ -9691,7 +9858,7 @@ public:
       std::memset(mapped, 0, allocation_size);
       for (uint32_t face = 0; face < layers; face++) {
         const auto depth = depth_at(face, false);
-        for (const auto address : {base, ordinary_address}) {
+        for (const auto address : {static_cast<uint64_t>(base), ordinary_address}) {
           std::memcpy(reinterpret_cast<void *>(address + face * 0x100),
                       &depth, sizeof(depth));
         }
@@ -15885,6 +16052,9 @@ public:
   }
 
 private:
+  bool m_rasterization_supported = true;
+  u32   m_skipped_cases          = 0;
+
   RenderContext &Renderer() {
     EXIT_IF(m_renderer == nullptr);
     return *m_renderer;
@@ -15916,8 +16086,8 @@ private:
     m_runtime_context.physical_device_memory_properties = m_memory_properties;
     m_runtime_context.queue_family = m_queue_family;
     m_runtime_context.queue = m_queue;
-    m_runtime_context.attachment_feedback_loop_enabled = true;
-    m_runtime_context.provoking_vertex_last_enabled = true;
+    m_runtime_context.attachment_feedback_loop_enabled = m_rasterization_supported;
+    m_runtime_context.provoking_vertex_last_enabled = m_rasterization_supported;
     const vk::PhysicalDeviceImageFormatInfo2 block_texel_view_info{
         .format = vk::Format::eBc1RgbaUnormBlock,
         .type = vk::ImageType::e2D,
@@ -16077,14 +16247,19 @@ private:
             "image view minimum LOD is not supported");
     Require("VulkanHarness", "graphics", available_features12.shaderOutputLayer == true,
             "vertex layer output is not supported");
-    Require("VulkanHarness", "graphics", available_features.fillModeNonSolid &&
-                available_features.tessellationShader &&
-                available_depth_clip.depthClipEnable && available_clip_control.depthClipControl &&
-                available_color_write.colorWriteEnable &&
-                available_feedback_layout.attachmentFeedbackLoopLayout &&
-                available_feedback_dynamic.attachmentFeedbackLoopDynamicState &&
-                available_provoking_vertex.provokingVertexLast,
-            "production rasterization features are not supported");
+    m_rasterization_supported = available_features.fillModeNonSolid &&
+                                available_features.tessellationShader &&
+                                available_depth_clip.depthClipEnable &&
+                                available_clip_control.depthClipControl &&
+                                available_color_write.colorWriteEnable &&
+                                available_feedback_layout.attachmentFeedbackLoopLayout &&
+                                available_feedback_dynamic.attachmentFeedbackLoopDynamicState &&
+                                available_provoking_vertex.provokingVertexLast;
+    if (!m_rasterization_supported) {
+      std::printf(
+          "[host]    ProductionRasterization   unavailable, rasterization cases "
+          "will be skipped\n");
+    }
 
     float priority = 1.0f;
     vk::DeviceQueueCreateInfo queue_info{};
@@ -16116,27 +16291,33 @@ private:
     vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives{};
     derivatives.pNext = &device_features13;
     derivatives.computeDerivativeGroupQuads = true;
+    // Requesting a feature the device does not support fails device creation, so the
+    // rasterization feature chain is only chained in when every part is available.
     vk::PhysicalDeviceDepthClipEnableFeaturesEXT depth_clip{};
-    depth_clip.pNext = &derivatives;
-    depth_clip.depthClipEnable = true;
     vk::PhysicalDeviceDepthClipControlFeaturesEXT clip_control{};
-    clip_control.pNext = &depth_clip;
-    clip_control.depthClipControl = true;
     vk::PhysicalDeviceColorWriteEnableFeaturesEXT color_write{};
-    color_write.pNext = &clip_control;
-    color_write.colorWriteEnable = true;
     vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT feedback_layout{};
-    feedback_layout.pNext = &color_write;
-    feedback_layout.attachmentFeedbackLoopLayout = true;
     vk::PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT feedback_dynamic{};
-    feedback_dynamic.pNext = &feedback_layout;
-    feedback_dynamic.attachmentFeedbackLoopDynamicState = true;
     vk::PhysicalDeviceProvokingVertexFeaturesEXT provoking_vertex{};
-    provoking_vertex.pNext = &feedback_dynamic;
-    provoking_vertex.provokingVertexLast = available_provoking_vertex.provokingVertexLast;
+    if (m_rasterization_supported) {
+      depth_clip.pNext = &derivatives;
+      depth_clip.depthClipEnable = true;
+      clip_control.pNext = &depth_clip;
+      clip_control.depthClipControl = true;
+      color_write.pNext = &clip_control;
+      color_write.colorWriteEnable = true;
+      feedback_layout.pNext = &color_write;
+      feedback_layout.attachmentFeedbackLoopLayout = true;
+      feedback_dynamic.pNext = &feedback_layout;
+      feedback_dynamic.attachmentFeedbackLoopDynamicState = true;
+      provoking_vertex.pNext = &feedback_dynamic;
+      provoking_vertex.provokingVertexLast = available_provoking_vertex.provokingVertexLast;
+    }
     vk::PhysicalDeviceImageViewMinLodFeaturesEXT min_lod{};
-    min_lod.pNext = &provoking_vertex;
     min_lod.minLod = true;
+    min_lod.pNext = m_rasterization_supported
+                        ? static_cast<void *>(&provoking_vertex)
+                        : static_cast<void *>(&derivatives);
     device_info.pNext = &min_lod;
     vk::PhysicalDeviceFeatures device_features{};
     device_features.shaderStorageImageWriteWithoutFormat = true;
@@ -16144,22 +16325,26 @@ private:
     device_features.sampleRateShading = true;
     device_features.shaderInt64 = true;
     device_features.shaderFloat64 = available_features.shaderFloat64;
-    device_features.fillModeNonSolid = true;
-    device_features.tessellationShader = true;
+    device_features.fillModeNonSolid = m_rasterization_supported;
+    device_features.tessellationShader = m_rasterization_supported;
     device_info.pEnabledFeatures = &device_features;
-    constexpr const char *device_extensions[] = {
+    std::vector<const char *> device_extensions{
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
         VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME,
         VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
-        VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,
-        VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
-        VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME,
-        VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME,
-        VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME,
-        VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME,
         VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME};
-    device_info.enabledExtensionCount = std::size(device_extensions);
-    device_info.ppEnabledExtensionNames = device_extensions;
+    if (m_rasterization_supported) {
+      device_extensions.push_back(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+      device_extensions.push_back(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+      device_extensions.push_back(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
+      device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
+      device_extensions.push_back(
+          VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
+      device_extensions.push_back(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+    }
+    device_info.enabledExtensionCount =
+        static_cast<uint32_t>(device_extensions.size());
+    device_info.ppEnabledExtensionNames = device_extensions.data();
     RequireVk("VulkanHarness", "dispatch",
               m_physical_device.createDevice(&device_info, nullptr, &m_device),
               "vkCreateDevice");
@@ -16647,6 +16832,10 @@ void RunCase(VulkanHarness *vulkan, const TestCase &test) {
 }
 
 void RunGraphicsCase(VulkanHarness *vulkan, const GraphicsCase &test) {
+  if (vulkan != nullptr && !vulkan->RasterizationSupported()) {
+    vulkan->SkipRasterizationCases(1);
+    return;
+  }
   auto compiled = CompileFragmentCase(test);
   auto actual = vulkan->RenderFragment(test, compiled);
   CompareGraphicsWords(test, actual);
@@ -17836,15 +18025,22 @@ TestCase ScalarSaveExecOps() {
   AppendStoreSgpr(&code, 253, 12);
   AppendEnd(&code);
 
-  return {"ScalarSaveExecOps",
-          code,
-          {},
-          {1, 0, 1, 0, 0xffffffffu, 0xffffffffu, 0xffffffffu,
-           3, 0xffffffffu, 3, 2, 0xffffffffu, 1},
-          {O::S_MOV_B32, O::S_AND_SAVEEXEC_B64, O::S_ORN2_SAVEEXEC_B64,
-           O::S_ANDN1_SAVEEXEC_B64, O::S_AND_SAVEEXEC_B32,
-           O::S_ANDN1_SAVEEXEC_B32, O::S_MOV_B64, O::V_MOV_B32,
-           O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+  TestCase test;
+  test.name = "ScalarSaveExecOps";
+  test.code = code;
+  // A full wave enters with EXEC set for all 64 lanes, so the two saved EXEC
+  // pairs are 0xffffffff/0xffffffff rather than the 1/0 a single-invocation
+  // dispatch would report.
+  test.expected = {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
+                   0xffffffffu, 0xffffffffu, 0xffffffffu, 3, 0xffffffffu,
+                   3, 2, 0xffffffffu, 1};
+  test.opcodes = {O::S_MOV_B32, O::S_AND_SAVEEXEC_B64, O::S_ORN2_SAVEEXEC_B64,
+                  O::S_ANDN1_SAVEEXEC_B64, O::S_AND_SAVEEXEC_B32,
+                  O::S_ANDN1_SAVEEXEC_B32, O::S_MOV_B64, O::V_MOV_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.compute_info.threads_num[0] = 64;
+  test.has_compute_info = true;
+  return test;
 }
 
 TestCase ScalarOrn2SaveexecUsesSourceOrNotExec() {
@@ -17864,12 +18060,18 @@ TestCase ScalarOrn2SaveexecUsesSourceOrNotExec() {
   AppendStoreSgpr(&code, 253, 4);
   AppendEnd(&code);
 
-  return {"ScalarOrn2SaveexecUsesSourceOrNotExec",
-          code,
-          {},
-          {0x0000000cu, 0x80000000u, 0xfffffff3u, 0x7fffffffu, 1},
-          {O::S_MOV_B32, O::S_ORN2_SAVEEXEC_B64, O::S_MOV_B64, O::V_MOV_B32,
-           O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+  TestCase test;
+  test.name = "ScalarOrn2SaveexecUsesSourceOrNotExec";
+  test.code = code;
+  test.expected = {0x0000000cu, 0x80000000u, 0xfffffff3u, 0x7fffffffu, 1};
+  test.opcodes = {O::S_MOV_B32, O::S_ORN2_SAVEEXEC_B64, O::S_MOV_B64, O::V_MOV_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  // The case reads a whole 64-bit EXEC mask, so it needs a populated subgroup.
+  // A 1x1x1 dispatch leaves OpGroupNonUniformBallot with a single invocation
+  // and every lane above zero reads back as zero.
+  test.compute_info.threads_num[0] = 64;
+  test.has_compute_info = true;
+  return test;
 }
 
 TestCase ScalarOrn2SaveexecB32(u32 wave_size, u32 threads) {
@@ -35235,6 +35437,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     vulkan.CheckRasterization(false);
     vulkan.CheckRenderExecutorColorDiscovery();
+    vulkan.CheckRenderExecutorColor1DArrayDiscovery();
     vulkan.CheckRenderExecutorColorVolumeDiscovery();
     vulkan.CheckRenderExecutorColorMetadataClear();
     vulkan.CheckSampledDccClear();
@@ -35338,6 +35541,12 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, VectorReadlaneSelectsTwoKeysWithinWave());
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--rt1d-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckRenderExecutorColorDiscovery();
+    vulkan.CheckRenderExecutorColor1DArrayDiscovery();
+    return 0;
+  }
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
   if (argc == 2 && std::strcmp(argv[1], "--reverse-rt-death") == 0) {
     RunReverseRenderTargetDeathCase();
@@ -35402,14 +35611,21 @@ int main(int argc, char **argv) {
     return 2;
   }
   VulkanHarness vulkan;
+  // Keep compute and host checks running when rasterization features are missing.
+  const bool rasterization = vulkan.RasterizationSupported();
+  bool skipped_device_checks = false;
   CheckRenderTargetFormatContract();
   CheckSampledColorViews();
   CheckImageTransitionState(vulkan.RuntimeRenderer());
   CheckSampledDepthResource();
   CheckDepthTextureEncoding();
   vulkan.CheckSamplerBorderColors();
-  vulkan.CheckComparisonDepthTexture();
-  vulkan.CheckRasterization(true);
+  if (rasterization) {
+    vulkan.CheckComparisonDepthTexture();
+    vulkan.CheckRasterization(true);
+  } else {
+    skipped_device_checks = true;
+  }
   CheckBasicStorageTextureDescriptor();
   CheckStorageTextureLinearUploadLayout();
   CheckStorageTextureDepthTileUploadLayout();
@@ -35433,6 +35649,8 @@ int main(int argc, char **argv) {
   CheckShaderRecompilerFatalContracts();
   CheckDepthFeedbackAspects();
   VulkanHarness vulkan;
+  const bool rasterization = vulkan.RasterizationSupported();
+  bool skipped_device_checks = false;
 #endif
   CheckImageSamplerSpecialization();
   CheckResourcePlanHandoff();
@@ -35472,28 +35690,33 @@ int main(int argc, char **argv) {
   vulkan.CheckSchedulerTimeline();
   vulkan.CheckHostImageAllocation();
   vulkan.CheckDescriptorHeapLargeSet();
-  vulkan.CheckGraphicsPushConstantBank();
   vulkan.CheckGpuMappedRangeLifecycle();
   vulkan.CheckStreamBufferRing();
   vulkan.CheckGpuTilerCpuParity();
   vulkan.CheckNativeIndirectDispatch();
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-  vulkan.CheckRenderExecutorColorDiscovery();
-  vulkan.CheckRenderExecutorColorVolumeDiscovery();
-  vulkan.CheckRenderExecutorColorMetadataClear();
-  vulkan.CheckSampledDccClear();
-  vulkan.CheckRenderExecutorColorStandardTileDiscovery();
-  vulkan.CheckRenderExecutorColorDepthTileDiscovery();
-  vulkan.CheckRenderExecutorStencilBindingDiscovery();
   vulkan.CheckUnifiedTextureCacheFlow();
-  vulkan.CheckBgra16Readback();
-  vulkan.CheckRasterization(false);
-  vulkan.CheckRasterization(false, true);
-  vulkan.CheckBufferCacheDirtyGarbageCollection();
-#endif
   vulkan.CheckUnifiedImageViewCache();
   vulkan.CheckPackedTextureComponents();
   vulkan.CheckCubeFaceStorageExpansion();
+  if (rasterization) {
+    vulkan.CheckGraphicsPushConstantBank();
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    vulkan.CheckRenderExecutorColorDiscovery();
+    vulkan.CheckRenderExecutorColor1DArrayDiscovery();
+    vulkan.CheckRenderExecutorColorVolumeDiscovery();
+    vulkan.CheckRenderExecutorColorMetadataClear();
+    vulkan.CheckSampledDccClear();
+    vulkan.CheckRenderExecutorColorStandardTileDiscovery();
+    vulkan.CheckRenderExecutorColorDepthTileDiscovery();
+    vulkan.CheckRenderExecutorStencilBindingDiscovery();
+    vulkan.CheckBgra16Readback();
+    vulkan.CheckRasterization(false);
+    vulkan.CheckRasterization(false, true);
+    vulkan.CheckBufferCacheDirtyGarbageCollection();
+#endif
+  } else {
+    skipped_device_checks = true;
+  }
   const auto tests = MakeCases();
   const auto graphics_tests = MakeGraphicsCases();
   CheckOpcodeCoverage(tests, graphics_tests);
@@ -35504,6 +35727,15 @@ int main(int argc, char **argv) {
     RunGraphicsCase(&vulkan, test);
   }
   vulkan.CheckGpuCommandLane();
+  if (skipped_device_checks) {
+    std::printf(
+        "ShaderRecompilerComputeTests: device rasterization checks skipped, this "
+        "device does not support the production rasterization features\n");
+  }
+  if (vulkan.SkippedCaseCount() > 0) {
+    std::printf("ShaderRecompilerComputeTests: %u graphics cases skipped\n",
+                vulkan.SkippedCaseCount());
+  }
   std::printf("ShaderRecompilerComputeTests: all cases passed\n");
   return 0;
 }
