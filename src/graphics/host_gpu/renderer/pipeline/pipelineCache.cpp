@@ -231,8 +231,24 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 
-		const auto module = CompileSPV(result.spirv, device);
-		EXIT_IF(module == nullptr);
+		vk::ShaderModuleCreateInfo module_info {};
+		module_info.codeSize = result.spirv.size() * sizeof(uint32_t);
+		module_info.pCode    = result.spirv.data();
+		vk::ShaderModule module = nullptr;
+		const auto module_result = device.createShaderModule(&module_info, nullptr, &module);
+		if (module_result != vk::Result::eSuccess) {
+			// Mesh shaders fail here without host mesh support; leave the module
+			// null so the draw is skipped downstream. Anything else is fatal.
+			if (options.stage != ShaderType::Mesh) {
+				RequireVulkanSuccess(module_result, "create SPIR-V shader module");
+			}
+			static std::atomic_bool logged = false;
+			if (!logged.exchange(true, std::memory_order_relaxed)) {
+				LOGF("Mesh SPIR-V module rejected by host (%s); mesh draws will be skipped\n",
+				     vk::to_string(module_result).c_str());
+			}
+		}
+		EXIT_IF(module == nullptr && options.stage != ShaderType::Mesh);
 		if (options.dump_ir) {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
