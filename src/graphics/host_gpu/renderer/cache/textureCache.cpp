@@ -1643,6 +1643,14 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 	CommitGpuWrite(image);
 }
 
+uint32_t TextureCache::CountImagesInRegion(uint64_t address, uint64_t size) const {
+	uint32_t count = 0;
+	for ([[maybe_unused]] const auto id: FindImagesInRegion(address, size, false)) {
+		count++;
+	}
+	return count;
+}
+
 void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 	if (!GuestRange {address, size}.Valid()) {
 		EXIT("TextureCache: invalid memory-invalidation range\n");

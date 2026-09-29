@@ -569,6 +569,21 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	}
 
 	auto& texture_cache = m_context.GetTextureCache();
+	// TEMP DIAG: null descriptors sample the black placeholder. Track the
+	// rate: systemic nulls mean broken descriptor fetch, not bad textures.
+	static std::atomic_uint64_t resolve_total = 0;
+	static std::atomic_uint64_t resolve_null  = 0;
+	{
+		const auto total = resolve_total.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (descriptor.IsNull()) {
+			resolve_null.fetch_add(1, std::memory_order_relaxed);
+		}
+		if (total % 200000 == 0) {
+			LOGF("ResolveTexture: resolves=%llu nulls=%llu\n",
+			     static_cast<unsigned long long>(total),
+			     static_cast<unsigned long long>(resolve_null.load(std::memory_order_relaxed)));
+		}
+	}
 	if (descriptor.IsNull()) {
 		auto       desc = NullTextureDesc(resource, storage ? TextureCache::BindingType::Storage
 		                                                    : TextureCache::BindingType::Texture);

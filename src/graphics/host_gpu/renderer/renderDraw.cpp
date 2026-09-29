@@ -1011,7 +1011,9 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 		return;
 	}
 
-	if (!draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
+	// TEMP DIAG: log every draw state (not just indexed/rect-list) so
+	// fullscreen flip-targeted quads are captured too. Still capped inside.
+	if (false && !draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
 		return;
 	}
 
@@ -1381,6 +1383,47 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
 	const auto completed = g_census_complete.fetch_add(1, std::memory_order_relaxed) + 1;
+	// TEMP EXPERIMENT: the 3840x2160 RGBA8 post buffer (stable addr) is the
+	// last image before the missing flip transfer. Write it back and dump it
+	// to test whether the final picture exists anywhere.
+	if (completed % 20000 == 0) {
+		auto& cache = m_context.GetTextureCache();
+		if (const auto id = cache.FindImageFromRange(0x13175a4000ull, 0x1fe0000ull, false);
+		    id) {
+			if (cache.DownloadImageMemory(id)) {
+				LOGF("RenderCensus: post writeback requested\n");
+			}
+		}
+	}
+	// Dump on an independent period so it reads a previous writeback's data.
+	if (completed % 30000 == 0) {
+		static std::atomic_uint post_dump_no = 0;
+		const auto n = post_dump_no.fetch_add(1);
+		char       path[128];
+		std::snprintf(path, sizeof(path),
+		              "C:\\Users\\Gr33k\\AppData\\Local\\Temp\\opencode\\post_vram_%u.bin",
+		              n % 3);
+		FILE* f = nullptr;
+		if (fopen_s(&f, path, "wb") == 0 && f != nullptr) {
+			std::fwrite(reinterpret_cast<const void*>(0x13175a4000ull), 1, 0x1fe0000, f);
+			std::fclose(f);
+			LOGF("RenderCensus: post dump (%u)\n", n);
+		}
+	}
+	// TEMP: render-graph format survey (black-screen triage). Independent
+	// sparse sampling of every target's true format/extent.
+	if (state.color_count > 0 && completed % 20000 == 0) {
+		const auto& ci = state.color_info[0];
+		const auto  ex = ci.Extent();
+		LOGF("RenderSurvey: #%llu %s colors=%u addr=0x%llx extent=%ux%u pixel=%s "
+		     "guest=0x%x bpb=%u tile=%u size=0x%llx\n",
+		     static_cast<unsigned long long>(completed), draw.Name(), state.color_count,
+		     static_cast<unsigned long long>(ci.desc.info.data.address), ex.width,
+		     ex.height, vk::to_string(ci.desc.info.pixel_format).c_str(),
+		     static_cast<uint32_t>(ci.desc.info.guest_format),
+		     ci.desc.info.bytes_per_block, static_cast<uint32_t>(ci.desc.info.tile_mode),
+		     static_cast<unsigned long long>(ci.desc.info.data.size));
+	}
 	if (completed % 1000 == 0) {
 		const auto extent = state.color_count > 0 ? state.color_info[0].Extent() : vk::Extent2D {};
 		LOGF("RenderCensus: idx_calls=%llu auto_calls=%llu complete=%llu (idx_empty=%llu "

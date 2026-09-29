@@ -71,6 +71,8 @@ public:
 	void UnmapMemory(uint64_t address, uint64_t size);
 	void ProcessDownloadImages();
 	void RunGarbageCollector();
+	// TEMP DIAG: exposed for present-path alias tracking.
+	[[nodiscard]] uint32_t CountImagesInRegion(uint64_t address, uint64_t size) const;
 
 private:
 	enum class TransferDirection { Upload, Download };

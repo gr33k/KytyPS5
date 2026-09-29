@@ -244,7 +244,12 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 		}
 		if (fragment_barycentric.fragmentShaderBarycentric != VK_TRUE) {
 			LOGF("fragmentShaderBarycentric is not supported\n");
-			skip_device = true;
+			// TEMP DIAG: RenderDoc's capture layer does not forward this
+			// Vulkan 1.4 feature on some drivers; allow captures anyway
+			// (barycentric pipelines are expanded to lists on AMD).
+			if (!Config::RenderDocEnabled()) {
+				skip_device = true;
+			}
 		}
 #endif
 
@@ -556,6 +561,11 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		provoking_vertex.pNext = supported_features2.pNext;
 		supported_features2.pNext = &provoking_vertex;
 	}
+	// Queried so device creation can skip it when a capture layer (RenderDoc)
+	// does not forward the feature; see the selection workaround above.
+	vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR supported_barycentric {};
+	supported_barycentric.pNext = supported_features2.pNext;
+	supported_features2.pNext   = &supported_barycentric;
 	physical_device.getFeatures2(&supported_features2);
 	graphics.mesh_shader_enabled = mesh_extension && supported_mesh.meshShader;
 
@@ -645,9 +655,11 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	robustness2.pNext = &features12;
 #else
 	vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR fragment_barycentric {};
-	fragment_barycentric.pNext                     = &features12;
-	fragment_barycentric.fragmentShaderBarycentric = VK_TRUE;
-	robustness2.pNext                              = &fragment_barycentric;
+	fragment_barycentric.pNext = &features12;
+	// Only request when supported: capture layers may not forward it.
+	fragment_barycentric.fragmentShaderBarycentric =
+	    supported_barycentric.fragmentShaderBarycentric;
+	robustness2.pNext = &fragment_barycentric;
 #endif
 	if (robustness2_ext_enabled) {
 		robustness2.robustBufferAccess2 = supported_robustness2.robustBufferAccess2;
@@ -995,7 +1007,11 @@ void WindowContext::CreateVulkan() {
 #else
 	device_extensions.push_back(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
 	device_extensions.push_back(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
-	device_extensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+	// TEMP DIAG: RenderDoc's capture layer hides this extension on some
+	// drivers; the feature request is already conditional above.
+	if (!Config::RenderDocEnabled()) {
+		device_extensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+	}
 #endif
 
 #ifdef KYTY_ENABLE_DEBUG_PRINTF

@@ -10,6 +10,8 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+
+#include <atomic>
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
@@ -332,6 +334,18 @@ struct Presenter::Impl {
 		auto&      image      = cache.GetImage(image_id);
 		image.usage.video_out = true;
 		cache.UpdateImage(image_id);
+		// TEMP DIAG: track which image presents resolve to, and whether the
+		// flip range is aliased by multiple images (stale-image presentation).
+		{
+			static std::atomic_uint n = 0;
+			if (n.fetch_add(1, std::memory_order_relaxed) % 120 == 0) {
+				const auto aliases = cache.CountImagesInRegion(info.data.address, info.data.size);
+				LOGF("ResolveSurface: #%u addr=0x%llx image=%u:%u aliases=%u\n",
+				     n.load(std::memory_order_relaxed),
+				     static_cast<unsigned long long>(info.data.address), image_id.index,
+				     image_id.generation, aliases);
+			}
+		}
 		return image;
 	}
 	void Present();
