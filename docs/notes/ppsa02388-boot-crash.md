@@ -60,3 +60,40 @@ helper with `rdi = [obj+0x340]`.
 
 - Full boot log to fault: ~83k lines, ends in Wwise bank init + Avplayer setup.
 - Repro: launch the game, wait ~12s, no input needed.
+
+## Update 2026-09-29: boot crash fixed, menu renders offscreen, screen black
+
+Fixes pushed to fork main (`avplayer: async event dispatch, READY gating,
+GPU cache invalidate`, `renderer: always-on draw census`):
+
+- READY/PLAY/STOP/WARNING callbacks now dispatch on a dedicated
+  `AvPlayerEvents` thread (no re-entrant guest calls inside HLE), and READY
+  is gated until the game issues a post-AddSource setup call
+  (stream count/info/enable/Start) with a 500 ms backstop. Both logo videos
+  now play to EOS repeatedly with zero crashes; audio works.
+- CPU-decoded video/audio frames call `Memory::InvalidateMemory` so cached
+  GPU textures are re-uploaded instead of showing the first (black) frame.
+
+Black-screen forensics (draw census + flip-buffer hashing + VRAM writeback):
+
+- Menu is a live 3D scene: ~6M completed indexed draws, pipelines all
+  succeed (`pipeline_null=0`), no errors, process healthy, music streams.
+- Scene renders offscreen to 2560x1440 MRT targets
+  (e.g. `0x13651f0000`, stable per-run, ASLR across runs); a 3840x2160
+  single-target post buffer (`0x13175a4000`) gets ~47k draws.
+- Registered flip buffers (`0x1310b90000`/`0x1312b90000`) stay all-zero in
+  guest memory across entire runs; presents alternate 0/1 correctly.
+- Resolved: no mode-3 resolves, no DMA, ~512 compute dispatches (bloom mips).
+- VRAM writeback of the scene target reads back exact zeros; image id is
+  stable (no cache thrash). Either the scene shades black or nothing
+  rasterizes (clear-only).
+- Reference: Port Royal 4 (PPSA02815, upstream InGame) renders PERFECTLY on
+  this fork — full title/menu/3D background at 30 fps, keyboard input works
+  (drove it past the profile-error dialog). It draws directly into
+  3840x2160 flip targets. So renderer + presentation are proven; the missing
+  piece is Plague-specific: its final scene-to-flip composite never issues.
+- Hardware note: RX580 lacks mesh shaders; mesh/NGG titles (Jumanji: fatal
+  `!mesh_shader_enabled`) can never run on it regardless of code.
+- Open: why the game never issues its final composite (waiting on streaming
+  from slow Z:? 30-min soak test running), and whether the offscreen scene
+  itself is black (needs synchronous VRAM readback to confirm).
