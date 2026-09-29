@@ -510,6 +510,11 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		// GPU storage writes (e.g. compute post passes writing images as
+		// texel/byte buffers) must evict overlapping cached images, mirroring
+		// CopyBuffer/FillBuffer. Otherwise image readers keep sampling stale
+		// (empty) copies while the fresh data sits in buffer memory.
+		m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
@@ -566,6 +571,22 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
+}
+
+void BufferCache::CopyGdsBuffer(uint64_t dst_offset, uint64_t src_offset, uint64_t size) {
+	if (size == 0) {
+		return;
+	}
+	if (dst_offset > m_gds_buffer.Size() || size > m_gds_buffer.Size() - dst_offset ||
+	    src_offset > m_gds_buffer.Size() || size > m_gds_buffer.Size() - src_offset) {
+		EXIT("BufferCache: GDS copy range out of bounds, src=0x%016" PRIx64 " dst=0x%016" PRIx64
+		     " size=0x%016" PRIx64 "\n",
+		     src_offset, dst_offset, size);
+	}
+	auto mapped = m_gds_buffer.Mapped();
+	std::memmove(mapped.data() + dst_offset, mapped.data() + src_offset,
+	             static_cast<size_t>(size));
+	m_gds_buffer.Flush(dst_offset, size);
 }
 
 void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,

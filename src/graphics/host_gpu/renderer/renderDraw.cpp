@@ -605,22 +605,6 @@ static uint32_t DrawColorOutputMask(const HW::Context& ctx) {
 	return output_mask;
 }
 
-static void LogStateFailTarget(CommandBuffer& buffer, const DrawCallInfo& draw) {
-	static std::atomic_uint n = 0;
-	if (n.fetch_add(1, std::memory_order_relaxed) % 2000 != 0) {
-		return;
-	}
-	const auto& hw   = buffer.GetRegisters();
-	const auto  mask = DrawColorOutputMask(hw);
-	LOGF("RenderStateFail: #%u %s count=%u color_mask=0x%x targets=[0x%llx,0x%llx,"
-	     "0x%llx,0x%llx]\n",
-	     n.load(std::memory_order_relaxed), draw.Name(), draw.index_count, mask,
-	     static_cast<unsigned long long>(hw.GetRenderTarget(0).base.addr),
-	     static_cast<unsigned long long>(hw.GetRenderTarget(1).base.addr),
-	     static_cast<unsigned long long>(hw.GetRenderTarget(2).base.addr),
-	     static_cast<unsigned long long>(hw.GetRenderTarget(3).base.addr));
-}
-
 enum class CbColorMode : uint8_t {
 	Disable            = 0,
 	Normal             = 1,
@@ -1487,7 +1471,6 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	DrawRenderState state {};
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		g_census_state_fail.fetch_add(1, std::memory_order_relaxed);
-		LogStateFailTarget(buffer, draw);
 		ResetBindings();
 		return;
 	}
@@ -1571,7 +1554,6 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	DrawRenderState state {};
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		g_census_state_fail.fetch_add(1, std::memory_order_relaxed);
-		LogStateFailTarget(buffer, draw);
 		ResetBindings();
 		return;
 	}

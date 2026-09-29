@@ -443,7 +443,10 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 		EXIT("unsupported dmaData source selector 0x%02" PRIx8 "\n", src_sel);
 	}
 	if (src_gds && dst_gds) {
-		EXIT("unsupported dmaData GDS-to-GDS copy\n");
+		// On-chip store-to-store copy; both addresses are GDS offsets.
+		buffer_cache.CopyGdsBuffer(dst_address_or_offset, src_address_or_offset_or_immediate,
+		                           num_bytes);
+		return;
 	}
 	buffer_cache.CopyBuffer(dst_address_or_offset, src_address_or_offset_or_immediate, num_bytes,
 	                        dst_gds, src_gds);

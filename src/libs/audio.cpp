@@ -32,7 +32,7 @@ constexpr int AUDIO_OUT_PORT_TYPE_AUDIO3D   = 126;
 constexpr int AUDIO_OUT_PORT_TYPE_AUX       = 127;
 
 constexpr uint32_t AUDIO_OUT_PARAM_FORMAT_MASK = 0x000000ffu;
-constexpr uint64_t AUDIO_OUT_TARGET_LATENCY_US = 40000;
+constexpr uint64_t AUDIO_OUT_TARGET_LATENCY_US = 120000;
 
 constexpr int      AUDIO_IN_SILENT_STATE_DEVICE_NONE = 0x1;
 constexpr uint32_t AUDIO_IN_GRAIN_MAX_ASYNC          = 384;
@@ -107,6 +107,11 @@ private:
 		bool     queue_primed     = false;
 		int      channels_num     = 0;
 		int      volume[12]       = {};
+		// Packet-loss concealment: short digital-silence holes between loud
+		// chunks are emulation hitches, not game silence. Repeat audio.
+		std::vector<uint8_t> plc_hold;
+		uint64_t             plc_silent_us = 0;
+		uint64_t             plc_last_t    = 0;
 
 		SDL_AudioStream*                     stream  = nullptr;
 		Controller::DualSenseHaptics::Stream* haptics = nullptr;
@@ -193,6 +198,11 @@ uint32_t AudioOutOutputs(const OutputParam* params, uint32_t num, bool blocking)
 
 void Initialize() {
 	EXIT_IF(g_audio != nullptr);
+
+	// A generous device buffer lets the host device ride through emulation
+	// hitches (shader compiles, streaming stalls) without crackling. The
+	// game-side queue targets ~120 ms; the device buffer covers catch-up gaps.
+	SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "4096");
 
 	g_audio = new Audio;
 }
@@ -317,9 +327,17 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 		for (uint32_t frame = 0; frame < frames; frame++) {
 			for (uint32_t ch = 0; ch < output_channels; ch++) {
 				const auto src_ch = reorder ? SDL_8CH_MAP[ch] : ch;
-				dst[frame * output_channels + ch] =
+				float      sample =
 				    src[frame * channels + src_ch] *
 				    (static_cast<float>(port.volume[src_ch]) / 32768.0f);
+				// Saturate: over-full-scale floats clip harshly at the device
+				// (raspy/static on loud mixes). Bound them here.
+				if (sample > 1.0f) {
+					sample = 1.0f;
+				} else if (sample < -1.0f) {
+					sample = -1.0f;
+				}
+				dst[frame * output_channels + ch] = sample;
 			}
 			if (channels == 12) {
 				// Add the four top channels to their front/back channels, turning 12 into 8.
@@ -367,6 +385,80 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 	const auto           prepared_size =
 	    BytesPerSample(port->format) * output_channels * port->samples_num;
 
+	// Packet-loss concealment: short all-silent runs between loud audio are
+	// emulation hitches, not game silence. Bridge them by repeating audio.
+	const void* fed_data = prepared_data;
+	std::vector<uint8_t> plc_fade;
+	{
+		const auto buffer_us =
+		    port->freq != 0 ? (1000000ULL * port->samples_num) / port->freq : 0;
+		const auto now = LibKernel::KernelGetProcessTime();
+		// Bridge missed time first: if the game stalled, feed faded hold audio
+		// for the gap so SDL never starves (static bursts come from starvation).
+		if (port->plc_last_t != 0 && buffer_us != 0 && !port->plc_hold.empty() &&
+		    port->plc_hold.size() == prepared_size) {
+			const auto gap_us = now >= port->plc_last_t ? now - port->plc_last_t : 0;
+			uint32_t missed =
+			    gap_us > buffer_us ? static_cast<uint32_t>((gap_us - buffer_us) / buffer_us) : 0;
+			// Cap the bridge per call; the pacing loop below absorbs the rest.
+			if (missed > 20) {
+				missed = 20;
+			}
+			for (uint32_t m = 0; m < missed; m++) {
+				const float fade = 1.0f - (static_cast<float>(m + 1) /
+				                           static_cast<float>(missed + 1));
+				plc_fade.assign(port->plc_hold.begin(), port->plc_hold.end());
+				if (FormatIsFloat(port->format)) {
+					auto* s = reinterpret_cast<float*>(plc_fade.data());
+					for (uint32_t i = 0; i < port->samples_num * output_channels; i++) {
+						s[i] *= fade;
+					}
+				} else {
+					auto* s = reinterpret_cast<int16_t*>(plc_fade.data());
+					for (uint32_t i = 0; i < port->samples_num * output_channels; i++) {
+						s[i] = static_cast<int16_t>(s[i] * fade);
+					}
+				}
+				SDL_PutAudioStreamData(port->stream, plc_fade.data(),
+				                       static_cast<int>(prepared_size));
+			}
+		}
+		port->plc_last_t = now;
+		bool silent = true;
+		if (FormatIsFloat(port->format)) {
+			const auto* s = static_cast<const float*>(prepared_data);
+			for (uint32_t i = 0; i < port->samples_num * output_channels; i++) {
+				const float a = s[i] < 0.0f ? -s[i] : s[i];
+				if (!(a <= 0.0005f)) {
+					silent = false;
+					break;
+				}
+			}
+		} else {
+			const auto* s = static_cast<const int16_t*>(prepared_data);
+			for (uint32_t i = 0; i < port->samples_num * output_channels; i++) {
+				const int a = s[i] < 0 ? -s[i] : s[i];
+				if (a > 16) {
+					silent = false;
+					break;
+				}
+			}
+		}
+		if (!silent) {
+			port->plc_silent_us = 0;
+			if (prepared_size <= 65536) {
+				port->plc_hold.assign(static_cast<const uint8_t*>(prepared_data),
+				                      static_cast<const uint8_t*>(prepared_data) + prepared_size);
+			}
+		} else if (!port->plc_hold.empty() && port->plc_hold.size() == prepared_size &&
+		           port->plc_silent_us + buffer_us <= 15000) {
+			port->plc_silent_us += buffer_us;
+			fed_data = port->plc_hold.data();
+		} else {
+			port->plc_silent_us += buffer_us;
+		}
+	}
+
 	uint32_t min_queued_size = 0;
 	if (blocking) {
 		const auto buffer_us = port->freq != 0 ? (1000000ULL * port->samples_num) / port->freq : 0;
@@ -377,11 +469,18 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 		min_queued_size           = prepared_size * std::clamp(buffers, 2u, 16u);
 		const auto wait_start      = LibKernel::KernelGetProcessTime();
 		auto queued                = SDL_GetAudioStreamQueued(port->stream);
-		if (queued < static_cast<int>(prepared_size)) {
+		if (queued == 0) {
 			port->queue_primed = false;
 		}
 		while (queued > static_cast<int>(min_queued_size)) {
-			if (LibKernel::KernelGetProcessTime() - wait_start > 200000) {
+			// Only resync (drop) on a persistent multi-second overrun: transient
+			// bursts after emulation hitches must play out, not gap.
+			if (LibKernel::KernelGetProcessTime() - wait_start > 2000000) {
+				// Multi-second overruns mean the game clock runs far ahead of
+				// the device; resync noisily rather than lagging forever.
+				static std::atomic_uint drops = 0;
+				LOGF("AudioOut: dropping over-queued stream (%u total, queued=%d min=%u)\n",
+				     drops.fetch_add(1) + 1, queued, min_queued_size);
 				SDL_ClearAudioStream(port->stream);
 				port->queue_primed = false;
 				break;
@@ -398,7 +497,7 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 		}
 	}
 
-	if (!SDL_PutAudioStreamData(port->stream, prepared_data, static_cast<int>(prepared_size))) {
+	if (!SDL_PutAudioStreamData(port->stream, fed_data, static_cast<int>(prepared_size))) {
 		LOGF("AudioOut: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
 		return false;
 	}
