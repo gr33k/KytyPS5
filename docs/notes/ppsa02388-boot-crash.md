@@ -126,3 +126,25 @@ Black-screen forensics (draw census + flip-buffer hashing + VRAM writeback):
   black sampled textures cache-wide), (b) nothing rasterizes despite healthy
   state (vertex-output/depth). Next: fragment-output bisection (e.g. clear-
   color/statistics probe) or external capture once RenderDoc attaches.
+
+## Update 2026-09-29 (night): upstream merge + Port Royal 4 playable
+
+- Merged upstream main through `539c0f7` (Zarchive loading, AvPlayer clip
+  timestamps / Crash 4 padding / auto-start, readback-validity fixes
+  `6ee1bf9`+`8e61798`, SaveDataDialog lockup fix). Conflicts resolved in
+  `avPlayer.cpp` (kept async events + READY gate + invalidate), launcher
+  status/archival run-enable, tests. 22/23 test suites pass (only env-limited
+  compute-shader harness fails on this GPU).
+- Port Royal 4 (PPSA02815) is IN-GAME: Caribbean map, HUD, 30 fps menu,
+  keyboard input drives menus. Fixed its crasher en route: GDS-to-GDS DMA
+  copy is now implemented (`CopyGdsBuffer`) instead of EXIT.
+- Also fixed a real coherence hole: GPU storage writes via `ObtainBuffer`
+  now evict overlapping cached images (mirrors CopyBuffer/FillBuffer), so
+  compute-written post buffers can't stay stale behind empty images.
+- Port Royal audio static triaged end-to-end (fed bytes proven clean,
+  30-47 ms game feed stalls found): deeper cushion (120 ms target, 85 ms
+  device buffer), stall bridging with faded repeat, 15 ms hole fill,
+  float saturation, drop-only-after-2s. Verdict pending ears.
+- Launcher already has a compatibility DB (remote upstream fetch + local
+  `compatibility_db.json`, per-game status/comment editing wired in the game
+  list). Missing: auto-logging run progress + upstream submission flow.
