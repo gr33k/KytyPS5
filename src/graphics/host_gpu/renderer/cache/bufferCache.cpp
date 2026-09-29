@@ -510,6 +510,11 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		// GPU storage writes (e.g. compute post passes writing images as
+		// texel/byte buffers) must evict overlapping cached images, mirroring
+		// CopyBuffer/FillBuffer. Otherwise image readers keep sampling stale
+		// (empty) copies while the fresh data sits in buffer memory.
+		m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};

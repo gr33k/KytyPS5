@@ -1811,10 +1811,28 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 bool TextureCache::DownloadImageMemory(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (image.depth_id) {
+		// TEMP DIAG: which images refuse download and why.
+		static std::atomic_uint n = 0;
+		if (n.fetch_add(1, std::memory_order_relaxed) < 5) {
+			LOGF("DownloadImageMemory: refused depth-associated image %u:%u addr=0x%llx\n",
+			     id.index, id.generation,
+			     static_cast<unsigned long long>(image.info.data.address));
+		}
 		return false;
 	}
 	auto transfer = BuildDownload(image);
 	if (!transfer.valid || !SafeToDownload(image)) {
+		// TEMP DIAG.
+		static std::atomic_uint m = 0;
+		if (m.fetch_add(1, std::memory_order_relaxed) < 5) {
+			LOGF("DownloadImageMemory: refused unsafe/invalid image %u:%u addr=0x%llx "
+			     "valid=%d gpu_mod=%d buf_mod=%d cpu_dirty=%d maybe_dirty=%d\n",
+			     id.index, id.generation,
+			     static_cast<unsigned long long>(image.info.data.address),
+			     transfer.valid ? 1 : 0, image.IsGpuModified() ? 1 : 0,
+			     image.IsBufferModified() ? 1 : 0, image.IsCpuDirty() ? 1 : 0,
+			     image.IsMaybeCpuDirty() ? 1 : 0);
+		}
 		return false;
 	}
 	const auto range    = image.info.data;

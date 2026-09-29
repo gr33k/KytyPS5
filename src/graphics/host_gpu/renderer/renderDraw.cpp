@@ -1381,11 +1381,62 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
 	const auto completed = g_census_complete.fetch_add(1, std::memory_order_relaxed) + 1;
+	// TEMP DIAG: for flip-targeted draws, log every bound PS texture: the
+	// fullscreen composite quad samples exactly one texture per frame.
+	if (state.color_count > 0) {
+		const auto faddr = state.color_info[0].desc.info.data.address;
+		if (faddr == 0x1310b90000ull || faddr == 0x1312b90000ull) {
+			if (bindings.pixel) {
+				for (const auto& tb: bindings.pixel->images) {
+					LOGF("FlipQuadTex: target=0x%llx tex addr=0x%llx extent=%ux%u "
+					     "pixel=%s image=%u:%u\n",
+					     static_cast<unsigned long long>(faddr),
+					     static_cast<unsigned long long>(tb.desc.info.data.address),
+					     tb.desc.info.extent.width, tb.desc.info.extent.height,
+					     vk::to_string(tb.desc.info.pixel_format).c_str(),
+					     tb.image_id.index, tb.image_id.generation);
+				}
+				// TEMP DIAG: hash the post image's guest bytes in-log (files
+				// proved unreliable); nonzero means real picture data present.
+				static std::atomic_uint post_hash_no = 0;
+				if (!bindings.pixel->images.empty() &&
+				    post_hash_no.fetch_add(1, std::memory_order_relaxed) % 40 == 0) {
+					const auto& src = bindings.pixel->images.front().desc.info.data;
+					uint64_t    hash = 1469598103934665603ull;
+					uint32_t    nonzero = 0, pages = 0;
+					const auto* bytes   = reinterpret_cast<const uint8_t*>(
+                        static_cast<uintptr_t>(src.address));
+					for (uint64_t off = 0; off < src.size; off += 4096) {
+						hash ^= bytes[off];
+						hash *= 1099511628211ull;
+						pages++;
+						bool nz = false;
+						for (uint64_t i = off; i < off + 4096 && i < src.size; i += 64) {
+							if (bytes[i] != 0) {
+								nz = true;
+								break;
+							}
+						}
+						if (nz) {
+							nonzero++;
+						}
+					}
+					LOGF("FlipQuadTex: post hash=%llx nonzero=%u/%u size=0x%llx\n",
+					     static_cast<unsigned long long>(hash), nonzero, pages,
+					     static_cast<unsigned long long>(src.size));
+				}
+			} else {
+				LOGF("FlipQuadTex: target=0x%llx NO PIXEL BINDINGS\n",
+				     static_cast<unsigned long long>(faddr));
+			}
+		}
+	}
 	if (completed % 1000 == 0) {
 		const auto extent = state.color_count > 0 ? state.color_info[0].Extent() : vk::Extent2D {};
 		LOGF("RenderCensus: idx_calls=%llu auto_calls=%llu complete=%llu (idx_empty=%llu "
 		     "resolved=%llu no_vs=%llu topo_fail=%llu state_fail=%llu rectlist_skip=%llu "
-		     "pipeline_null=%llu) last=%s count=%u colors=%u addr=0x%010llx extent=%ux%u\n",
+		     "pipeline_null=%llu) last=%s count=%u colors=%u addr=0x%010llx extent=%ux%u "
+		     "image=%u:%u\n",
 		     static_cast<unsigned long long>(g_census_index_calls.load(std::memory_order_relaxed)),
 		     static_cast<unsigned long long>(g_census_auto_calls.load(std::memory_order_relaxed)),
 		     static_cast<unsigned long long>(completed),
@@ -1400,7 +1451,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		     static_cast<uint64_t>(state.color_count > 0
 		                               ? state.color_info[0].desc.info.data.address
 		                               : 0u),
-		     extent.width, extent.height);
+		     extent.width, extent.height,
+		     state.color_count > 0 ? state.color_info[0].image_id.index : 0u,
+		     state.color_count > 0 ? state.color_info[0].image_id.generation : 0u);
 	}
 }
 
