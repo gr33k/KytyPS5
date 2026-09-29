@@ -135,6 +135,21 @@ Black-screen forensics (draw census + flip-buffer hashing + VRAM writeback):
   `avPlayer.cpp` (kept async events + READY gate + invalidate), launcher
   status/archival run-enable, tests. 22/23 test suites pass (only env-limited
   compute-shader harness fails on this GPU).
+
+## Update 2026-09-30: FNAF Security Breach boots (mesh-skip + PR #789)
+
+- Applied upstream PR #789 (FNAF memory fixes: descriptor validation in
+  ResourceMaterialization) via `git apply --3way` + manual resolution.
+- RX580 has no mesh shaders, which was fatal (`pipelineCache.cpp:585`).
+  Implemented graceful mesh-skip: `GraphicsPrograms::skip_draw` flag +
+  early return in `ExecutePreparedDraw` + tolerate rejected mesh SPIR-V
+  modules. Mesh draws are skipped, game continues.
+- Result: EULA renders, title at 46 fps, Freddy intro cinematic plays in
+  full color. Dies at gameplay load with AMD driver TDR (Event 4101;
+  TdrDelay is already 60 s, so this is a real GPU hang, not slowness).
+  Death point varies between runs (boot once, transition once) with no
+  validation errors and no OOM evidence. Needs shader-level bisection or
+  RenderDoc capture to isolate the hanging command.
 - Port Royal 4 (PPSA02815) is IN-GAME: Caribbean map, HUD, 30 fps menu,
   keyboard input drives menus. Fixed its crasher en route: GDS-to-GDS DMA
   copy is now implemented (`CopyGdsBuffer`) instead of EXIT.
