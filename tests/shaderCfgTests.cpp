@@ -7,6 +7,7 @@
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -1700,6 +1701,61 @@ void TestShaderStageBarriers() {
   CheckSpirvBinaryValidates(vertex_result.spirv);
   Check(!SpirvContainsOpcode(vertex_result.spirv, 224),
         "independent vertex invocations retained a workgroup barrier");
+}
+
+void TestVertexBufferGrouping() {
+  const uint32_t shader[] = {EncodeSopp(0x01)};
+  std::array<uint16_t, static_cast<size_t>(AgcDirectResourceType::Last) + 1> offsets;
+  offsets.fill(AGC_ILLEGAL_DIRECT_OFFSET);
+  offsets[static_cast<size_t>(AgcDirectResourceType::PtrVertexBufferTable)] = 0;
+  offsets[static_cast<size_t>(AgcDirectResourceType::PtrVertexAttribDescTable)] = 2;
+  ShaderUserData user_data{};
+  user_data.direct_resource_count = offsets.size();
+  user_data.direct_resource_offset = offsets.data();
+  std::array<ShaderSemantic, 4> semantics{};
+  for (uint32_t i = 0; i < semantics.size(); i++) {
+    semantics[i].semantic = i;
+    semantics[i].hardware_mapping = i;
+    semantics[i].size_in_elements = 1;
+  }
+  ShaderMappedData mapped{};
+  mapped.user_data = &user_data;
+  mapped.code_size_bytes = sizeof(shader);
+  mapped.input_semantics = semantics.data();
+  mapped.num_input_semantics = semantics.size();
+  HW::VertexShaderInfo regs{};
+  regs.es_regs.data_addr = reinterpret_cast<uint64_t>(shader);
+  regs.gs_regs.rsrc2.user_sgpr = 4;
+  ShaderMapUserData(regs.es_regs.data_addr, mapped);
+  std::array<ShaderBufferResource, 4> descriptors{};
+  const std::array<uint32_t, 4> attributes{0, 1u | (1u << 26u), 2, 3};
+  const std::array<uint64_t, 2> pointers{
+      reinterpret_cast<uint64_t>(descriptors.data()),
+      reinterpret_cast<uint64_t>(attributes.data())};
+  std::memcpy(regs.gs_user_sgpr.value, pointers.data(), sizeof(pointers));
+  ShaderVertexInputInfo input{};
+  for (const uint64_t base : {0x1000u, 0x3000u}) {
+    for (auto &descriptor : descriptors) {
+      descriptor.fields[1] = 16u << 16u;
+      descriptor.fields[2] = 8;
+      descriptor.UpdateAddress48(base);
+    }
+    descriptors[0].UpdateAddress48(base + 8);
+    descriptors[1].UpdateAddress48(base + 4);
+    descriptors[3].fields[1] = 0; // Constant attributes use their own buffer.
+    (void)PrepareProgram(regs, HW::Context{}, HW::UserConfig{}, input);
+    Check(input.resources_num == 4 && input.buffers_num == 3 &&
+              input.resources_dst[0].buffer_index == 0 &&
+              input.resources_dst[1].buffer_index == 1 &&
+              input.resources_dst[2].buffer_index == 0 &&
+              input.resources_dst[3].buffer_index == 2,
+          "interleaved vertex attributes lost their stride or instance-rate binding");
+    Check(input.buffers[0].addr == base && input.buffers[1].addr == base + 4 &&
+              input.buffers[1].fetch_index == 1 && input.buffers[2].stride == 0 &&
+              input.resources[0].Base48() - input.buffers[0].addr == 8 &&
+              input.resources[2].Base48() == input.buffers[0].addr,
+          "a later lower-address attribute or changed table left stale vertex offsets");
+  }
 }
 
 void TestNggVertexEntryState() {
@@ -10571,15 +10627,31 @@ void TestNewShaderRecompilerClipDisabledPosition() {
   ShaderVertexInputInfo layout_a{};
   layout_a.resources_num = 1;
   layout_a.buffers_num = 1;
-  layout_a.buffers[0].attr_num = 1;
-  layout_a.buffers[0].attr_indices[0] = 0;
   layout_a.buffers[0].stride = 16;
   auto layout_b = layout_a;
   layout_b.buffers[0].stride = 32;
   layout_b.buffers[0].fetch_index = 1;
-  layout_b.buffers[0].attr_offsets[0] = 4;
+  layout_b.resources[0].UpdateAddress48(4);
   Check(MakeStageStaticKey(layout_a) == MakeStageStaticKey(layout_b),
         "pipeline-only vertex layout fragmented the shader module cache key");
+
+  const auto descriptor_state = [](const ShaderBufferResource &resource) {
+    return std::array<uint32_t, 9>{
+        resource.Stride(), resource.SwizzleEnabled(), resource.DstSelX(),
+        resource.DstSelY(), resource.DstSelZ(), resource.DstSelW(),
+        resource.RawFormat(), resource.OutOfBounds(), resource.AddTid()};
+  };
+  const auto key = MakeStageStaticKey(layout_a);
+  const auto state = descriptor_state(layout_a.resources[0]);
+  for (uint32_t word = 0; word < 4; word++) {
+    for (uint32_t bit = 0; bit < 32; bit++) {
+      auto changed = layout_a;
+      changed.resources[0].fields[word] ^= 1u << bit;
+      Check((MakeStageStaticKey(changed) == key) ==
+                (descriptor_state(changed.resources[0]) == state),
+            "vertex key lost a descriptor field or included runtime-only bits");
+    }
+  }
 }
 
 void TestNewShaderRecompilerAuxPositionExports() {
@@ -12208,6 +12280,116 @@ void TestRenderTargetReverseExportMapping() {
   PrepareProgram(regs, sh, mappings, compiled_info);
   Check(compiled_info.target_export_mapping[0] == gr32.export_mapping,
       "active reverse MRT mapping was lost before shader specialization");
+}
+
+void TestBlendMappingClassification() {
+  using Factor = Prospero::BlendFactor;
+  using Support = BlendMappingSupport;
+  HW::BlendControl blend{};
+  blend.separate_alpha_blend = false;
+  const auto classify = [&](Prospero::ColorComponentMapping mapping) {
+    return ClassifyBlendMapping(blend, mapping);
+  };
+  for (const auto factor : {Factor::kConstantAlpha, Factor::kOneMinusConstantAlpha}) {
+    blend.color_srcblend = static_cast<uint8_t>(factor);
+    Check(classify(Prospero::ColorMappingAbgr) == Support::Direct,
+          "scalar blend constant incorrectly required physical alpha");
+  }
+  for (const auto factor : {Factor::kConstantColor, Factor::kOneMinusConstantColor}) {
+    blend.color_srcblend = static_cast<uint8_t>(factor);
+    Check(classify(Prospero::ColorMappingRgba) == Support::Direct &&
+              classify(Prospero::ColorMappingBgra) == Support::Unsupported &&
+              classify(Prospero::ColorMappingAbgr) == Support::Unsupported,
+          "logical blend constants were accepted with shuffled color components");
+  }
+  blend.color_srcblend = static_cast<uint8_t>(Factor::kOne);
+  blend.alpha_srcblend = static_cast<uint8_t>(Factor::kConstantColor);
+  blend.separate_alpha_blend = true;
+  Check(classify(Prospero::ColorMappingBgra) == Support::Direct &&
+            classify(Prospero::ColorMappingAbgr) == Support::Unsupported,
+        "separate constant-color alpha equation ignored the physical alpha location");
+  blend.color_srcblend = static_cast<uint8_t>(Factor::kSrcAlpha);
+  blend.separate_alpha_blend = false;
+  Check(classify(Prospero::ColorMappingAbgr) == Support::SourceAlpha,
+        "reversed source-alpha blending did not request logical alpha");
+  blend.separate_alpha_blend = true;
+  Check(classify(Prospero::ColorMappingAbgr) == Support::Unsupported,
+        "different alpha equations were accepted on a reversed target");
+  blend.separate_alpha_blend = false;
+  blend.color_srcblend = static_cast<uint8_t>(Factor::kDstAlpha);
+  Check(classify(Prospero::ColorMappingAbgr) == Support::Unsupported,
+        "destination alpha incorrectly used the physical alpha channel");
+}
+
+void TestLogicalAlphaBlendExport() {
+  ShaderPixelInputInfo pixel{};
+  pixel.target_output_mode[0] = 4;
+  pixel.target_export_mapping[0] = Prospero::ColorMappingAbgr;
+  const auto ordinary_key = MakeStageStaticKey(pixel);
+  pixel.dual_source_blending = true;
+  const auto guest_key = MakeStageStaticKey(pixel);
+  pixel.alpha_blend_source_remap = true;
+  const auto remapped_key = MakeStageStaticKey(pixel);
+  Check(ordinary_key != guest_key && guest_key != remapped_key &&
+            ordinary_key != remapped_key,
+        "ordinary, guest dual-source, and logical-alpha shaders share a cache key");
+
+  auto options = MakeCompileOptions(ShaderType::Pixel);
+  options.input_info.pixel = &pixel;
+  for (const bool compressed : {false, true}) {
+    const uint32_t shader[] = {
+        // RGBA = (1000, 2, 3, 0.25), packed into two half pairs when compressed.
+        EncodeVop1(0x01, 0, 255), compressed ? 0x400063d0u : 0x447a0000u,
+        EncodeVop1(0x01, 1, 255), compressed ? 0x34004200u : 0x40000000u,
+        EncodeVop1(0x01, 2, 255), 0x40400000u,
+        EncodeVop1(0x01, 3, 255), 0x3e800000u,
+        EncodeExp0(0, 0xf, false, compressed), EncodeExp1(0, 1, 2, 3),
+        EncodeExp0(1, 0xf, false), EncodeExp1(0, 0, 0, 0),
+        EncodeExp0(2, 0xf, true, false, true), EncodeExp1(0, 0, 0, 0),
+        EncodeSopp(0x01),
+    };
+    const auto result = RecompileForTest(shader, options);
+    CheckSpirvBinaryValidates(result.spirv);
+    const auto source = DisassembleSpirvBinary(result.spirv);
+    Check(source.find("OpDecorate %out_mrt_1 Location 0") != std::string::npos &&
+              source.find("OpDecorate %out_mrt_1 Index 1") != std::string::npos &&
+              CountSourceOccurrences(source, "OpStore %out_mrt_1 ") == 1 &&
+              source.find("out_mrt_2") == std::string::npos,
+          "inactive MRT exports overwrote the logical-alpha output");
+    Check(SpirvInstructionOpcodeCount(result.spirv, 252u) != 0,
+          "ignoring inactive MRT stores discarded their valid-mask export");
+    uint32_t alpha_input = 0;
+    uint32_t color_input = 0;
+    for (size_t i = 5; i < result.spirv.size(); i += result.spirv[i] >> 16u) {
+      if ((result.spirv[i] & 0xffffu) != 79u || (result.spirv[i] >> 16u) != 9u) {
+        continue;
+      }
+      const auto selectors = std::span(result.spirv).subspan(i + 5, 4);
+      if (std::ranges::equal(selectors, std::array{3u, 3u, 3u, 3u})) {
+        alpha_input = result.spirv[i + 3];
+      } else if (std::ranges::equal(selectors, std::array{3u, 2u, 1u, 0u})) {
+        color_input = result.spirv[i + 3];
+      }
+    }
+    Check(alpha_input != 0 && alpha_input == color_input,
+          "blend source did not broadcast logical alpha before the physical export swizzle");
+  }
+
+  const uint32_t guest_shader[] = {
+      EncodeExp0(0, 0xf, false), EncodeExp1(0, 1, 2, 3),
+      EncodeExp0(1, 0xf), EncodeExp1(4, 5, 6, 7), EncodeSopp(0x01),
+  };
+  pixel.alpha_blend_source_remap = false;
+  pixel.target_output_mode[1] = pixel.target_output_mode[0];
+  pixel.target_export_mapping = {};
+  const auto guest = RecompileForTest(guest_shader, options);
+  CheckSpirvBinaryValidates(guest.spirv);
+  const auto source = DisassembleSpirvBinary(guest.spirv);
+  Check(source.find("OpDecorate %out_mrt_1 Location 0") != std::string::npos &&
+            source.find("OpDecorate %out_mrt_1 Index 1") != std::string::npos &&
+            CountSourceOccurrences(source, "OpStore %out_mrt_1 ") == 1 &&
+            SpirvInstructionOpcodeCount(guest.spirv, 81u) == 8u,
+        "guest dual-source export was replaced by synthetic alpha");
 }
 
 void TestNewShaderRecompilerEarlyZDisabledWhenPixelKillEnabled() {
@@ -13855,6 +14037,7 @@ int main() {
   TestDemandDrivenSpirvDeclarations();
   TestNewShaderRecompilerSMovB32();
   TestShaderStageBarriers();
+  TestVertexBufferGrouping();
   TestNggVertexEntryState();
   TestNewShaderRecompilerClipDisabledPosition();
   TestNewShaderRecompilerAuxPositionExports();
@@ -13971,6 +14154,8 @@ int main() {
   TestNewShaderRecompilerPerInvocationU64Complement();
   TestNewShaderRecompilerExpPixelOutputs();
   TestRenderTargetReverseExportMapping();
+  TestBlendMappingClassification();
+  TestLogicalAlphaBlendExport();
   TestNewShaderRecompilerEarlyZDisabledWhenPixelKillEnabled();
   TestTypedDescriptorRealWideMoveTranslation();
   TestComputeImageFill();

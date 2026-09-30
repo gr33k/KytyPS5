@@ -2565,13 +2565,20 @@ public:
                     release_label <= Sync::ReadReferenceClock(),
                 "clock write with writeback and interrupt lost its data");
 
-        auto immediate = make_release_mem(1, 0, &release_label, 0x11223344u);
-        Pm4Execution immediate_execution;
-        const auto immediate_tick = gpu_scheduler.CurrentTick();
-        const auto immediate_result =
-            processor->Process(immediate_execution, immediate);
-        const bool immediate_split_once =
-            gpu_scheduler.CurrentTick() == immediate_tick + 1;
+        for (const auto interrupt : {0u, 3u, 1u, 2u}) {
+          release_label = 0;
+          auto immediate = make_release_mem(1, interrupt, &release_label, 0x11223344u);
+          Pm4Execution immediate_execution;
+          const auto immediate_tick = gpu_scheduler.CurrentTick();
+          const auto immediate_result =
+              processor->Process(immediate_execution, immediate);
+          Require("GpuCommandLane", "32-bit release boundary",
+                  immediate_result == Pm4ProcessResult::Complete &&
+                      gpu_scheduler.CurrentTick() ==
+                          immediate_tick + (interrupt == 1 || interrupt == 2) &&
+                      release_label == (interrupt == 1 ? 0 : 0x11223344u),
+                  "label-only release submitted work or interrupt release lost its boundary");
+        }
 
         auto gds = make_release_mem(5, 0, &gds_label, 1ull << 16u);
         Pm4Execution gds_execution;
@@ -2597,8 +2604,7 @@ public:
             gpu_scheduler.CurrentTick() == gds_interrupt_tick + 1;
 
         release_mem_submission_counts =
-            immediate_result == Pm4ProcessResult::Complete &&
-            immediate_split_once && gds_result == Pm4ProcessResult::Complete &&
+            gds_result == Pm4ProcessResult::Complete &&
             gds_waited_once && interrupt_result == Pm4ProcessResult::Complete &&
             interrupt_split_once &&
             gds_interrupt_result == Pm4ProcessResult::Complete &&
@@ -3673,6 +3679,35 @@ public:
         return value;
       };
 
+      constexpr uint64_t stream_pages = base + 0x18000;
+      constexpr uint64_t stream_address = stream_pages + 0x4000 - sizeof(uint32_t);
+      const std::array<uint32_t, 2> stream_values{0x13579bdfu, 0x2468ace0u};
+      std::memcpy(reinterpret_cast<void *>(stream_address), stream_values.data(),
+                  sizeof(stream_values));
+      Require(name, "GPU-readable stream source",
+              Libs::LibKernel::Memory::KernelMprotect(
+                  reinterpret_cast<void *>(stream_pages), 0x8000, 0x10) == 0 &&
+                  cache.IsRegionCpuModified(stream_address, sizeof(stream_values)) &&
+                  !cache.IsRegionGpuModified(stream_address, sizeof(stream_values)),
+              "cross-page stream source is not CPU-dirty and GPU-clean");
+      const auto stream_tick = scheduler.CurrentTick();
+      const auto [streamed, streamed_offset] =
+          cache.ObtainBuffer(stream_address, sizeof(stream_values), false);
+      Require(name, "cross-page read-only stream upload",
+              streamed == &cache.GetUtilityBuffer(MemoryUsage::Stream) &&
+                  scheduler.CurrentTick() == stream_tick &&
+                  std::memcmp(streamed->Mapped().data() + streamed_offset,
+                              stream_values.data(), sizeof(stream_values)) == 0,
+              "GPU-readable guest bytes were not streamed without submission");
+      Require(name, "stream source protection restore",
+              Libs::LibKernel::Memory::KernelMprotect(
+                  reinterpret_cast<void *>(stream_pages), 0x8000, 0x3) == 0,
+              "stream source protection was not restored");
+      Require(name, "streamed GPU bytes",
+              ReadNativeValue(*streamed, streamed_offset) == stream_values[0] &&
+                  ReadNativeValue(*streamed, streamed_offset + sizeof(uint32_t)) == stream_values[1],
+              "stream commit did not publish both cross-page words to the GPU");
+
       constexpr uint64_t large_copy_source_offset = 0x40000;
       constexpr uint64_t large_copy_destination_offset = 0x80000;
       constexpr uint64_t large_copy_size = 96 * 1024;
@@ -4226,54 +4261,56 @@ public:
                   partial_unmap_survivor_value,
               "partial invalidation lost disjoint native bytes");
 
-      constexpr uint64_t large_offset = 0x10000;
-      constexpr uint64_t large_size = 64ull << 20;
-      constexpr uint32_t large_value = 0x5aa55aa5u;
-      constexpr uint32_t large_stale = 0x12345678u;
-      std::memcpy(memory + large_offset, &large_stale, sizeof(large_stale));
-      std::memcpy(memory + large_offset + large_size - sizeof(large_stale),
-                  &large_stale, sizeof(large_stale));
-      auto large_allocation =
-          cache.ObtainBuffer(base + large_offset, large_size, true, false);
-      Require(name, "near-capacity dirty allocation",
-              large_allocation.first != nullptr,
-              "failed to allocate the near-capacity dirty native buffer");
-      cache.FillBuffer(base + large_offset, large_size, large_value, false);
-      const auto large_submission_tick = scheduler.CurrentTick();
-      for (uint32_t tick = 0; tick <= 160; tick++) {
-        cache.RunGarbageCollector();
+      for (const uint64_t large_size : {64ull << 20, 68ull << 20}) {
+        constexpr uint64_t large_offset = 0x10000;
+        const uint32_t large_value =
+            large_size == (64ull << 20) ? 0x5aa55aa5u : 0xa55aa55au;
+        constexpr uint32_t large_stale = 0x12345678u;
+        std::memcpy(memory + large_offset, &large_stale, sizeof(large_stale));
+        std::memcpy(memory + large_offset + large_size - sizeof(large_stale),
+                    &large_stale, sizeof(large_stale));
+        auto large_allocation =
+            cache.ObtainBuffer(base + large_offset, large_size, true, false);
+        Require(name, "large dirty allocation",
+                large_allocation.first != nullptr,
+                "failed to allocate the large dirty native buffer");
+        cache.FillBuffer(base + large_offset, large_size, large_value, false);
+        const auto large_submission_tick = scheduler.CurrentTick();
+        for (uint32_t tick = 0; tick <= 160; tick++) {
+          cache.RunGarbageCollector();
+        }
+        // The capacity-sized case can wrap the ring; the oversized case must
+        // keep its separate staging allocation alive through publication.
+        Require(name, "large synchronized retirement",
+                !cache.IsRegionRegistered(base + large_offset, large_size) &&
+                    scheduler.CurrentTick() > large_submission_tick &&
+                    scheduler.CurrentTick() <= large_submission_tick + 2,
+                "large dirty Buffer exceeded the GC synchronization budget");
+        uint32_t large_before_completion = 0;
+        Libs::LibKernel::Memory::TryReadBacking(base + large_offset,
+                                                &large_before_completion,
+                                                sizeof(large_before_completion));
+        Require(name, "large backing publication",
+                large_before_completion == large_value,
+                "large Buffer GC retired ownership before publication");
+        const auto large_image_source =
+            cache.ObtainBufferForImage(base + large_offset, sizeof(large_value));
+        Require(name, "fixed download after Buffer retirement",
+                large_image_source.first != nullptr &&
+                    &BufferCacheTestAccess::DownloadBuffer(cache) ==
+                        fixed_download &&
+                    fixed_download->Handle() == fixed_download_handle &&
+                    fixed_download->Size() == (64ull << 20),
+                "image acquisition replaced the shared Buffer download stream");
+        std::vector<uint32_t> large_published(large_size / sizeof(uint32_t));
+        Require(name, "large Buffer publication contents",
+                Libs::LibKernel::Memory::TryReadBacking(
+                    base + large_offset, large_published.data(), large_size) &&
+                    std::ranges::all_of(large_published, [large_value](uint32_t value) {
+                      return value == large_value;
+                    }),
+                "large Buffer GC did not publish its complete transfer");
       }
-      // Earlier dirty owners in this GC pass may require one ring-wrap drain
-      // before the full-capacity download can reserve the stream.
-      Require(name, "near-capacity synchronized retirement",
-              !cache.IsRegionRegistered(base + large_offset, large_size) &&
-                  scheduler.CurrentTick() > large_submission_tick &&
-                  scheduler.CurrentTick() <= large_submission_tick + 2,
-              "capacity-sized dirty Buffer exceeded one ring-wrap drain");
-      uint32_t large_before_completion = 0;
-      Libs::LibKernel::Memory::TryReadBacking(base + large_offset,
-                                              &large_before_completion,
-                                              sizeof(large_before_completion));
-      Require(name, "near-capacity backing publication",
-              large_before_completion == large_value,
-              "near-capacity Buffer GC retired ownership before publication");
-      const auto large_image_source =
-          cache.ObtainBufferForImage(base + large_offset, sizeof(large_value));
-      Require(name, "fixed download after Buffer retirement",
-              large_image_source.first != nullptr &&
-                  &BufferCacheTestAccess::DownloadBuffer(cache) ==
-                      fixed_download &&
-                  fixed_download->Handle() == fixed_download_handle &&
-                  fixed_download->Size() == (64ull << 20),
-              "image acquisition replaced the shared Buffer download stream");
-      std::vector<uint32_t> large_published(large_size / sizeof(uint32_t));
-      Require(name, "near-capacity Buffer publication contents",
-              Libs::LibKernel::Memory::TryReadBacking(
-                  base + large_offset, large_published.data(), large_size) &&
-                  std::ranges::all_of(large_published, [](uint32_t value) {
-                    return value == large_value;
-                  }),
-              "near-capacity Buffer GC did not publish its complete transfer");
 
       constexpr uint64_t grouped_first_offset = 0x10000;
       constexpr uint64_t grouped_second_offset = 0x2300000;
@@ -14056,9 +14093,7 @@ public:
     vertex.resources_num = 2;
     vertex.buffers_num = 1;
     vertex.buffers[0].stride = 6 * sizeof(float);
-    vertex.buffers[0].attr_num = 2;
-    vertex.buffers[0].attr_indices[1] = 1;
-    vertex.buffers[0].attr_offsets[1] = 2 * sizeof(float);
+    vertex.resources[1].UpdateAddress48(2 * sizeof(float));
     for (uint32_t i = 0; i < 2; i++) {
       const auto format = i == 0 ? Prospero::BufferFormat::k32_32Float
                           : packed_vertex_color ? Prospero::BufferFormat::k11_11_10Float
@@ -16165,6 +16200,8 @@ private:
             (vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eGraphics)) {
           vk::PhysicalDeviceVulkan12Features features12{};
           features12.sType = vk::StructureType::ePhysicalDeviceVulkan12Features;
+          vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR workgroup_layout{};
+          features12.pNext = &workgroup_layout;
           vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric{};
           barycentric.sType = vk::StructureType::ePhysicalDeviceFragmentShaderBarycentricFeaturesKHR;
           barycentric.pNext = &features12;
@@ -16174,6 +16211,11 @@ private:
           physical.getFeatures2(&features);
           if (barycentric.fragmentShaderBarycentric != true ||
               features.features.shaderInt64 != true ||
+              features12.samplerMirrorClampToEdge != true ||
+              features12.shaderOutputViewportIndex != true ||
+              features12.shaderBufferInt64Atomics != true ||
+              features12.shaderSharedInt64Atomics != true ||
+              workgroup_layout.workgroupMemoryExplicitLayout != true ||
               features12.bufferDeviceAddress != true) {
             continue;
           }
@@ -16187,7 +16229,7 @@ private:
       }
     }
     Require("VulkanHarness", "dispatch", m_physical_device != nullptr,
-            "no Vulkan graphics+compute device with fragment barycentrics");
+            "no Vulkan graphics+compute device with fragment barycentrics and 64-bit LDS atomics");
     m_physical_device.getMemoryProperties(&m_memory_properties);
 
     vk::PhysicalDeviceFeatures available_features{};
@@ -16272,12 +16314,11 @@ private:
     device_info.sType = vk::StructureType::eDeviceCreateInfo;
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
-    vk::PhysicalDeviceVulkan12Features device_features12{};
-    device_features12.sType =
-        vk::StructureType::ePhysicalDeviceVulkan12Features;
-    device_features12.timelineSemaphore = true;
-    device_features12.bufferDeviceAddress = true;
-    device_features12.shaderOutputLayer = true;
+    auto device_features12 = WindowContext::RequiredVulkan12Features();
+    device_features12.shaderSharedInt64Atomics = true;
+    vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR workgroup_layout{};
+    workgroup_layout.workgroupMemoryExplicitLayout = true;
+    device_features12.pNext = &workgroup_layout;
     vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric{};
     barycentric.sType = vk::StructureType::ePhysicalDeviceFragmentShaderBarycentricFeaturesKHR;
     barycentric.pNext = &device_features12;
@@ -16332,6 +16373,7 @@ private:
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
         VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME,
         VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
+        VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
         VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME};
     if (m_rasterization_supported) {
       device_extensions.push_back(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
@@ -23759,6 +23801,51 @@ TestCase VectorVopcCmpxNgtF16CapturedSdwaExecMask() {
   return test;
 }
 
+TestCase VectorVopcCmpxNleF16CapturedSdwaExecMask() {
+  using O = ShaderOpcode;
+  struct CompareCase { u32 value, expected, exec = 1; bool vop3 = false; };
+  const std::array<CompareCase, 10> cases{{
+      {0x3c007e00u, 1}, {0xbc003c00u, 0}, // High half +1/-1; opposite low halves.
+      {0x00003c00u, 0}, {0x80003c00u, 0}, // Signed zeros.
+      {0x7e003c00u, 1}, {0x7c013c00u, 1}, // Quiet/signaling NaN are unordered.
+      {0x7c003c00u, 1}, {0xfc003c00u, 0}, // Infinities.
+      {0x3c000000u, 0, 0},               // Inactive lane cannot enter EXEC.
+      {0x0000bc00u, 1, 1, true},         // VOP3 negates -1 before comparison.
+  }};
+  constexpr u32 sentinel = 0x89abcdefu;
+  TestCase test;
+  test.name = "VectorVopcCmpxNleF16CapturedSdwaExecMask";
+  for (const auto &entry : cases) test.initial.push_back(entry.value);
+  test.expected = test.initial;
+  auto &code = test.code;
+  for (u32 i = 0; i < cases.size(); ++i) {
+    const auto &entry = cases[i];
+    AppendVMovU32(&code, 30, i * 4u);
+    AppendBufferLoadDword(&code, 5, 30);
+    AppendSMovLiteral(&code, 106, sentinel);
+    AppendSMovLiteral(&code, 107, sentinel);
+    code.push_back(EncodeSMovB32(126, InlineU32(entry.exec)));
+    if (entry.vop3) {
+      AppendVop3(&code, 0xfc, 106, Vgpr(5), InlineU32(0), 0, 0, 0, false, 0, 1);
+    } else {
+      code.insert(code.end(), {0x7df900f9u, 0x86050005u});
+    }
+    code.push_back(EncodeSMovB32(8, 126));
+    code.push_back(EncodeSMovB32(126, InlineU32(1)));
+    const u32 out = test.expected.size();
+    code.push_back(EncodeVop1(0x01, 0, 8));
+    AppendStoreVgpr(&code, 0, out);
+    AppendStoreSgprPair(&code, 106, out + 1u);
+    test.expected.insert(test.expected.end(), {entry.expected, sentinel, sentinel});
+  }
+  AppendEnd(&code);
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B32, O::BUFFER_LOAD_DWORD,
+                  O::V_CMPX_NLE_F16, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.decoded_counts = {{"V_CMPX_NLE_F16", cases.size()}};
+  test.required_spirv = {"OpFUnordGreaterThan"};
+  return test;
+}
+
 TestCase VectorCompareInvertedMaskSelect() {
   using O = ShaderOpcode;
 
@@ -26778,6 +26865,95 @@ TestCase DsAtomicReturnVariants() {
        O::DS_MAX_RTN_U32, O::DS_AND_RTN_B32, O::DS_OR_RTN_B32,
        O::DS_XOR_RTN_B32, O::DS_WRXCHG_RTN_B32, O::DS_READ_B32,
        O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+}
+
+TestCase DsOrB64Bounds() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = "DsOrB64Bounds";
+  auto &code = test.code;
+  AppendVMovU32(&code, 0, 0x1234);
+  AppendVMovU32(&code, 7, 0);
+  const u32 initial[] = {0x100, 0x200, 0x400, 0x800, 0x13579bdf};
+  for (u32 i = 0; i < std::size(initial); ++i) {
+    AppendVMovLiteral(&code, 3, initial[i]);
+    code.push_back(EncodeDs0(0x0d, i * 4u));
+    code.push_back(EncodeDs1(0, 3, 7));
+  }
+  AppendVMovU32(&code, 3, 1);
+  AppendVMovU32(&code, 4, 2);
+  AppendVMovU32(&code, 7, 3); // The 64-bit address ignores the low three bits.
+  code.insert(code.end(), {0xd9280000u, 0x00000307u});
+  AppendVMovLiteral(&code, 7, 0x10007);
+  code.push_back(EncodeDs0(0x4a, 2)); // Offset before 16-bit wrap/alignment -> 8.
+  code.push_back(EncodeDs1(0, 3, 7));
+  AppendVMovLiteral(&code, 3, 0xffffffffu);
+  AppendVMovLiteral(&code, 4, 0xffffffffu);
+  AppendVMovU32(&code, 7, 16); // Only one DWORD remains: ignore the entire OR.
+  code.insert(code.end(), {0xd9280000u, 0x00000307u});
+  AppendVMovU32(&code, 7, 0);
+  code.push_back(EncodeSMovB32(126, InlineU32(0)));
+  code.insert(code.end(), {0xd9280000u, 0x00000307u});
+  code.push_back(EncodeSMovB32(126, InlineU32(1)));
+  for (u32 i = 0; i < std::size(initial); ++i) {
+    code.push_back(EncodeDs0(0x36, i * 4u));
+    code.push_back(EncodeDs1(8, 0, 7));
+    AppendStoreVgpr(&code, 8, i);
+  }
+  AppendStoreVgpr(&code, 0, 5); // No-return DS must not overwrite the encoded VDst.
+  AppendEnd(&code);
+  test.expected = {0x101, 0x202, 0x401, 0x802, 0x13579bdf, 0x1234};
+  test.compute_info.lds_size_dwords = 5;
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B32, O::DS_WRITE_B32, O::DS_OR_B64,
+                  O::DS_READ_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpAtomicOr %ulong", "WorkgroupMemoryExplicitLayoutKHR", "Aliased"};
+  return test;
+}
+
+TestCase DsOrB64Contention(u32 wave_size) {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = wave_size == 32 ? "DsOrB64ContentionWave32" : "DsOrB64ContentionWave64";
+  auto &code = test.code;
+  AppendVMovU32(&code, 7, 0);
+  code.push_back(EncodeSop1(0x04, 10, 126));
+  code.push_back(EncodeVopc(0xc2, InlineU32(0), 0));
+  code.push_back(EncodeSop1(0x04, 126, 106));
+  for (u32 offset : {0, 4}) {
+    code.push_back(EncodeDs0(0x0d, offset));
+    code.push_back(EncodeDs1(0, 7, 7));
+  }
+  code.push_back(EncodeSop1(0x04, 126, 10));
+  code.push_back(EncodeSopp(0x0a, 0));
+  AppendVMovU32(&code, 5, 1);
+  AppendVMovU32(&code, 6, 2);
+  code.push_back(EncodeVop2(0x1a, 3, Vgpr(0), 5));
+  code.push_back(EncodeVop2(0x1a, 4, Vgpr(0), 6));
+  AppendSMovLiteral(&code, 126, 0x55555555u);
+  AppendSMovLiteral(&code, 127, 0xaaaaaaaau);
+  code.insert(code.end(), {0xd9280000u, 0x00000307u});
+  code.push_back(EncodeSop1(0x04, 126, 10));
+  code.push_back(EncodeSopp(0x0a, 0));
+  for (u32 half = 0; half < 2; ++half) {
+    code.push_back(EncodeDs0(0x36, half * 4));
+    code.push_back(EncodeDs1(8, 0, 7));
+    AppendStoreVgprAtLaneDwordOffset(&code, 8, 0, half * 128);
+  }
+  AppendEnd(&code);
+  test.expected.assign(128, wave_size == 32 ? 0x55555555u : 0xffffffffu);
+  test.expected.resize(256, wave_size == 32 ? 0xaaaaaaaau : 0xfffffffeu);
+  test.compute_info.threads_num[0] = 128;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.wave_size = wave_size;
+  test.compute_info.lds_size_dwords = 2;
+  test.has_compute_info = true;
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B32, O::S_MOV_B64, O::S_BARRIER,
+                  O::V_CMP_EQ_U32, O::V_LSHLREV_B32, O::V_ADD_NC_U32,
+                  O::DS_WRITE_B32, O::DS_OR_B64, O::DS_READ_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpAtomicOr %ulong", "WorkgroupMemoryExplicitLayoutKHR", "Aliased"};
+  return test;
 }
 
 TestCase DsBoundedAtomicBoundaries(bool decrement, bool gds) {
@@ -30200,6 +30376,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorVopcCmpNgtF16CapturedSdwaAndEdges);
   AddCase(VectorVopcCmpNltF16CapturedSdwaAndEdges);
   AddCase(VectorVopcCmpxNgtF16CapturedSdwaExecMask);
+  AddCase(VectorVopcCmpxNleF16CapturedSdwaExecMask);
   AddCase(VectorCompareInvertedMaskSelect);
   AddCase(BranchSelect);
   AddCase(SimpleLoop);
@@ -30313,6 +30490,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(DsWideGdsPartialBounds);
   AddCase(DsAtomicNoReturnVariants);
   AddCase(DsAtomicReturnVariants);
+  AddCase(DsOrB64Bounds);
+  for (u32 wave_size : {32, 64}) cases.push_back(DsOrB64Contention(wave_size));
   for (bool decrement : {false, true}) {
     for (bool gds : {false, true}) {
       cases.push_back(DsBoundedAtomicBoundaries(decrement, gds));
@@ -32854,6 +33033,15 @@ void CheckShaderRecompilerFatalContracts() {
     (void)CompileCase(test);
   });
 
+  ExpectFatal("GdsOrB64Rejection", [] {
+    TestCase test;
+    test.name = "GdsOrB64Rejection";
+    test.code = {EncodeDs0(0x4a, 0, true), EncodeDs1(0, 3, 7)};
+    AppendEnd(&test.code);
+    test.opcodes = {ShaderOpcode::DS_OR_B64, ShaderOpcode::S_ENDPGM};
+    (void)CompileCase(test);
+  });
+
   {
     ShaderRecompiler::IR::Program program;
     program.resource_tracking_complete = true;
@@ -35115,6 +35303,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorVopcCmpNgtF16CapturedSdwaAndEdges());
     RunCase(&vulkan, VectorVopcCmpxNgtF16CapturedSdwaExecMask());
+    RunCase(&vulkan, VectorVopcCmpxNleF16CapturedSdwaExecMask());
     RunCase(&vulkan, VectorCompareF16Ops());
     RunCase(&vulkan, Wave32VccMasksPreserveOtherHalf());
     RunCase(&vulkan, VectorVop3FloatCompareNegSourceModifier());

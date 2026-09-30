@@ -222,6 +222,7 @@ void                  EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst
 void                  EmitStoreMemory(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitAtomic32(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitBufferAtomic64(ValueEmitContext& ctx, const IR::Inst& inst);
+void                  EmitSharedAtomicOr64(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitBufferFloatAtomic(ValueEmitContext& ctx, const IR::Inst& inst);
 void                  EmitSharedFloatAtomic(ValueEmitContext& ctx, const IR::Inst& inst);
 uint32_t              EmitSharedIncDec(ValueEmitContext& ctx, const IR::Inst& inst);

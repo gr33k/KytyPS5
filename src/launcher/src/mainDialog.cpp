@@ -3,6 +3,7 @@
 #include "configuration.h"
 #include "configurationItem.h"
 #include "configurationListWidget.h"
+#include "controllerLightbar.h"
 #include "gameContent.h"
 #include "launcherTheme.h"
 #include "patchesDialog.h"
@@ -118,6 +119,7 @@ private:
 	Ui::MainDialog* m_ui             = {nullptr};
 	MainDialog*     m_main_dialog    = nullptr;
 	UpdateChecker*  m_update_checker = nullptr;
+	ControllerLightbar m_lightbar;
 	QString         m_interpreter;
 	QString         m_version;
 
@@ -156,6 +158,7 @@ MainDialog::MainDialog(QWidget* parent): QMainWindow(parent), m_p(new MainDialog
 }
 
 MainDialogPrivate::~MainDialogPrivate() {
+	m_process.disconnect(this);
 	delete m_ui;
 }
 
@@ -173,6 +176,12 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(main_dialog, &MainDialog::Start, this, &MainDialogPrivate::FindInterpreter,
 	        Qt::QueuedConnection);
 	connect(m_ui->widget, &ConfigurationListWidget::Select, this, &MainDialogPrivate::Update);
+	connect(m_ui->widget, &ConfigurationListWidget::PreviewControllerColor, this,
+	        [this](const QString& color) {
+		        if (m_process.state() == QProcess::NotRunning) {
+			        m_lightbar.SetColor(color);
+		        }
+	        });
 	connect(m_ui->widget, &ConfigurationListWidget::Run, this, &MainDialogPrivate::Run);
 	connect(m_update_checker, &UpdateChecker::CheckingChanged, m_action_updates,
 	        &QAction::setDisabled);
@@ -195,6 +204,14 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 			        ShowFailureDialog(exitCode, exitStatus);
 		        }
 	        });
+	connect(&m_process, &QProcess::stateChanged, this, [this](QProcess::ProcessState state) {
+		if (state == QProcess::NotRunning) {
+			if (m_running_item != nullptr) {
+				m_running_item->SetRunning(false);
+			}
+			Update();
+		}
+	});
 
 	m_main_dialog->restoreGeometry(g_last_geometry);
 	m_main_dialog->restoreState(g_last_state);
@@ -552,6 +569,9 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	if (!info.audio_input_device.isEmpty()) {
 		args << "--mic" << info.audio_input_device;
 	}
+	if (!info.controller_color.isEmpty()) {
+		args << "--controller-color" << info.controller_color;
+	}
 	args << "--present-mode" << EnumToText(info.present_mode);
 	if (info.gpu_index >= 0) {
 		args << "--gpu" << QString::number(info.gpu_index);
@@ -837,6 +857,7 @@ void MainDialogPrivate::Run() {
 	}
 
 	m_running_item->SetRunning(true);
+	m_lightbar.Stop();
 
 	auto info = m_ui->widget->CreateConfiguration(*m_running_item);
 	m_run_timer.start();
@@ -966,6 +987,13 @@ void MainDialogPrivate::Update() {
 	m_action_trophies->setEnabled(item != nullptr && has_trophies);
 
 	m_status_games->setText(status_text);
+
+	if (m_process.state() != QProcess::NotRunning) {
+		m_lightbar.Stop();
+		return;
+	}
+	m_lightbar.SetColor(item != nullptr ? m_ui->widget->CreateConfiguration(*item)->controller_color
+	                                    : m_ui->widget->GetGlobalControllerColor());
 }
 
 #include "mainDialog.moc"

@@ -264,8 +264,8 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 	for (int bi = 0; bi < vs_input_info.buffers_num; bi++) {
 		const auto& b = vs_input_info.buffers[bi];
 		LOGF("DrawInputState[%u]: vb[%d] addr=0x%010" PRIx64
-		     " stride=%u records=%u fetch_index=%u attr_num=%d\n",
-		     log_id, bi, b.addr, b.stride, b.num_records, b.fetch_index, b.attr_num);
+		     " stride=%u records=%u fetch_index=%u\n",
+		     log_id, bi, b.addr, b.stride, b.num_records, b.fetch_index);
 
 		const auto* bytes = reinterpret_cast<const uint8_t*>(b.addr);
 		if (bytes != nullptr && b.stride != 0) {
@@ -287,11 +287,13 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 				     raw[5], raw[6], raw[7], raw[8], flt[0], flt[1], flt[2], flt[3], flt[4], flt[5],
 				     flt[6], flt[7], flt[8]);
 
-				for (int ai = 0; ai < b.attr_num; ai++) {
-					const auto  res_index = b.attr_indices[ai];
-					const auto& r         = vs_input_info.resources[res_index];
-					const auto& rd        = vs_input_info.resources_dst[res_index];
-					const auto  offset    = b.attr_offsets[ai];
+				for (int ai = 0; ai < vs_input_info.resources_num; ai++) {
+					const auto& r  = vs_input_info.resources[ai];
+					const auto& rd = vs_input_info.resources_dst[ai];
+					if (rd.buffer_index != bi) {
+						continue;
+					}
+					const auto offset = static_cast<uint32_t>(r.Base48() - b.addr);
 					if (offset + 4u <= b.stride &&
 					    r.Format() == Prospero::BufferFormat::k8_8_8_8UNorm) {
 						uint32_t packed = 0;
@@ -311,14 +313,16 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 			}
 		}
 
-		for (int ai = 0; ai < b.attr_num; ai++) {
-			const auto  res_index = b.attr_indices[ai];
-			const auto& r         = vs_input_info.resources[res_index];
-			const auto& rd        = vs_input_info.resources_dst[res_index];
-			LOGF("DrawInputState[%u]: attr[%d] res=%d offset=%u dst=v%d regs=%d fetch_index=%u "
+		for (int ai = 0; ai < vs_input_info.resources_num; ai++) {
+			const auto& r  = vs_input_info.resources[ai];
+			const auto& rd = vs_input_info.resources_dst[ai];
+			if (rd.buffer_index != bi) {
+				continue;
+			}
+			LOGF("DrawInputState[%u]: attr[%d] offset=%u dst=v%d regs=%d fetch_index=%u "
 			     "sharp=%08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 "\n",
-			     log_id, ai, res_index, b.attr_offsets[ai], rd.register_start, rd.registers_num,
-			     rd.fetch_index, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
+			     log_id, ai, static_cast<uint32_t>(r.Base48() - b.addr), rd.register_start,
+			     rd.registers_num, rd.fetch_index, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
 		}
 	}
 }
@@ -648,19 +652,22 @@ struct PreparedIndexBuffer {
 	vk::IndexType  type   = vk::IndexType::eUint16;
 };
 
-static uint64_t VertexBufferDescriptorSize(const ShaderVertexInputBuffer& buffer,
-                                           const ShaderVertexInputInfo& info) {
+static uint64_t VertexBufferDescriptorSize(int binding, const ShaderVertexInputInfo& info) {
+	const auto& buffer = info.buffers[binding];
 	if (buffer.stride != 0 || buffer.num_records == 0) {
 		return static_cast<uint64_t>(buffer.stride) * buffer.num_records;
 	}
 
 	uint64_t size = 0;
-	for (int i = 0; i < buffer.attr_num; i++) {
-		const auto& resource = info.resources[buffer.attr_indices[i]];
+	for (int i = 0; i < info.resources_num; i++) {
+		if (info.resources_dst[i].buffer_index != binding) {
+			continue;
+		}
+		const auto& resource = info.resources[i];
 		// RDNA2 OOB_SELECT=2 only checks NumRecords != 0. A constant attribute still
 		// fetches its entire format; NumRecords is not a byte count in this mode.
 		const uint64_t extent = resource.OutOfBounds() == 2
-		                            ? static_cast<uint64_t>(buffer.attr_offsets[i]) +
+		                            ? resource.Base48() - buffer.addr +
 		                                  ShaderRecompiler::Format::GetFormatInfo(resource.Format()).byte_size
 		                            : buffer.num_records;
 		size = std::max(size, extent);
@@ -697,7 +704,7 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 	uint32_t                                                      range_count = 0;
 	for (int i = 0; i < vs_input_info.buffers_num; i++) {
 		const auto& vertex = vs_input_info.buffers[i];
-		const auto  size   = VertexBufferDescriptorSize(vertex, vs_input_info);
+		const auto  size   = VertexBufferDescriptorSize(i, vs_input_info);
 		sizes[i]           = size;
 		if (size == 0) {
 			continue;

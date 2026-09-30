@@ -548,6 +548,7 @@ spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode) {
 		case IR::ValueOpcode::SharedAtomicAnd32: return spv::OpAtomicAnd;
 		case IR::ValueOpcode::BufferAtomicOr32:
 		case IR::ValueOpcode::BufferAtomicOr64:
+		case IR::ValueOpcode::SharedAtomicOr64:
 		case IR::ValueOpcode::SharedAtomicOr32: return spv::OpAtomicOr;
 		case IR::ValueOpcode::BufferAtomicXor32:
 		case IR::ValueOpcode::SharedAtomicXor32: return spv::OpAtomicXor;
@@ -1062,6 +1063,32 @@ uint32_t EmitBufferAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 			        return Unary(state, spv::OpBitcast, TypeU64(state), old);
 		        });
 	    });
+}
+
+void EmitSharedAtomicOr64(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto& state = ctx.state;
+	const auto& mem = ctx.Memory(inst);
+	EnsureLdsStorage(state);
+	EmitIfCondition(state, ctx.Arg(inst, 2), [&]() {
+		const auto address = Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+		                            ByteAddress(ctx, inst, mem), ConstantU32(state, 0xfff8u));
+		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address,
+		                          ConstantU32(state, 3u));
+		const auto in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index,
+		                              ConstantU32(state, LdsDwordCount(state) / 2u));
+		EmitIfCondition(state, in_bounds, [&]() {
+			const auto pointer = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpAccessChain,
+			                          TypePointer(state, spv::StorageClassWorkgroup, TypeScalarU64(state)),
+			                          pointer, state.lds_u64_variable, ConstantU32(state, 0), index);
+			const auto value = Unary(state, spv::OpBitcast, TypeScalarU64(state), ctx.Arg(inst, 1));
+			state.builder.AddFunction(
+			    SpirvAtomicOpcode(inst.GetOpcode()), TypeScalarU64(state), state.builder.AllocateId(),
+			    pointer, ConstantU32(state, spv::ScopeWorkgroup),
+			    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask |
+			                           spv::MemorySemanticsWorkgroupMemoryMask), value);
+		});
+	});
 }
 
 uint32_t EmitBufferFloatAtomic(ValueEmitContext& ctx, const IR::Inst& inst) {
