@@ -273,6 +273,7 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	        ? info.console_language
 	        : Configuration::DEFAULT_CONSOLE_LANGUAGE);
 	m_ui->checkBox_shader_validation->setChecked(info.shader_validation_enabled);
+	m_ui->checkBox_gpu_assisted_validation->setChecked(info.gpu_assisted_validation_enabled);
 	m_ui->checkBox_vulkan_validation->setChecked(info.vulkan_validation_enabled);
 	m_ui->checkBox_renderdoc_capture->setChecked(info.renderdoc_enabled);
 	m_ui->checkBox_amd_cpu->setChecked(info.amd_cpu_enabled);
@@ -416,6 +417,7 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui) {
 	info.console_language          = ui.comboBox_console_language->currentIndex();
 	info.vulkan_validation_enabled = ui.checkBox_vulkan_validation->isChecked();
 	info.shader_validation_enabled = ui.checkBox_shader_validation->isChecked();
+	info.gpu_assisted_validation_enabled = ui.checkBox_gpu_assisted_validation->isChecked();
 	info.renderdoc_enabled         = ui.checkBox_renderdoc_capture->isChecked();
 	info.amd_cpu_enabled           = ui.checkBox_amd_cpu->isChecked();
 #if defined(_WIN32)

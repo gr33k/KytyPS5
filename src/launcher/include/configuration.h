@@ -99,6 +99,7 @@ public:
 	int                    console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = true;
+	bool                   gpu_assisted_validation_enabled = false;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::Performance;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	QString                shader_log_folder           = "_Shaders";
@@ -131,6 +132,7 @@ public:
 		console_language            = other.console_language;
 		vulkan_validation_enabled   = other.vulkan_validation_enabled;
 		shader_validation_enabled   = other.shader_validation_enabled;
+		gpu_assisted_validation_enabled = other.gpu_assisted_validation_enabled;
 		shader_optimization_type    = other.shader_optimization_type;
 		shader_log_direction        = other.shader_log_direction;
 		shader_log_folder           = other.shader_log_folder;
@@ -178,6 +180,7 @@ public:
 		KYTY_CFG_SET(console_language);
 		KYTY_CFG_SET(vulkan_validation_enabled);
 		KYTY_CFG_SET(shader_validation_enabled);
+		KYTY_CFG_SET(gpu_assisted_validation_enabled);
 		KYTY_CFG_SET(shader_optimization_type);
 		KYTY_CFG_SET(shader_log_direction);
 		KYTY_CFG_SET(shader_log_folder);
@@ -225,6 +228,7 @@ public:
 		}
 		KYTY_CFG_GET(vulkan_validation_enabled);
 		KYTY_CFG_GET(shader_validation_enabled);
+		KYTY_CFG_GET(gpu_assisted_validation_enabled);
 		KYTY_CFG_GET(shader_optimization_type);
 		KYTY_CFG_GET(shader_log_direction);
 		KYTY_CFG_GET(shader_log_folder);

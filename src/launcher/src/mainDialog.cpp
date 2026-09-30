@@ -587,6 +587,7 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	args << "--console-language" << QString::number(info.console_language);
 	args << "--vulkan-validation" << BoolArg(info.vulkan_validation_enabled);
 	args << "--shader-validation" << BoolArg(info.shader_validation_enabled);
+	args << "--gpu-assisted-validation" << BoolArg(info.gpu_assisted_validation_enabled);
 	args << "--shader-optimization-type" << EnumToText(info.shader_optimization_type);
 	args << "--shader-log-direction" << EnumToText(info.shader_log_direction);
 	args << "--shader-log-folder" << info.shader_log_folder;

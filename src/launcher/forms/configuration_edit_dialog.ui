@@ -290,6 +290,12 @@
           <property name="clearButtonEnabled"><bool>true</bool></property>
          </widget>
         </item>
+        <item row="5" column="0" colspan="4">
+         <widget class="QCheckBox" name="checkBox_gpu_assisted_validation">
+          <property name="toolTip"><string>Bounds-check shader accesses on the GPU. Implies Vulkan validation; very slow</string></property>
+          <property name="text"><string>GPU-assisted validation (very slow)</string></property>
+         </widget>
+        </item>
        </layout>
       </widget>
      </item>
