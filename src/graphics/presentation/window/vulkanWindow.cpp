@@ -509,6 +509,10 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	     static_cast<vk::ShaderStageFlags::MaskType>(graphics.required_subgroup_size_stages),
 	     graphics.compute_subgroup_size_control_enabled ? "true" : "false",
 	     graphics.SupportsComputeWave64() ? "true" : "false");
+	std::printf("Vulkan subgroup: default=%u min=%u max=%u size_control=%s wave64=%s\n",
+	            graphics.subgroup_size, graphics.min_subgroup_size, graphics.max_subgroup_size,
+	            graphics.compute_subgroup_size_control_enabled ? "true" : "false",
+	            graphics.SupportsComputeWave64() ? "true" : "false");
 	graphics.provoking_vertex_last_enabled = provoking_extension && provoking_vertex.provokingVertexLast;
 	graphics.attachment_feedback_loop_enabled =
 	    feedback_extensions && feedback_layout.attachmentFeedbackLoopLayout &&
