@@ -2,10 +2,12 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include <cstdio>
 #include <cstring>
 #include <numeric>
 #include <vk_mem_alloc.h>
@@ -84,6 +86,10 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	    &native_buffer, &m_allocation, &allocation_result));
 	if (result != vk::Result::eSuccess) {
 		graphics.LogMemoryBudget();
+		LOGF("Buffer: vmaCreateBuffer failed: size=0x%llx usage=0x%x result=%s\n",
+		     static_cast<unsigned long long>(size), static_cast<uint32_t>(flags),
+		     vk::to_string(result).c_str());
+		std::fflush(stdout);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
