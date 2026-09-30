@@ -24,6 +24,7 @@
 #include "kernel/eventQueue.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
+#include <cstdio>
 
 #include <algorithm>
 #include <array>
@@ -268,12 +269,12 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
-	// One line per dispatch: submit ids in submit-failure reports map back
-	// to the exact shader hash here.
-	LOGF("DispatchDirect: submit=%llu shader_hash=0x%016llx groups=%ux%ux%u mode=0x%x\n",
-	     static_cast<unsigned long long>(submit_id),
-	     static_cast<unsigned long long>(program.shader_hash), thread_group_x, thread_group_y,
-	     thread_group_z, mode);
+	// One line per dispatch (printf so it lands in the run log): submit ids
+	// in submit-failure reports map back to the exact shader hash here.
+	std::printf("DispatchDirect: submit=%llu shader_hash=0x%016llx groups=%ux%ux%u mode=0x%x\n",
+	            static_cast<unsigned long long>(submit_id),
+	            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
+	            thread_group_y, thread_group_z, mode);
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
 		ResetBindings();
 		return;
