@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <optional>
 
@@ -392,8 +393,41 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		                  m_command.m_debug_submit_id, m_command.m_debug_arg0,
 		                  m_command.m_debug_arg1, m_command.m_debug_arg2, m_command.m_debug_arg3,
 		                  m_command.m_debug_arg4);
+		// The failed submit was not executed. Resubmit only the semaphore
+		// signals (no command buffers) so timeline waits keep flowing, drop
+		// this batch, and continue with the next one. If the signal-only
+		// resubmit also fails the device is really lost: abort.
+		{
+			Common::LockGuard lock(graphics.queue_mutex);
+			vk::TimelineSemaphoreSubmitInfo timeline_retry {};
+			timeline_retry.waitSemaphoreValueCount   = submit.num_wait_semaphores;
+			timeline_retry.pWaitSemaphoreValues      = submit.wait_ticks.data();
+			timeline_retry.signalSemaphoreValueCount = submit.num_signal_semaphores;
+			timeline_retry.pSignalSemaphoreValues    = submit.signal_ticks.data();
+			vk::SubmitInfo retry_info {};
+			retry_info.pNext                = &timeline_retry;
+			retry_info.waitSemaphoreCount   = submit.num_wait_semaphores;
+			retry_info.pWaitSemaphores      = submit.wait_semaphores.data();
+			retry_info.pWaitDstStageMask    = submit.wait_stages.data();
+			retry_info.signalSemaphoreCount = submit.num_signal_semaphores;
+			retry_info.pSignalSemaphores    = submit.signal_semaphores.data();
+			result = graphics.queue.submit(1, &retry_info, nullptr);
+		}
+		if (result != vk::Result::eSuccess) {
+			ReportVulkanFatal("vkQueueSubmit (signal-only retry)", result, tick,
+			                  m_command.m_debug_op, m_command.m_debug_submit_id,
+			                  m_command.m_debug_arg0, m_command.m_debug_arg1,
+			                  m_command.m_debug_arg2, m_command.m_debug_arg3,
+			                  m_command.m_debug_arg4);
+			EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+		}
+		static std::atomic_uint submit_recoveries = 0;
+		if (submit_recoveries.fetch_add(1, std::memory_order_relaxed) < 8) {
+			LOGF("vkQueueSubmit: dropped failed batch (tick=%llu), continuing\n",
+			     static_cast<unsigned long long>(tick));
+			std::fflush(stdout);
+		}
 	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	m_command.m_buffer = nullptr;
 	return tick;
