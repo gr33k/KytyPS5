@@ -395,13 +395,20 @@ struct PipelineCache::ProgramCache {
 			if (!ShaderRecompiler::IR::MaterializeResources(
 			        entry->second.resource_plan, runtime, entry->second.resources,
 			        entry->second.specialization)) {
-				LOGF("Resource materialization failed: hash=0x%016llx buffers=%zu images=%zu "
-				     "samplers=%zu\n",
-				     static_cast<unsigned long long>(params.hash),
-				     translated.program.info.buffers.size(),
-				     translated.program.info.images.size(),
-				     translated.program.info.samplers.size());
-				EXIT_IF(true);
+				// Unsupported resource shapes (e.g. 64-bit image atomics) skip the
+				// draw/dispatch instead of aborting the game; the null program is
+				// cached via skip_dispatch so each unique shader logs once here.
+				static std::atomic_uint skipped_mat_count = 0;
+				if (skipped_mat_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+					LOGF("Resource materialization failed: hash=0x%016llx buffers=%zu images=%zu "
+					     "samplers=%zu; skipping draws/dispatches with this shader\n",
+					     static_cast<unsigned long long>(params.hash),
+					     translated.program.info.buffers.size(),
+					     translated.program.info.images.size(),
+					     translated.program.info.samplers.size());
+				}
+				entry->second.skip_dispatch = true;
+				return {};
 			}
 		}
 		entry->second.permutations.push_back(CompilePermutation(
@@ -701,9 +708,15 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	result.skip_draw = skip_draw;
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
+		if (!result.pixel) {
+			result.skip_draw = true;
+		}
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
 		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
+		if (!result.vertex[i]) {
+			result.skip_draw = true;
+		}
 	}
 	return result;
 }

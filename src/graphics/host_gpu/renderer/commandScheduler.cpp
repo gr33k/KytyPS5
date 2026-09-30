@@ -328,6 +328,14 @@ bool CommandScheduler::IsFree(uint64_t tick) {
 }
 
 void CommandScheduler::CheckActive() const {
+	if (Active()) {
+		return;
+	}
+	// No active command (e.g. GPU work requested outside a frame). Log the
+	// calling context before aborting so the next run identifies the path.
+	LOGF("CommandScheduler: no active command (in_deferred=%d)\n",
+	     InDeferredOperation() ? 1 : 0);
+	std::fflush(stdout);
 	EXIT_IF(!Active());
 }
 
