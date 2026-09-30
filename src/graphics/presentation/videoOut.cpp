@@ -40,6 +40,13 @@ LIB_NAME("VideoOut", "VideoOut");
 
 namespace EventQueue = LibKernel::EventQueue;
 
+// Frames actually presented (for run-progress tracking).
+static std::atomic_uint64_t g_presented_frames {0};
+
+uint64_t PresentedFrames() noexcept {
+	return g_presented_frames.load(std::memory_order_relaxed);
+}
+
 constexpr int      VIDEO_OUT_EVENT_FLIP                                 = 0;
 constexpr int      VIDEO_OUT_EVENT_VBLANK                               = 1;
 constexpr int      VIDEO_OUT_EVENT_PRE_VBLANK_START                     = 2;
@@ -1249,6 +1256,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	}
 	if (due) {
 		m_presenter.Present(std::span(layers.data(), count));
+		g_presented_frames.fetch_add(1, std::memory_order_relaxed);
 	}
 
 	m_mutex.Lock();
