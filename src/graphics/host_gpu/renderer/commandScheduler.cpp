@@ -395,6 +395,13 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
+	// TEMP-DIAG: full GPU sync per submit (KYTY_SYNC_SUBMIT). Distinguishes
+	// host-GPU lifetime races (hang disappears) from shader-side hangs
+	// (GPU never finishes: process stalls making no progress).
+	if (std::getenv("KYTY_SYNC_SUBMIT") != nullptr) {
+		m_master.Wait(tick);
+	}
+
 	m_command.m_buffer = nullptr;
 	return tick;
 }

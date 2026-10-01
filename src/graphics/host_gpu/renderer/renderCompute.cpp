@@ -25,6 +25,7 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 #include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
 #include <array>
@@ -207,6 +208,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchDirect), submit_id,
 	                    thread_group_x, thread_group_y, thread_group_z, mode,
 	                    sh_ctx.GetCs().cs_regs.data_addr);
+	// TEMP-DIAG: bisect GPU hang (compute vs draws). Revert after triage.
+	if (std::getenv("KYTY_SKIP_COMPUTE") != nullptr) {
+		static std::atomic_uint skipped_cs = 0;
+		if (skipped_cs.fetch_add(1, std::memory_order_relaxed) < 3) {
+			std::printf("TEMP-DIAG: skipping all compute dispatches\n");
+		}
+		return;
+	}
 
 	if (thread_group_x == 0 || thread_group_y == 0 || thread_group_z == 0) {
 		static std::atomic<uint32_t> log_count {0};
@@ -275,6 +284,23 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	            static_cast<unsigned long long>(submit_id),
 	            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
 	            thread_group_y, thread_group_z, mode, program.wave_size);
+	// TEMP-DIAG: skip dispatches at/after a submit id (KYTY_SKIP_SUBMIT_FROM).
+	if (const char* submit_from = std::getenv("KYTY_SKIP_SUBMIT_FROM");
+	    submit_from != nullptr && submit_from[0] != '\0') {
+		if (submit_id >= static_cast<uint64_t>(std::strtoull(submit_from, nullptr, 10))) {
+			return;
+		}
+	}
+	// TEMP-DIAG: per-shader skip via KYTY_SKIP_CS_HASH (hex, e.g. 150aa7db28da4b17).
+	if (const char* skip_hash = std::getenv("KYTY_SKIP_CS_HASH");
+	    skip_hash != nullptr && skip_hash[0] != '\0') {
+		char hash_text[17] = {};
+		std::snprintf(hash_text, sizeof(hash_text), "%016llx",
+		            static_cast<unsigned long long>(program.shader_hash));
+		if (std::strstr(skip_hash, hash_text) != nullptr) {
+			return;
+		}
+	}
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
 		ResetBindings();
 		return;
@@ -420,6 +446,10 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchIndirect), submit_id,
 	                    static_cast<uint32_t>(args_addr), static_cast<uint32_t>(args_addr >> 32u),
 	                    0, mode, buffer.GetShaders().GetCs().cs_regs.data_addr);
+	// TEMP-DIAG: bisect GPU hang (compute vs draws). Revert after triage.
+	if (std::getenv("KYTY_SKIP_COMPUTE") != nullptr) {
+		return;
+	}
 	Common::LockGuard lock(m_context.GetMutex());
 	const auto& cs_regs = buffer.GetShaders().GetCs();
 	if (cs_regs.cs_regs.data_addr == 0) {
@@ -450,6 +480,21 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
+	// TEMP-DIAG: log indirect counts (best effort: GPU-produced args may be
+	// stale on the CPU side, but CPU-produced args show exactly).
+	{
+		uint32_t indirect_xyz[3] = {};
+		const auto mapped        = args_buffer->Mapped();
+		if (args_offset + sizeof(indirect_xyz) <= mapped.size()) {
+			std::memcpy(indirect_xyz, mapped.data() + args_offset, sizeof(indirect_xyz));
+		}
+		std::printf("DispatchIndirect: submit=%llu shader_hash=0x%016llx args_addr=0x%llx "
+		            "xyz=%ux%ux%u mode=0x%x\n",
+		            static_cast<unsigned long long>(submit_id),
+		            static_cast<unsigned long long>(program.shader_hash),
+		            static_cast<unsigned long long>(args_addr), indirect_xyz[0], indirect_xyz[1],
+		            indirect_xyz[2], mode);
+	}
 	RebindBuffers(bindings);
 	PreparedBindings* descriptor_stage = &bindings;
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,

@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
+#include <cstdio>
 
 namespace Libs::Graphics::ShaderRecompiler::Frontend {
 namespace {
@@ -186,6 +187,9 @@ void Translator::EmitWaitcnt() {
 }
 
 void Translator::S_BARRIER() {
+	// TEMP-DIAG: count guest barriers per shader to find dropped-barrier races.
+	std::printf("CSBarrier: shader_hash=0x%016llx\n",
+	            static_cast<unsigned long long>(program.shader_hash));
 	ir.Emit(IR::ValueOpcode::Barrier);
 }
 
