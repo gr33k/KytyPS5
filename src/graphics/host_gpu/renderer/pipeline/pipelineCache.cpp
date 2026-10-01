@@ -224,6 +224,9 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::vector<Permutation>                    permutations;
+		// Set when resource materialization failed: draws/dispatches using
+		// this shader are skipped instead of aborting the game.
+		bool                                        skip_dispatch = false;
 	};
 
 	struct ProgramKeyHash {
@@ -319,9 +322,20 @@ struct PipelineCache::ProgramCache {
 			.validate_memory_range      = ValidateShaderGuestMemoryRange,
 		};
 		if (entry != programs.end()) {
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, entry->second.resources,
-			    entry->second.specialization));
+			if (entry->second.skip_dispatch) {
+				return {};
+			}
+			if (!ShaderRecompiler::IR::MaterializeResources(
+			        entry->second.resource_plan, runtime, entry->second.resources,
+			        entry->second.specialization)) {
+				static std::atomic_uint skipped_mat_hit_count = 0;
+				if (skipped_mat_hit_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+					LOGF("Resource materialization failed on cache hit; skipping draws/dispatches "
+					     "with this shader\n");
+				}
+				entry->second.skip_dispatch = true;
+				return {};
+			}
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations, [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
