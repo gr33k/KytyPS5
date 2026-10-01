@@ -257,10 +257,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	input_info.dispatch_thread_dimensions = use_thread_dimensions;
 	const auto compute_program =
 	    m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
-	if (!compute_program) {
-		// Temporary until RT is implemented.
-		return;
-	}
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
@@ -275,15 +271,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	            static_cast<unsigned long long>(submit_id),
 	            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
 	            thread_group_y, thread_group_z, mode, program.wave_size);
-	if (TryConsumeComputeMetaClear(input_info, buffer)) {
+	if (resources.specialization_reads.empty() &&
+	    (TryConsumeComputeMetaClear(input_info, buffer) ||
+	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
+	                                 thread_group_z, mode))) {
 		ResetBindings();
 		return;
 	}
-	if (TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
-	                                thread_group_z, mode)) {
-		ResetBindings();
-		return;
-	}
+
 	const bool large_workgroup =
 	    (input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2] >= 512);
 	const bool                   has_sampler = !program.info.samplers.empty();
@@ -428,10 +423,6 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	ShaderComputeInputInfo input_info {};
 	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
 	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
-	if (!compute_program) {
-		// Temporary until RT is implemented.
-		return;
-	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	if (pipeline.pipeline == nullptr) {
