@@ -193,8 +193,9 @@ static QStringList GetSaveDataDirs(const Configuration& info) {
 
 ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
     : QWidget(parent), m_ui(new Ui::ConfigurationListWidget) {
-	m_compatibility = new CompatibilityDatabase(
-	    QCoreApplication::arguments().contains(QStringLiteral("--local")), this);
+	// Local per-game notes always apply on top of the remote database,
+	// so the user's own status and comments are editable without flags.
+	m_compatibility = new CompatibilityDatabase(true, this);
 	m_ui->setupUi(this);
 	ConfigureGameList(m_ui);
 
@@ -231,13 +232,8 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 	m_ui->cfgs_list->setDragDropMode(QAbstractItemView::NoDragDrop);
 
 	ReadSettings();
-	if (m_compatibility->IsLocal()) {
-		m_compatibility->Load();
-	}
+	m_compatibility->Load();
 	ScanGameDirectory();
-	if (!m_compatibility->IsLocal()) {
-		m_compatibility->Load();
-	}
 }
 
 ConfigurationListWidget::~ConfigurationListWidget() {

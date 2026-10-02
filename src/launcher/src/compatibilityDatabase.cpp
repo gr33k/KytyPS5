@@ -130,26 +130,35 @@ const CompatibilityEntry* CompatibilityDatabase::Find(const QString& title_id) c
 	return entry != m_entries.constEnd() ? &entry.value() : nullptr;
 }
 
-void CompatibilityDatabase::Load() {
-	if (m_local) {
-		QFile file(QDir(".").absoluteFilePath(FILE_NAME));
-		if (!file.exists()) {
-			emit Updated();
-			return;
-		}
-		if (!file.open(QIODevice::ReadOnly)) {
-			qWarning() << "Could not open compatibility database:" << file.errorString();
-			return;
-		}
-		auto result = Parse(file.readAll());
-		if (!result.error.isEmpty()) {
-			qWarning() << result.error;
-			return;
-		}
-		m_entries = std::move(result.entries);
-		emit Updated();
+void CompatibilityDatabase::LoadLocalFile() {
+	QFile file(QDir(".").absoluteFilePath(FILE_NAME));
+	if (!file.exists()) {
 		return;
 	}
+	if (!file.open(QIODevice::ReadOnly)) {
+		qWarning() << "Could not open compatibility database:" << file.errorString();
+		return;
+	}
+	auto result = Parse(file.readAll());
+	if (!result.error.isEmpty()) {
+		qWarning() << result.error;
+		return;
+	}
+	m_local_entries = std::move(result.entries);
+}
+
+void CompatibilityDatabase::ApplyLocalOverrides() {
+	for (auto it = m_local_entries.constBegin(); it != m_local_entries.constEnd(); ++it) {
+		m_entries[it.key()] = it.value();
+	}
+}
+
+void CompatibilityDatabase::Load() {
+	// Local overrides always apply on top of the remote database, so the
+	// user's own per-game status and comments survive refreshes.
+	LoadLocalFile();
+	ApplyLocalOverrides();
+	emit Updated();
 
 	auto* watcher = new QFutureWatcher<LoadResult>(this);
 	connect(watcher, &QFutureWatcher<LoadResult>::finished, this, [this, watcher]() {
@@ -160,32 +169,45 @@ void CompatibilityDatabase::Load() {
 			return;
 		}
 		m_entries = result.entries;
+		ApplyLocalOverrides();
 		emit Updated();
 	});
 	watcher->setFuture(QtConcurrent::run(Download));
 }
 
+void CompatibilityDatabase::PruneDefault(const QString& key) {
+	const auto it = m_local_entries.constFind(key);
+	if (it != m_local_entries.constEnd() &&
+	    it->status == Configuration::GameStatus::Unknown && it->comment.isEmpty()) {
+		m_local_entries.erase(it);
+	}
+}
+
 void CompatibilityDatabase::SetStatus(const QString& title_id, Configuration::GameStatus status) {
 	const auto key = TitleKey(title_id);
-	if (!m_local || key.isEmpty()) {
+	if (key.isEmpty()) {
 		return;
 	}
-	m_entries[key].status = status;
+	m_entries[key].status       = status;
+	m_local_entries[key].status = status;
+	PruneDefault(key);
 	Save();
 }
 
 void CompatibilityDatabase::SetComment(const QString& title_id, const QString& comment) {
 	const auto key = TitleKey(title_id);
-	if (!m_local || key.isEmpty()) {
+	if (key.isEmpty()) {
 		return;
 	}
-	m_entries[key].comment = comment;
+	m_entries[key].comment       = comment;
+	m_local_entries[key].comment = comment;
+	PruneDefault(key);
 	Save();
 }
 
 void CompatibilityDatabase::Save() const {
 	QJsonObject root;
-	for (auto it = m_entries.constBegin(); it != m_entries.constEnd(); ++it) {
+	for (auto it = m_local_entries.constBegin(); it != m_local_entries.constEnd(); ++it) {
 		root.insert(it.key(),
 		            QJsonObject {{QStringLiteral("status"), StatusToText(it.value().status)},
 		                         {QStringLiteral("comment"), it.value().comment}});
