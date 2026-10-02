@@ -12,6 +12,13 @@ endif()
 
 project(Kyty)
 
+# LOCAL-ONLY: plain clang.exe on Windows predefines _MSC_VER, so MSVC-isms in
+# vendored C (e.g. cpuinfo's _BitScanReverse without intrin.h) hit clang's
+# default -Werror=implicit-function-declaration. Downgrade to a warning for C.
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND WIN32)
+	add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-function-declaration>)
+endif()
+
 find_program(SCCACHE_PROGRAM sccache)
 find_program(CCACHE_PROGRAM ccache)
 
