@@ -17,10 +17,7 @@ add_executable(launcher WIN32
 	${launcher_src}
 	${launcher_forms}
 	resources.qrc
-	# LOCAL-ONLY: the SDK rc.exe hangs indefinitely under cmake -E cmake_llvm_rc
-	# on this machine (0 CPU, 0-byte output, reproducible). Skip the icon
-	# resource so the build can proceed. Revert if upstream changes RC handling.
-	# $<IF:$<BOOL:${WIN32}>,launcher.rc,>
+	$<IF:$<BOOL:${WIN32}>,launcher.rc,>
 )
 
 

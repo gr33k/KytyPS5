@@ -729,12 +729,9 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 endif()
 
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
-# LOCAL-ONLY: the SDK rc.exe hangs indefinitely under cmake -E cmake_llvm_rc
-# on this machine (0 CPU, 0-byte output, reproducible). Skip the icon resource
-# so the build can proceed. Revert if upstream changes RC handling.
-# if(WIN32)
-# 	target_sources(kyty_emulator PRIVATE "${KYTY_SOURCE_DIR}/emulator.rc")
-# endif()
+if(WIN32)
+	target_sources(kyty_emulator PRIVATE "${KYTY_SOURCE_DIR}/emulator.rc")
+endif()
 configure_macos_guest_address_space(kyty_emulator)
 
 target_link_libraries(kyty_emulator ${kyty_emulator_link_libraries})
