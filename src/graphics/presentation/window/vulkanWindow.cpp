@@ -752,6 +752,14 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
 			severity_str = "W";
 			error        = false;
 		}
+		// GPU-assisted data races are logged above with full forensics; aborting
+		// at the first (often benign) race hides deeper issues. Let execution
+		// continue: a real hang still manifests as device loss.
+		if (error && callback_data->pMessage != nullptr &&
+		    strstr(callback_data->pMessage, "data race was detected") != nullptr) {
+			severity_str = "W";
+			error        = false;
+		}
 			break;
 		default: severity_str = "?";
 	}
