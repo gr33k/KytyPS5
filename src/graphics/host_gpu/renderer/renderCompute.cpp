@@ -271,6 +271,22 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	            static_cast<unsigned long long>(submit_id),
 	            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
 	            thread_group_y, thread_group_z, mode, program.wave_size);
+	// Known-hang compute shaders: skipping lets the game continue instead of
+	// hanging the GPU (TDR). 0x5d7ccd5dbcdd0c9f hangs amdvlk on first dispatch
+	// in RE Engine streaming loads; the game runs fine without its results.
+	static constexpr uint64_t kHungComputeHashes[] = {0x5d7ccd5dbcdd0c9full};
+	for (const auto hung : kHungComputeHashes) {
+		if (program.shader_hash == hung) {
+			static std::atomic_uint hung_logged = 0;
+			if (hung_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
+				std::printf("DispatchDirect: skipping known-hang shader 0x%016llx\n",
+				            static_cast<unsigned long long>(program.shader_hash));
+				std::fflush(stdout);
+			}
+			ResetBindings();
+			return;
+		}
+	}
 	if (resources.specialization_reads.empty() &&
 	    (TryConsumeComputeMetaClear(input_info, buffer) ||
 	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
