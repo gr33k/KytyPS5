@@ -30,7 +30,9 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <span>
@@ -280,7 +282,40 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// Known-hang compute shaders: skipping lets the game continue instead of
 	// hanging the GPU (TDR). 0x5d7ccd5dbcdd0c9f hangs amdvlk on first dispatch
 	// in RE Engine streaming loads; the game runs fine without its results.
+	// Additional hashes (one per line/space/comma, hex) can be supplied in
+	// skip_cs_hashes.txt next to the executable for triage.
 	static constexpr uint64_t kHungComputeHashes[] = {0x5d7ccd5dbcdd0c9full};
+	static std::vector<uint64_t> extra_hashes;
+	static std::once_flag         hashes_once;
+	std::call_once(hashes_once, [] {
+		Common::File file;
+		if (!file.Open(std::filesystem::path("skip_cs_hashes.txt"),
+		               Common::File::Mode::Read)) {
+			return;
+		}
+		const auto size = file.Size();
+		if (size == 0 || size > 4096) {
+			return;
+		}
+		std::string text(static_cast<size_t>(size), '\0');
+		uint32_t    bytes_read = 0;
+		file.Read(text.data(), static_cast<uint32_t>(size), &bytes_read);
+		text.resize(bytes_read);
+		for (const auto& word: Common::Split(text, " \t\r\n,", false)) {
+			if (word.empty()) {
+				continue;
+			}
+			char*        end  = nullptr;
+			const uint64_t hash = std::strtoull(word.c_str(), &end, 16);
+			if (end != word.c_str() && *end == '\0') {
+				extra_hashes.push_back(hash);
+			}
+		}
+		if (!extra_hashes.empty()) {
+			std::printf("DispatchDirect: loaded %zu extra skip hashes\n", extra_hashes.size());
+			std::fflush(stdout);
+		}
+	});
 	for (const auto hung : kHungComputeHashes) {
 		if (program.shader_hash == hung) {
 			static std::atomic_uint hung_logged = 0;
@@ -289,6 +324,12 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 				            static_cast<unsigned long long>(program.shader_hash));
 				std::fflush(stdout);
 			}
+			ResetBindings();
+			return;
+		}
+	}
+	for (const auto hung : extra_hashes) {
+		if (program.shader_hash == hung) {
 			ResetBindings();
 			return;
 		}
