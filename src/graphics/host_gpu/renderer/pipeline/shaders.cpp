@@ -618,9 +618,17 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		static std::atomic_uint skipped_count = 0;
 		if (skipped_count.fetch_add(1, std::memory_order_relaxed) < 8) {
 			LOGF("Pipeline: skipping draws with failed graphics pipeline VS=%" PRIu64
-			     " PS=%" PRIu64 " result=%s\n",
-			     vertex_program.id, ps_active ? pixel_program.id : 0,
-			     vk::to_string(result).c_str());
+			     " (hash=0x%016llx) PS=%" PRIu64 " (hash=0x%016llx) result=%s topo=%u "
+			     "samples=%u cc=%u\n",
+			     vertex_program.id,
+			     static_cast<unsigned long long>(vs_input_info.stage.program->shader_hash),
+			     ps_active ? pixel_program.id : 0,
+			     ps_active ? static_cast<unsigned long long>(
+			                     ps_input_info->stage.program->shader_hash)
+			                 : 0ull,
+			     vk::to_string(result).c_str(),
+			     static_cast<uint32_t>(static_params.topology), static_params.samples,
+			     rendering.color_count);
 		}
 		return;
 	}

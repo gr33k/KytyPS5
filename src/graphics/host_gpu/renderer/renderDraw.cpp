@@ -1035,10 +1035,10 @@ bool PixelShaderUsesBarycentrics(const DrawRenderState& state) {
 
 // Expands a strip/fan index sequence into a triangle list. Returns false when the
 // draw does not need conversion or its indices cannot be read.
-bool ExpandStripDrawToList(std::vector<uint32_t>& out, vk::PrimitiveTopology topology,
-                           const DrawCallInfo& draw, const DrawEmitInfo& emit,
-                           const DrawIndexBufferSource& source, bool primitive_restart_enable,
-                           bool provoking_vtx_last) {
+bool ExpandStripDrawToList(std::vector<uint32_t>& out, CommandBuffer& buffer,
+                           vk::PrimitiveTopology topology, const DrawCallInfo& draw,
+                           const DrawEmitInfo& emit, const DrawIndexBufferSource& source,
+                           bool primitive_restart_enable, bool provoking_vtx_last) {
 	if (topology != vk::PrimitiveTopology::eTriangleStrip &&
 	    topology != vk::PrimitiveTopology::eTriangleFan) {
 		return false;
@@ -1069,7 +1069,13 @@ bool ExpandStripDrawToList(std::vector<uint32_t>& out, vk::PrimitiveTopology top
 			std::vector<uint8_t> staging(static_cast<size_t>(need));
 			if (!Libs::LibKernel::Memory::TryReadGpuCleanBacking(source.address, staging.data(),
 			                                                     staging.size())) {
-				return false;
+				// GPU-written index data has no fresh CPU backing yet; download it
+				// synchronously so the expansion sees what the draw will use.
+				buffer.GetContext().GetBufferCache().ReadMemory(source.address, need, false);
+				if (!Libs::LibKernel::Memory::TryReadGpuCleanBacking(
+				        source.address, staging.data(), staging.size())) {
+					return false;
+				}
 			}
 			for (uint32_t i = 0; i < count; i++) {
 				uint32_t v = 0;
@@ -1257,7 +1263,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		static std::atomic_uint converted_logged = 0;
 		const bool provoking_last =
 		    buffer.GetRegisters().GetModeControl().provoking_vtx_last;
-		if (ExpandStripDrawToList(converted_indices, topology, draw, emit, index_source,
+		if (ExpandStripDrawToList(converted_indices, buffer, topology, draw, emit, index_source,
 		                          primitive_restart_enable, provoking_last)) {
 			converted_count         = static_cast<uint32_t>(converted_indices.size());
 			converted_source.host_data = converted_indices.data();

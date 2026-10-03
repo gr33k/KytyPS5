@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <fmt/format.h>
 #include <list>
 #include <thread>
@@ -1253,6 +1254,17 @@ bool FlipQueue::Flip(uint32_t micros) {
 			due &= IsFlipDueLocked(*r.cfg, r.generation);
 		}
 		layers[i] = {r.frame, r.cfg->bus, r.premultiplied_alpha};
+	}
+	// TEMP-DIAG: trace black-screen presents (null frame vs empty image).
+	{
+		static std::atomic_uint present_log = 0;
+		const auto n = present_log.fetch_add(1, std::memory_order_relaxed);
+		if (n < 5 || n % 5000 == 0) {
+			std::printf("FlipPresent #%u: due=%d count=%zu frame0=%p premult=%d\n", n, due ? 1 : 0,
+			            count, count > 0 ? static_cast<const void*>(layers[0].frame) : nullptr,
+			            count > 0 ? layers[0].premultiplied_alpha : -1);
+			std::fflush(stdout);
+		}
 	}
 	if (due) {
 		m_presenter.Present(std::span(layers.data(), count));
