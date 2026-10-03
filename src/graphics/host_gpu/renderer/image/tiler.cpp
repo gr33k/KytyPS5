@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -215,6 +216,10 @@ vk::Pipeline TileManager::GetPipeline(uint32_t slot) {
 	if (m_pipelines[slot] != nullptr) {
 		return m_pipelines[slot];
 	}
+	// Log creations: driver crashes here name the exact slot/family.
+	std::printf("TileManager: creating pipeline slot=%u family=%u element=%u direction=%u\n",
+	            slot, (slot / 5u) % 9u, slot % 5u, slot / 45u);
+	std::fflush(stdout);
 	struct Shader {
 		const uint32_t* code;
 		size_t          words;
@@ -248,6 +253,10 @@ vk::Pipeline TileManager::GetPipeline(uint32_t slot) {
 	create.layout = m_pipeline_layout;
 	const auto result =
 	    m_graphics.device.createComputePipelines(nullptr, 1, &create, nullptr, &m_pipelines[slot]);
+	// Log the result: a missing line means the driver died inside creation.
+	std::printf("TileManager: slot=%u create=%s pipeline=%p\n", slot,
+	            vk::to_string(result).c_str(), static_cast<void*>(m_pipelines[slot]));
+	std::fflush(stdout);
 	m_graphics.device.destroyShaderModule(module, nullptr);
 	RequireVulkanSuccess(result, "create TileManager pipeline");
 	return m_pipelines[slot];
