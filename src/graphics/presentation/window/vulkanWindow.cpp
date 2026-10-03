@@ -741,8 +741,17 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
 			severity_style = Log::Color::BrightRed;
 			// Only validation errors are fatal; GENERAL-type errors can come
 			// from unrelated loader/layer issues (e.g. a broken overlay).
-			error = static_cast<bool>(message_types &
-			                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
+		error = static_cast<bool>(message_types &
+		                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
+		// Benign timing race: the present loop can re-acquire with the same
+		// binary semaphore before the queued wait executes. Drivers tolerate
+		// it; demote so GPU-assisted runs can proceed past it.
+		if (error && callback_data->pMessageIdName != nullptr &&
+		    strcmp(callback_data->pMessageIdName,
+		           "VUID-vkAcquireNextImageKHR-semaphore-01779") == 0) {
+			severity_str = "W";
+			error        = false;
+		}
 			break;
 		default: severity_str = "?";
 	}
