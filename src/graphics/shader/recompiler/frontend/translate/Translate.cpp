@@ -905,6 +905,7 @@ void IncludeInstructionVectorRegisters(const Decoder::Instruction& inst, uint32_
 		case Decoder::Opcode::V_CMP_EQ_I64:
 		case Decoder::Opcode::V_CMP_LT_I64:
 		case Decoder::Opcode::V_CMP_LE_I64:
+		case Decoder::Opcode::V_CMP_NE_I64:
 		case Decoder::Opcode::V_CMP_LT_U64:
 		case Decoder::Opcode::V_CMP_EQ_U64:
 		case Decoder::Opcode::V_CMP_LE_U64:

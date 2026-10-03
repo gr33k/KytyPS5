@@ -23604,6 +23604,34 @@ TestCase VectorVop3CompareEqU64OnGpu() {
   return test;
 }
 
+TestCase VectorVop3CompareNeI64OnGpu() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  code.push_back(EncodeVop1(0x01, 1, InlineU32(1)));
+
+  code.push_back(EncodeSop1(0x04, 106, 126)); // s_mov_b64 vcc, exec
+  code.push_back(0xd4a5006au);
+  code.push_back(0x0000d47eu); // v_cmp_ne_i64 vcc, exec, vcc
+  code.push_back(EncodeVop2(0x01, 2, InlineU32(0), 1));
+  AppendStoreVgpr(&code, 2, 0);
+
+  AppendSMovLiteral(&code, 106, 0);
+  AppendSMovLiteral(&code, 107, 0);
+  code.push_back(0xd4a5006au);
+  code.push_back(0x0000d47eu); // v_cmp_ne_i64 vcc, exec, vcc
+  code.push_back(EncodeVop2(0x01, 3, InlineU32(0), 1));
+  AppendStoreVgpr(&code, 3, 1);
+  AppendEnd(&code);
+
+  return {"VectorVop3CompareNeI64OnGpu",
+          code,
+          {},
+          {0, 1},
+          {O::V_MOV_B32, O::S_MOV_B64, O::V_CMP_NE_I64, O::V_CNDMASK_B32,
+           O::S_MOV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+}
+
 TestCase VectorVop3CompareNeU64OnGpu() {
   using O = ShaderOpcode;
 
@@ -31509,6 +31537,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorVop3CompareGtU64OnGpu);
   AddCase(VectorVopcCompareLtU64OnGpu);
   AddCase(VectorVop3CompareNeU64OnGpu);
+  AddCase(VectorVop3CompareNeI64OnGpu);
   AddCase(VectorVopcCmpxNeU64CapturedExecMask);
   AddCase(VectorVop3CmpxNeI64CapturedExecMask);
   AddCase(VectorCompareClassF32);
