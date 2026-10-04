@@ -339,6 +339,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			return;
 		}
 	}
+	// TEMP-DIAG: insane dispatch sizes hang the GPU (TDR) with no other trace.
+	{
+		const uint64_t total = static_cast<uint64_t>(thread_group_x) * thread_group_y * thread_group_z;
+		if (total > 100000000ull) {
+			std::printf("SUSPICIOUS DISPATCH: submit=%llu shader_hash=0x%016llx groups=%ux%ux%u\n",
+			            static_cast<unsigned long long>(submit_id),
+			            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
+			            thread_group_y, thread_group_z);
+			std::fflush(stdout);
+		}
+	}
 	if (resources.specialization_reads.empty() &&
 	    (TryConsumeComputeMetaClear(input_info, buffer) ||
 	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,

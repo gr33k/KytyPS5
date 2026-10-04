@@ -1188,6 +1188,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable) {
+	// TEMP-DIAG: insane counts hang the GPU (TDR) with no other trace.
+	if (draw.index_count > 1000000u || draw.instance_count > 4096u) {
+		std::printf("SUSPICIOUS DRAW: submit=%llu indexed=%d index_count=%u instances=%u topo=%u\n",
+		            static_cast<unsigned long long>(submit_id), draw.IsIndexed() ? 1 : 0,
+		            draw.index_count, draw.instance_count, static_cast<uint32_t>(topology));
+		std::fflush(stdout);
+	}
 	if (state.programs.skip_draw) {
 		g_census_mesh_skip.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
