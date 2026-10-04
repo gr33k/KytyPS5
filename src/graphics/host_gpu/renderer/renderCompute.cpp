@@ -351,8 +351,19 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	    (input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2] >= 512);
 	const bool                   has_sampler = !program.info.samplers.empty();
 	static std::atomic<uint32_t> dispatch_log_count {0};
-	if ((large_workgroup || has_sampler) &&
-	    dispatch_log_count.fetch_add(1, std::memory_order_relaxed) < 512) {
+	// Always detail-log the two kernels dominating TDR death batches.
+	const bool tdr_suspect = program.shader_hash == 0xdd7d9b716cfe5abaull ||
+	                         program.shader_hash == 0x0b3ee2d73a90eeb6ull;
+	static std::atomic<uint32_t> suspect_log_count {0};
+	const bool suspect_sample =
+	    tdr_suspect && (suspect_log_count.load(std::memory_order_relaxed) < 30 ||
+	                    (submit_id % 100 == 0 && suspect_log_count.load(std::memory_order_relaxed) < 3000));
+	if (suspect_sample) {
+		suspect_log_count.fetch_add(1, std::memory_order_relaxed);
+	}
+	if (((large_workgroup || has_sampler) &&
+	     dispatch_log_count.fetch_add(1, std::memory_order_relaxed) < 512) ||
+	    suspect_sample) {
 		const auto sampled_images = std::count_if(
 		    program.info.images.begin(), program.info.images.end(), [](const auto& image) {
 			    return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled;
