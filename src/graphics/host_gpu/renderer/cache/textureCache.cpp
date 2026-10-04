@@ -841,15 +841,22 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 			            ? result_id
 			            : ImageId {}};
 		}
-		EXIT("TextureCache: unresolvable equal-address image overlap, address=0x%016" PRIx64
-		     " requested=%ux%u "
-		     "cached=%ux%u requested_size=0x%016" PRIx64 " cached_size=0x%016" PRIx64
-		     " type=%u/%u tile=%u/%u\n",
-		     requested.data.address, requested.resources.levels, requested.resources.layers,
-		     cached.info.resources.levels, cached.info.resources.layers, requested.data.size,
-		     cached.info.data.size, static_cast<uint32_t>(requested.type),
-		     static_cast<uint32_t>(cached.info.type), static_cast<uint32_t>(requested.tile_mode),
-		     static_cast<uint32_t>(cached.info.tile_mode));
+		// Otherwise the cached image cannot back this request (e.g. a streaming
+		// texture outgrew its first allocation). Drop it so a fresh image is
+		// created instead of aborting the game.
+		static std::atomic_uint overlap_log = 0;
+		if (overlap_log.fetch_add(1, std::memory_order_relaxed) < 4) {
+			LOGF("TextureCache: dropping unresolvable equal-address image, "
+			     "address=0x%016" PRIx64 " requested=%ux%u cached=%ux%u "
+			     "requested_size=0x%016" PRIx64 " cached_size=0x%016" PRIx64 "\n",
+			     requested.data.address, requested.resources.levels, requested.resources.layers,
+			     cached.info.resources.levels, cached.info.resources.layers, requested.data.size,
+			     cached.info.data.size);
+		}
+		if (safe_to_delete) {
+			FreeImage(cached_id);
+		}
+		return {merged_id};
 	}
 
 	const int32_t requested_mip = requested.MipOf(cached.info);
