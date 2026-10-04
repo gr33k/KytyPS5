@@ -1384,6 +1384,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
 	const auto completed = g_census_complete.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (completed % 10000 == 0) {
+		m_context.GetGraphics().LogMemoryBudget();
+	}
 	if (completed % 1000 == 0) {
 		const auto extent = state.color_count > 0 ? state.color_info[0].Extent() : vk::Extent2D {};
 		LOGF("RenderCensus: idx_calls=%llu auto_calls=%llu complete=%llu (idx_empty=%llu "
