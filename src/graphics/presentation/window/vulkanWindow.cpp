@@ -460,6 +460,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		provoking_vertex.pNext = supported_features2.pNext;
 		supported_features2.pNext = &provoking_vertex;
 	}
+	const bool list_restart_extension = HasExtension(
+	    device_extensions, VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
+	vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT supported_list_restart {};
+	if (list_restart_extension) {
+		supported_list_restart.pNext = supported_features2.pNext;
+		supported_features2.pNext     = &supported_list_restart;
+	}
 	physical_device.getFeatures2(&supported_features2);
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
@@ -478,6 +485,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		    workgroup_layout.workgroupMemoryExplicitLayout != VK_FALSE));
 	}
 	graphics.mesh_shader_enabled = mesh_extension && supported_mesh.meshShader;
+	graphics.topology_list_restart_enabled =
+	    list_restart_extension && supported_list_restart.primitiveTopologyListRestart;
 
 	vk::PhysicalDeviceSubgroupSizeControlProperties subgroup_size_control {};
 
@@ -551,8 +560,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.largePoints                          = VK_TRUE;
 	device_features.multiViewport                        = VK_TRUE;
 	device_features.fillModeNonSolid                      = VK_TRUE;
-	device_features.primitiveTopologyListRestart =
-	    supported_features2.features.primitiveTopologyListRestart;
 	device_features.vertexPipelineStoresAndAtomics       = VK_TRUE;
 	graphics.sample_rate_shading_enabled                 = true;
 	device_features.shaderInt64 = VK_TRUE;
@@ -610,6 +617,12 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		provoking_vertex.pNext = const_cast<void*>(create_info.pNext);
 		provoking_vertex.transformFeedbackPreservesProvokingVertex = VK_FALSE;
 		create_info.pNext = &provoking_vertex;
+	}
+	vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT list_restart_features {};
+	if (graphics.topology_list_restart_enabled) {
+		list_restart_features.primitiveTopologyListRestart = VK_TRUE;
+		list_restart_features.pNext = const_cast<void*>(create_info.pNext);
+		create_info.pNext           = &list_restart_features;
 	}
 	create_info.pQueueCreateInfos       = &queue_create_info;
 	create_info.queueCreateInfoCount    = 1;
@@ -1002,6 +1015,7 @@ void WindowContext::CreateVulkan() {
 		for (const auto* extension: {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
 		                             VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME,
 		                             VK_EXT_MESH_SHADER_EXTENSION_NAME,
+		                             VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME,
 		                             VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
 		                             VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME}) {
 			if (HasExtension(available_extensions, extension)) {
