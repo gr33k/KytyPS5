@@ -510,6 +510,21 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
+	// Log indirect counts (best effort: GPU-produced args may be stale on the
+	// CPU side, but CPU-produced args show exactly).
+	{
+		uint32_t   indirect_xyz[3] = {};
+		const auto mapped          = args_buffer->Mapped();
+		if (args_offset + sizeof(indirect_xyz) <= mapped.size()) {
+			std::memcpy(indirect_xyz, mapped.data() + args_offset, sizeof(indirect_xyz));
+		}
+		std::printf("DispatchIndirect: submit=%llu shader_hash=0x%016llx args_addr=0x%llx "
+		            "xyz=%ux%ux%u mode=0x%x\n",
+		            static_cast<unsigned long long>(submit_id),
+		            static_cast<unsigned long long>(program.shader_hash),
+		            static_cast<unsigned long long>(args_addr), indirect_xyz[0], indirect_xyz[1],
+		            indirect_xyz[2], mode);
+	}
 	RebindBuffers(bindings);
 	PreparedBindings* descriptor_stage = &bindings;
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
