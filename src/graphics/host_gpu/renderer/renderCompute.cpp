@@ -301,7 +301,12 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		uint32_t    bytes_read = 0;
 		file.Read(text.data(), static_cast<uint32_t>(size), &bytes_read);
 		text.resize(bytes_read);
-		for (const auto& word: Common::Split(text, " \t\r\n,", false)) {
+		for (char& c: text) {
+			if (c == ',' || c == '\r' || c == '\n' || c == '\t') {
+				c = ' ';
+			}
+		}
+		for (const auto& word: Common::Split(text, ' ', false)) {
 			if (word.empty()) {
 				continue;
 			}
