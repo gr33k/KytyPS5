@@ -535,11 +535,13 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 			std::memcpy(indirect_xyz, mapped.data() + args_offset, sizeof(indirect_xyz));
 		}
 		std::printf("DispatchIndirect: submit=%llu shader_hash=0x%016llx args_addr=0x%llx "
-		            "xyz=%ux%ux%u mode=0x%x\n",
+		            "xyz=%ux%ux%u mode=0x%x buf=0x%llx+%llx mapped=%zu\n",
 		            static_cast<unsigned long long>(submit_id),
 		            static_cast<unsigned long long>(program.shader_hash),
 		            static_cast<unsigned long long>(args_addr), indirect_xyz[0], indirect_xyz[1],
-		            indirect_xyz[2], mode);
+		            indirect_xyz[2], mode,
+		            static_cast<unsigned long long>(args_buffer->CpuAddress()),
+		            static_cast<unsigned long long>(args_buffer->Size()), mapped.size());
 	}
 	RebindBuffers(bindings);
 	PreparedBindings* descriptor_stage = &bindings;
