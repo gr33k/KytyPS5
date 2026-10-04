@@ -551,6 +551,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.largePoints                          = VK_TRUE;
 	device_features.multiViewport                        = VK_TRUE;
 	device_features.fillModeNonSolid                      = VK_TRUE;
+	device_features.primitiveTopologyListRestart =
+	    supported_features2.features.primitiveTopologyListRestart;
 	device_features.vertexPipelineStoresAndAtomics       = VK_TRUE;
 	graphics.sample_rate_shading_enabled                 = true;
 	device_features.shaderInt64 = VK_TRUE;
