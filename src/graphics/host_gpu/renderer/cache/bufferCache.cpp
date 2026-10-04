@@ -638,10 +638,12 @@ void BufferCache::RunGarbageCollector() {
 	}
 
 	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
-	const uint64_t age        = std::min<uint64_t>(aggressive ? 80 : 160, tick);
+	// Under critical pressure the working set itself must shrink: young
+	// buffers are NOT exempt (the spike is made of young allocations).
+	const uint64_t age = aggressive ? 0 : std::min<uint64_t>(160, tick);
 	// Under critical pressure a fixed handful of deletions cannot absorb a
 	// streaming spike; allow a large pass instead.
-	const size_t   limit      = aggressive ? 512 : 32;
+	const size_t   limit = aggressive ? 512 : 32;
 
 	std::vector<BufferId> dirty_buffers;
 	size_t                retire_count = 0;

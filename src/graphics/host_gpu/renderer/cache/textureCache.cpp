@@ -1988,7 +1988,11 @@ void TextureCache::RunGarbageCollector() {
 	const auto collect = [&](bool allow_aggressive) {
 		bool           pressured  = m_total_used_memory >= m_pressure_gc_memory;
 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
-		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
+		// Under critical pressure the working set itself must shrink: young
+		// images are NOT exempt (the spike is made of young images), oldest
+		// LRU first. Otherwise a streaming burst outgrows the card while GC
+		// only looks at images older than 160 submissions.
+		const uint64_t age = aggressive ? 0 : std::min<uint64_t>(pressured ? 80 : 16, tick);
 		// Under critical pressure a fixed handful of deletions cannot absorb a
 		// streaming spike (gigabytes in seconds); allow a large pass instead.
 		size_t         deletions = aggressive ? 400 : pressured ? 20 : 10;
@@ -2000,6 +2004,7 @@ void TextureCache::RunGarbageCollector() {
 			candidates.push_back(id);
 			return candidates.size() == deletions;
 		});
+		size_t freed = 0;
 		for (const auto id: candidates) {
 			if (deletions == 0) {
 				break;
@@ -2022,6 +2027,13 @@ void TextureCache::RunGarbageCollector() {
 				}
 			}
 			FreeImage(id);
+			++freed;
+			// Refresh the usage counter while freeing: it is read once at
+			// entry, so without this the stop conditions below (and the
+			// second aggressive pass) act on stale data.
+			if ((freed & 31u) == 0 && m_graphics.CanReportMemoryUsage()) {
+				m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+			}
 			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
 				deletions >>= 2;
 				aggressive = false;
@@ -2030,6 +2042,14 @@ void TextureCache::RunGarbageCollector() {
 				deletions >>= 1;
 				pressured = false;
 			}
+		}
+		if (m_graphics.CanReportMemoryUsage()) {
+			m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+		}
+		if (freed != 0 && allow_aggressive) {
+			std::printf("TextureCache GC: critical pass freed %zu images, used=%llu MiB\n",
+			            freed, static_cast<unsigned long long>(m_total_used_memory >> 20));
+			std::fflush(stdout);
 		}
 	};
 	collect(false);
