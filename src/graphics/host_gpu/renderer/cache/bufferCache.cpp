@@ -14,7 +14,9 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -197,7 +199,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_bda_pagetable_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                              BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
-      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB),
+      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 128 * MiB),
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
@@ -624,10 +626,22 @@ void BufferCache::RunGarbageCollector() {
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
 	}
+	// TEMP-DIAG: trace GC pressure (remove once spike handling is verified).
+	{
+		static std::atomic_uint gc_log = 0;
+		if (m_total_used_memory >= m_critical_gc_memory &&
+		    gc_log.fetch_add(1, std::memory_order_relaxed) < 40) {
+			std::printf("BufferCache GC: critical pressure, used=%llu MiB\n",
+			            static_cast<unsigned long long>(m_total_used_memory >> 20));
+			std::fflush(stdout);
+		}
+	}
 
 	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
 	const uint64_t age        = std::min<uint64_t>(aggressive ? 80 : 160, tick);
-	const size_t   limit      = aggressive ? 64 : 32;
+	// Under critical pressure a fixed handful of deletions cannot absorb a
+	// streaming spike; allow a large pass instead.
+	const size_t   limit      = aggressive ? 512 : 32;
 
 	std::vector<BufferId> dirty_buffers;
 	size_t                retire_count = 0;

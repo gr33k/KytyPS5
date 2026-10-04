@@ -18,8 +18,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -1973,11 +1975,23 @@ void TextureCache::RunGarbageCollector() {
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
 	}
+	// TEMP-DIAG: trace GC pressure (remove once spike handling is verified).
+	{
+		static std::atomic_uint gc_log = 0;
+		if (m_total_used_memory >= m_critical_gc_memory &&
+		    gc_log.fetch_add(1, std::memory_order_relaxed) < 40) {
+			std::printf("TextureCache GC: critical pressure, used=%llu MiB\n",
+			            static_cast<unsigned long long>(m_total_used_memory >> 20));
+			std::fflush(stdout);
+		}
+	}
 	const auto collect = [&](bool allow_aggressive) {
 		bool           pressured  = m_total_used_memory >= m_pressure_gc_memory;
 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
 		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
-		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
+		// Under critical pressure a fixed handful of deletions cannot absorb a
+		// streaming spike (gigabytes in seconds); allow a large pass instead.
+		size_t         deletions = aggressive ? 400 : pressured ? 20 : 10;
 		std::vector<ImageId> candidates;
 		candidates.reserve(deletions);
 		// Deleting depth recursively deletes its stencil association, so finish LRU traversal
