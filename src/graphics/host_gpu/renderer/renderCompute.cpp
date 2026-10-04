@@ -553,6 +553,23 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		            indirect_xyz[2], mode,
 		            static_cast<unsigned long long>(args_buffer->CpuAddress()),
 		            static_cast<unsigned long long>(args_buffer->Size()), mapped.size());
+		std::fflush(stdout);
+		// CPU-visible garbage counts hang the GPU (TDR) with no other trace;
+		// skip instead of hanging. Legit dispatches stay far below this.
+		if (mapped.size() > 0) {
+			const uint64_t total = static_cast<uint64_t>(indirect_xyz[0]) * indirect_xyz[1] *
+			                       indirect_xyz[2];
+			if (total > (1ull << 24)) {
+				std::printf("SKIP insane indirect: submit=%llu shader_hash=0x%016llx "
+				            "xyz=%ux%ux%u\n",
+				            static_cast<unsigned long long>(submit_id),
+				            static_cast<unsigned long long>(program.shader_hash),
+				            indirect_xyz[0], indirect_xyz[1], indirect_xyz[2]);
+				std::fflush(stdout);
+				ResetBindings();
+				return;
+			}
+		}
 	}
 	RebindBuffers(bindings);
 	PreparedBindings* descriptor_stage = &bindings;
