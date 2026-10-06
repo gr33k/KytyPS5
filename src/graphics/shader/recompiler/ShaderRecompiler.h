@@ -28,6 +28,8 @@ struct TranslateResult {
 	IR::Program program;
 	std::string decoded_dump;
 	std::string cfg_dump;
+	// False when resource tracking rejected the shader; program is unusable.
+	bool tracked = true;
 };
 
 struct CompileResult {

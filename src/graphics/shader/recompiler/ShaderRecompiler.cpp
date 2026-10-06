@@ -616,7 +616,13 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 			     MakeIrDump(cfg_dump, ir).c_str());
 		}
 	}
-	IR::TrackResources(ir, decoded, native_cfg);
+	if (!IR::TrackResources(ir, decoded, native_cfg)) {
+		// Unrepresentable resource shape: abandon the shader. The pipeline
+		// cache logs once and skips draws/dispatches using it.
+		TranslateResult failed;
+		failed.tracked = false;
+		return failed;
+	}
 	TranslateResult result;
 	result.program = std::move(ir);
 	if (options.dump_ir) {

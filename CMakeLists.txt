@@ -339,6 +339,19 @@ if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
+# Resource tracking reports unrepresentable shaders by throwing (caught in the
+# same translation unit); clang-cl disables exceptions by default, so enable
+# them explicitly for that file instead of relying on the driver default.
+if (KYTY_CLANG_CL)
+	set_source_files_properties(
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
+		PROPERTIES COMPILE_OPTIONS "/EHsc")
+else()
+	set_source_files_properties(
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
+		PROPERTIES COMPILE_OPTIONS "-fexceptions")
+endif()
+
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus)
 
 # Linux system libraries.

@@ -409,6 +409,21 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
+		if (!translated.tracked) {
+			// Unrepresentable resource shape: skip draws/dispatches with this
+			// shader instead of aborting the game. Cache the skip so each
+			// unique shader logs once here.
+			static std::atomic_uint skipped_track_count = 0;
+			if (skipped_track_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+				LOGF("Resource tracking failed: hash=0x%016llx; skipping draws/dispatches "
+				     "with this shader\n",
+				     static_cast<unsigned long long>(params.hash));
+			}
+			auto skip_entry = programs.try_emplace(
+			    lookup_key, ShaderRecompiler::IR::ResourcePlan {}).first;
+			skip_entry->second.skip_dispatch = true;
+			return {};
+		}
 		if (entry == programs.end()) {
 			entry = programs.try_emplace(lookup_key,
 			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program)).first;

@@ -11,6 +11,7 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 
@@ -440,11 +441,12 @@ private:
 	};
 
 	[[noreturn]] void Fail(uint32_t pc, const std::string& reason) const {
-		const auto message =
+		// Throw instead of aborting: the caller abandons this shader and the
+		// draw/dispatch using it is skipped so the game continues. Unit tests
+		// assert on the message via CheckFatal, so keep its format stable.
+		throw std::runtime_error(
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
-		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
-		EXIT("%s", message.c_str());
-		std::abort();
+		                m_program.shader_hash, StageName(m_program.stage), pc, reason));
 	}
 
 	Value NativeDescriptorSource(Value value, uint32_t reg, uint32_t use_pc) const {
@@ -2418,8 +2420,14 @@ private:
 
 } // namespace
 
-void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg) {
-	Tracker(program, decoded, native_cfg).Run();
+bool TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg) {
+	try {
+		Tracker(program, decoded, native_cfg).Run();
+	} catch (const std::runtime_error&) {
+		// Tracker::Fail: unrepresentable resource shape; caller skips the shader.
+		return false;
+	}
+	return true;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
