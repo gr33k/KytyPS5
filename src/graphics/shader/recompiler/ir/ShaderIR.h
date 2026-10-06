@@ -73,9 +73,13 @@ struct MemoryInfo {
 	bool                    planning_only                                         = false;
 
 	[[nodiscard]] bool SupportsIndirectBufferLoad(ValueOpcode opcode) const {
-		return !formatted && !typed && data_bits == 32u &&
-		       (opcode == ValueOpcode::LoadBufferU32x2 || opcode == ValueOpcode::LoadBufferU32x3 ||
-		        opcode == ValueOpcode::LoadBufferU32x4);
+		return !typed && data_bits == 32u &&
+		       (formatted ? opcode == ValueOpcode::LoadBufferU32
+		                  : opcode == ValueOpcode::ReadConstBuffer ||
+		                        opcode == ValueOpcode::LoadBufferU32 ||
+		                        opcode == ValueOpcode::LoadBufferU32x2 ||
+		                        opcode == ValueOpcode::LoadBufferU32x3 ||
+		                        opcode == ValueOpcode::LoadBufferU32x4);
 	}
 
 	bool operator==(const MemoryInfo& other) const = default;
@@ -97,6 +101,7 @@ struct ExportInfo {
 
 struct BufferResource {
 	static constexpr uint32_t NoImageAlias = UINT32_MAX;
+	static constexpr uint32_t NoIndirectBuffer = UINT32_MAX;
 
 	uint32_t               source             = 0;
 	uint32_t               first_use_pc       = 0;
@@ -110,11 +115,15 @@ struct BufferResource {
 	bool                   atomic             = false;
 	bool                   formatted          = false;
 	bool                   scalar             = false;
+	uint32_t               indirect_root              = NoIndirectBuffer;
+	uint32_t               indirect_mapping_offset    = 0;
+	uint32_t               indirect_search_iterations = 0;
+	std::vector<uint32_t>  indirect_resources;
 
 	bool operator==(const BufferResource& other) const = default;
 };
 
-enum class ImageMipMode { None, DynamicStorage };
+enum class ImageMipMode { None, Dynamic };
 
 constexpr uint32_t ShaderImageIdentitySwizzle = 0x00000facu;
 
@@ -133,6 +142,7 @@ struct ImageResource {
 	bool                          read              = false;
 	bool                          written           = false;
 	bool                          atomic            = false;
+	bool                          atomic64          = false;
 	bool                          depth_compare     = false;
 	bool                          cube              = false;
 	bool                          r128              = false;
@@ -147,9 +157,12 @@ struct ImageResource {
 struct SamplerResource {
 	uint32_t source                = 0;
 	uint32_t first_use_pc          = 0;
+	// Native filtering/border variants share the original sampler's runtime descriptor.
+	uint32_t snapshot_index        = 0;
 	bool     force_point_filtering = false;
 	bool     depth_compare         = false;
 	bool     integer_border        = false;
+	bool     gather_lod            = false;
 
 	bool operator==(const SamplerResource& other) const = default;
 };
@@ -186,6 +199,7 @@ enum class StageInputKind {
 	BaryCoordSmoothCentroid,
 	BaryCoordNoPerspective,
 	WorkgroupId,
+	NumWorkgroups,
 	LocalInvocationId,
 	LocalInvocationIndex,
 	GlobalInvocationId,
@@ -278,7 +292,7 @@ struct StageOutput {
 inline constexpr uint32_t FirstImageBinding           = 1u;
 inline constexpr uint32_t FirstComparisonImageBinding = 22u;
 inline constexpr uint32_t FirstStorageImageBinding    = 29u;
-inline constexpr uint32_t ImageBindingCount           = 43u;
+inline constexpr uint32_t ImageBindingCount           = 48u;
 
 enum class DescriptorBindingKind : uint32_t {
 	Buffers  = 0u,
@@ -288,11 +302,12 @@ enum class DescriptorBindingKind : uint32_t {
 	FaultBuffer,
 	FlattenedSrt,
 	ShaderData,
+	SharedMemory,
 	Count,
 };
 
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 44u);
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 50u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 49u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 56u);
 
 struct PushData {
 	static constexpr uint32_t DwordCount = 32;
@@ -369,7 +384,7 @@ DescriptorBindingForImage(const ImageResource& image) {
 			if (image.numeric_class != Prospero::TextureNumericClass::Uint) {
 				return std::nullopt;
 			}
-			base = AtomicUintBinding;
+			base = AtomicUintBinding + (image.atomic64 ? 5u : 0u);
 		} else {
 			switch (image.numeric_class) {
 				case Prospero::TextureNumericClass::Float: base = StorageFloatBinding; break;
@@ -417,6 +432,7 @@ struct DescriptorBinding {
 
 struct BindingLayout {
 	uint32_t                       push_data_start_dword = PushData::NoStart;
+	uint32_t                       dispatch_thread_dword = PushData::NoStart;
 	uint32_t                       memory_offset_dword = 0;
 	uint32_t                       memory_offset_count = 0;
 	std::vector<uint32_t>          user_data_registers;
@@ -468,22 +484,27 @@ struct BlockInfo {
 };
 
 struct DescriptorSource {
-	struct IndirectImage {
+	struct IndirectDescriptor {
 		uint32_t material_source = UINT32_MAX;
 		uint32_t table_source    = 0;
 		uint32_t selector_stride = 0;
 		uint32_t selector_offset = 0;
 		uint32_t table_offset    = 0;
+		uint32_t table_stride    = 0;
+		uint32_t workgroup_axis  = UINT32_MAX;
+		uint32_t selector_shift  = 0;
+		uint32_t selector_bits   = UINT32_MAX;
 		Value    key_count;
+		Value                 selector_first;
 		Value    selector_mask;
 		std::vector<uint32_t> sources;
 
-		bool operator==(const IndirectImage& other) const = default;
+		bool operator==(const IndirectDescriptor& other) const = default;
 	};
 
 	std::array<Value, 8>         dwords {};
 	uint32_t                     dword_count = 0;
-	std::optional<IndirectImage> indirect_image;
+	std::optional<IndirectDescriptor> indirect_descriptor;
 
 	bool operator==(const DescriptorSource& other) const = default;
 };
@@ -606,6 +627,7 @@ void  ValidateProgram(const Program& program, bool require_ssa);
 void  ResolveControlFlowIdentities(Program& program);
 bool  EquivalentValue(const ResourcePlan& program, Value left, Value right);
 Value ResolveInvariantPhi(const ResourcePlan& program, Value value);
+Value ResolveActiveU32(Value value, Value active);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

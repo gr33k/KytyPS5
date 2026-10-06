@@ -19,6 +19,7 @@ struct SrtRuntime {
 	void*                     userdata                   = nullptr;
 	SrtMemoryReader           read_specialization_memory = nullptr;
 	SrtMemoryRangeValidator   validate_memory_range      = nullptr;
+	std::span<const uint32_t> workgroup_counts;
 };
 
 enum class RuntimeValueType { Any, Integer };
