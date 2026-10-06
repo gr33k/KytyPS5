@@ -249,10 +249,13 @@ ConfigurationListWidget::~ConfigurationListWidget() {
 }
 
 void ConfigurationListWidget::WriteSettings() {
-	QFile                      file = QFile(QDir(".").absoluteFilePath(CONF_FILE_NAME));
+	// Next to the launcher executable, not the working directory.
+	const QString   conf_path = QDir(QCoreApplication::applicationDirPath())
+	                                .absoluteFilePath(CONF_FILE_NAME);
+	QFile                      file = QFile(conf_path);
 	std::unique_ptr<QSettings> s;
 	if (file.exists()) {
-		s = std::make_unique<QSettings>(CONF_FILE_NAME, QSettings::IniFormat);
+		s = std::make_unique<QSettings>(conf_path, QSettings::IniFormat);
 	} else {
 #ifdef __linux__
 		s = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, CONF_ORG_NAME,
@@ -290,10 +293,13 @@ void ConfigurationListWidget::WriteSettings() {
 }
 
 void ConfigurationListWidget::ReadSettings() {
-	QFile                      file = QFile(QDir(".").absoluteFilePath(CONF_FILE_NAME));
+	// Next to the launcher executable, not the working directory.
+	const QString   conf_path = QDir(QCoreApplication::applicationDirPath())
+	                                .absoluteFilePath(CONF_FILE_NAME);
+	QFile                      file = QFile(conf_path);
 	std::unique_ptr<QSettings> s;
 	if (file.exists()) {
-		s = std::make_unique<QSettings>(CONF_FILE_NAME, QSettings::IniFormat);
+		s = std::make_unique<QSettings>(conf_path, QSettings::IniFormat);
 	} else {
 #ifdef __linux__
 		s = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, CONF_ORG_NAME,

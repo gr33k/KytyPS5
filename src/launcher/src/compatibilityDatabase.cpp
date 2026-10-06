@@ -1,6 +1,7 @@
 #include "compatibilityDatabase.h"
 
 #include <QDebug>
+#include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
@@ -131,7 +132,9 @@ const CompatibilityEntry* CompatibilityDatabase::Find(const QString& title_id) c
 }
 
 void CompatibilityDatabase::LoadLocalFile() {
-	QFile file(QDir(".").absoluteFilePath(FILE_NAME));
+	// Next to the launcher executable, not the working directory: the DB must
+	// be the same file no matter how the launcher is started.
+	QFile file(QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(FILE_NAME));
 	if (!file.exists()) {
 		return;
 	}
@@ -213,7 +216,7 @@ void CompatibilityDatabase::Save() const {
 		                         {QStringLiteral("comment"), it.value().comment}});
 	}
 
-	QSaveFile  file(QDir(".").absoluteFilePath(FILE_NAME));
+	QSaveFile  file(QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(FILE_NAME));
 	const auto data = QJsonDocument(root).toJson(QJsonDocument::Indented);
 	if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
 		qWarning() << "Could not save compatibility database:" << file.errorString();
