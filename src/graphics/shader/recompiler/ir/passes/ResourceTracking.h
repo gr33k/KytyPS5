@@ -6,10 +6,10 @@
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 // Resolves native descriptor sources, plans their scalar reads, and assigns dense resource bindings.
-// Returns false when the shader uses resource shapes the tracker cannot represent; the caller
-// must skip the shader. Tracking failures surface as std::runtime_error (see Tracker::Fail),
-// which also lets unit tests assert on them without aborting.
-[[nodiscard]] bool TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg);
+// Throws std::runtime_error when the shader uses resource shapes the tracker cannot represent;
+// the ShaderRecompiler catches this, abandons the shader, and the caller skips it. Unit tests
+// assert on the message via CheckFatal, so keep its format stable (see Tracker::Fail).
+void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

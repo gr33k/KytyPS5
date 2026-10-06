@@ -339,16 +339,19 @@ if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
-# Resource tracking reports unrepresentable shaders by throwing (caught in the
-# same translation unit); clang-cl disables exceptions by default, so enable
-# them explicitly for that file instead of relying on the driver default.
+# Resource tracking reports unrepresentable shaders by throwing; the throw
+# originates in ResourceTracking.cpp and is caught in ShaderRecompiler.cpp,
+# so both translation units need exceptions. clang-cl disables exceptions by
+# default, so enable them explicitly instead of relying on the driver default.
 if (KYTY_CLANG_CL)
 	set_source_files_properties(
 		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ShaderRecompiler.cpp"
 		PROPERTIES COMPILE_OPTIONS "/EHsc")
 else()
 	set_source_files_properties(
 		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ShaderRecompiler.cpp"
 		PROPERTIES COMPILE_OPTIONS "-fexceptions")
 endif()
 

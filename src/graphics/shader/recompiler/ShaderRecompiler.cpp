@@ -23,6 +23,7 @@
 #include <fmt/format.h>
 #include <map>
 #include <span>
+#include <stdexcept>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler {
@@ -616,9 +617,11 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 			     MakeIrDump(cfg_dump, ir).c_str());
 		}
 	}
-	if (!IR::TrackResources(ir, decoded, native_cfg)) {
-		// Unrepresentable resource shape: abandon the shader. The pipeline
-		// cache logs once and skips draws/dispatches using it.
+	try {
+		IR::TrackResources(ir, decoded, native_cfg);
+	} catch (const std::runtime_error&) {
+		// Unrepresentable resource shape (see Tracker::Fail): abandon the
+		// shader. The pipeline cache logs once and skips draws/dispatches.
 		TranslateResult failed;
 		failed.tracked = false;
 		return failed;

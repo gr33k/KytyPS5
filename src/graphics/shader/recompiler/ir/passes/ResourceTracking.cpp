@@ -2420,14 +2420,8 @@ private:
 
 } // namespace
 
-bool TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg) {
-	try {
-		Tracker(program, decoded, native_cfg).Run();
-	} catch (const std::runtime_error&) {
-		// Tracker::Fail: unrepresentable resource shape; caller skips the shader.
-		return false;
-	}
-	return true;
+void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg) {
+	Tracker(program, decoded, native_cfg).Run();
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
