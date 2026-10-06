@@ -5027,6 +5027,34 @@ void TestNewShaderRecompilerCapturedVopcSdwaCmpxLeU16() {
         "V_CMPX_LE_U16 accepted an unsupported DPP encoding");
 }
 
+void TestNewShaderRecompilerCapturedVop3Min3F16Clamp() {
+  using namespace ShaderRecompiler;
+
+  // Captured from Ghost of Tsushima: V_MIN3_F16 with the clamp output
+  // modifier was rejected as an unsupported source modifier.
+  const uint32_t shader[] = {
+      0xd751a804u, 0x040a0508u, // v_min3_f16 with clamp
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::VOP3 &&
+            decoded.opcode == Decoder::Opcode::V_MIN3_F16 &&
+            decoded.opcode_id == 0x351u && decoded.word_count == 2u &&
+            decoded.raw[0] == shader[0] && decoded.raw[1] == shader[1] &&
+            decoded.dst.clamp,
+        "decoder rejected captured clamped V_MIN3_F16 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "captured clamped V_MIN3_F16 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Pixel));
+  Check((result.decoded_dump.find("V_MIN3_F16") != std::string::npos),
+        "captured clamped V_MIN3_F16 is missing from decoded dump");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerIrLookupMissFailsExplicitly() {
   namespace Decoder = ShaderRecompiler::Decoder;
   namespace CFG = ShaderRecompiler::CFG;
@@ -14979,6 +15007,7 @@ int main() {
   TestVopcCmpxClassF16Decoder();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLeU16();
+  TestNewShaderRecompilerCapturedVop3Min3F16Clamp();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerRejectsDppOn64BitCompares();
   TestFloatComparisonInputModes();
