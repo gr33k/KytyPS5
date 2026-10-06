@@ -954,7 +954,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderDepthTarget");
 	}
-	ResolveRenderDepthTarget(buffer, state.depth_info);
+	if (!ResolveRenderDepthTarget(buffer, state.depth_info)) {
+		// Unrepresentable depth/stencil state (logged at the skip site).
+		return false;
+	}
 
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
 		LogFramebufferSkip(draw.Name(), state.color_info[0], state.depth_info, buffer,
