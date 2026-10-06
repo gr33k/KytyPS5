@@ -1074,15 +1074,10 @@ bool ExpandStripDrawToList(std::vector<uint32_t>& out, CommandBuffer& buffer,
 				return false;
 			}
 			std::vector<uint8_t> staging(static_cast<size_t>(need));
-			if (!Libs::LibKernel::Memory::TryReadGpuCleanBacking(source.address, staging.data(),
-			                                                     staging.size())) {
-				// GPU-written index data has no fresh CPU backing yet; download it
-				// synchronously so the expansion sees what the draw will use.
-				buffer.GetContext().GetBufferCache().ReadMemory(source.address, need, false);
-				if (!Libs::LibKernel::Memory::TryReadGpuCleanBacking(
-				        source.address, staging.data(), staging.size())) {
-					return false;
-				}
+			// Sync GPU-written index data into CPU backing before expanding.
+			if (!Libs::LibKernel::Memory::TryReadBufferBacking(source.address, staging.data(),
+			                                                   staging.size())) {
+				return false;
 			}
 			for (uint32_t i = 0; i < count; i++) {
 				uint32_t v = 0;
