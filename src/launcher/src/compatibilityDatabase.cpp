@@ -209,8 +209,28 @@ void CompatibilityDatabase::SetComment(const QString& title_id, const QString& c
 }
 
 void CompatibilityDatabase::Save() const {
-	QJsonObject root;
+	// Merge with what's on disk (in-memory entries win): a stale launcher
+	// instance holding an old map must not clobber entries saved by a newer
+	// session when it writes.
+	QMap<QString, CompatibilityEntry> merged;
+	QFile disk(QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(FILE_NAME));
+	if (disk.exists() && disk.open(QIODevice::ReadOnly)) {
+		const auto disk_result = Parse(disk.readAll());
+		if (disk_result.error.isEmpty()) {
+			merged = disk_result.entries;
+		}
+	}
 	for (auto it = m_local_entries.constBegin(); it != m_local_entries.constEnd(); ++it) {
+		merged[it.key()] = it.value();
+	}
+	QJsonObject root;
+	for (auto it = merged.constBegin(); it != merged.constEnd(); ++it) {
+		// Defaults carry no information; dropping them keeps the file small
+		// and preserves PruneDefault semantics across the merge.
+		if (it.value().status == Configuration::GameStatus::Unknown &&
+		    it.value().comment.isEmpty()) {
+			continue;
+		}
 		root.insert(it.key(),
 		            QJsonObject {{QStringLiteral("status"), StatusToText(it.value().status)},
 		                         {QStringLiteral("comment"), it.value().comment}});
