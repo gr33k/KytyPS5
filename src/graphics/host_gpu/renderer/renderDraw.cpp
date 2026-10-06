@@ -557,7 +557,16 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 			}
 		}
 		if (feedback_aspects && !m_context.GetGraphics().attachment_feedback_loop_enabled) {
-			EXIT("depth attachment feedback loop is not supported by the host\n");
+			// No host feedback-loop support (e.g. older AMD drivers): fall back to
+			// General layout and continue. Sampling a depth attachment that is
+			// also bound for writing is racy without the extension, so depth
+			// reads in these draws may be stale; that beats aborting the game.
+			static std::atomic_uint feedback_log = 0;
+			if (feedback_log.fetch_add(1, std::memory_order_relaxed) < 4) {
+				LOGF("Render: depth feedback loop unsupported by host; continuing "
+				     "with General layout (aspects=0x%x)\n",
+				     static_cast<uint32_t>(feedback_aspects));
+			}
 		}
 		auto layout = depth_attachment_layout(depth);
 		if (sampled_aspects & ~DepthReadableAspects(layout)) {
