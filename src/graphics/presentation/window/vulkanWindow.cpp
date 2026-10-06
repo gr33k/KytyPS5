@@ -492,7 +492,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		image_atomic_int64.pNext = supported_features2.pNext;
 		supported_features2.pNext = &image_atomic_int64;
 	}
-	}
 	physical_device.getFeatures2(&supported_features2);
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
 
