@@ -1008,6 +1008,7 @@ bool ConfigurationListWidget::IsColumnVisible(int section) const {
 
 void ConfigurationListWidget::SetColumnVisible(int section, bool visible) {
 	m_ui->cfgs_list->setColumnHidden(section, !visible);
+}
 
 void ConfigurationListWidget::ViewTrophyOverview() {
 	std::vector<std::unique_ptr<Configuration>> configurations;
@@ -1021,7 +1022,6 @@ void ConfigurationListWidget::ViewTrophyOverview() {
 		games.push_back(configurations.back().get());
 	}
 	TrophyViewerDialog::ShowOverview(games, m_runtime_directory, this);
-
 }
 
 void ConfigurationListWidget::open_game_folder() {
