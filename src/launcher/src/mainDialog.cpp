@@ -982,7 +982,7 @@ void MainDialogPrivate::Update() {
 				status_text += tr("   •   <b>%1</b> (%2)").arg(name, serial);
 			}
 		}
-		has_patches  = PatchesDialog::IsSupportedTitleId(info.title_id);
+		has_patches  = Cheats::IsSupportedTitleId(info.title_id);
 		has_trophies = TrophyViewerDialog::HasTrophyData(&info);
 	}
 
