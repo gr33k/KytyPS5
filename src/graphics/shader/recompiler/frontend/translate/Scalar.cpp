@@ -134,6 +134,10 @@ void Translator::EmitScalar(const Decoder::Instruction& inst) {
 
 		case O::S_ABS_I32:
 			return SimpleInteger(inst, IR::ValueOpcode::IAbs32, IR::Type::U32, false, false, true);
+		case O::S_SEXT_I32_I16:
+			WriteOperand(inst.dst, IR::U32(ir.Emit(IR::ValueOpcode::BitFieldSExtract,
+			    {ReadU32(inst.src0), IR::Value(0u), IR::Value(16u)})));
+			return;
 		case O::S_MUL_I32:
 		case O::S_MULK_I32:
 			return SimpleInteger(inst, IR::ValueOpcode::IMul32, IR::Type::U32, false, false, false);

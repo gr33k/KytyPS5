@@ -232,7 +232,7 @@ constexpr VopcOpcodeInfo VOPC_OPCODE_LIST[] = {
     {0x11u, Opcode::V_CMPX_LT_F32},        {0x12u, Opcode::V_CMPX_EQ_F32},
     {0x13u, Opcode::V_CMPX_LE_F32},        {0x14u, Opcode::V_CMPX_GT_F32},
     {0x15u, Opcode::V_CMPX_LG_F32},        {0x16u, Opcode::V_CMPX_GE_F32},
-    {0x17u, Opcode::V_CMPX_O_F32},
+    {0x17u, Opcode::V_CMPX_O_F32},         {0x18u, Opcode::V_CMPX_U_F32},
     {0x19u, Opcode::V_CMPX_NGE_F32},       {0x1au, Opcode::V_CMPX_NLG_F32},
     {0x1bu, Opcode::V_CMPX_NGT_F32},       {0x1cu, Opcode::V_CMPX_NLE_F32},
     {0x1du, Opcode::V_CMPX_NEQ_F32},       {0x1eu, Opcode::V_CMPX_NLT_F32},
@@ -266,10 +266,18 @@ constexpr VopcOpcodeInfo VOPC_OPCODE_LIST[] = {
     {0xc7u, Opcode::V_CMP_T_U32},          {0xa2u, Opcode::V_CMP_EQ_I64, false},
     {0xa1u, Opcode::V_CMP_LT_I64, false},  {0xa3u, Opcode::V_CMP_LE_I64, false},
     {0xa5u, Opcode::V_CMP_NE_I64, false},
+    {0xa0u, Opcode::V_CMP_F_I64, false},   {0xa7u, Opcode::V_CMP_T_I64, false},
+    {0xb0u, Opcode::V_CMPX_F_I64, false},  {0xb1u, Opcode::V_CMPX_LT_I64, false},
+    {0xb2u, Opcode::V_CMPX_EQ_I64, false}, {0xb3u, Opcode::V_CMPX_LE_I64, false},
+    {0xb7u, Opcode::V_CMPX_T_I64, false},
     {0xb5u, Opcode::V_CMPX_NE_I64, false}, {0xd1u, Opcode::V_CMPX_LT_U32},
     {0xd2u, Opcode::V_CMPX_EQ_U32},        {0xd3u, Opcode::V_CMPX_LE_U32},
     {0xd4u, Opcode::V_CMPX_GT_U32},        {0xd5u, Opcode::V_CMPX_NE_U32},
     {0xd6u, Opcode::V_CMPX_GE_U32},        {0xe1u, Opcode::V_CMP_LT_U64, false},
+    {0xe0u, Opcode::V_CMP_F_U64, false},   {0xe7u, Opcode::V_CMP_T_U64, false},
+    {0xf0u, Opcode::V_CMPX_F_U64, false},  {0xf1u, Opcode::V_CMPX_LT_U64, false},
+    {0xf2u, Opcode::V_CMPX_EQ_U64, false}, {0xf4u, Opcode::V_CMPX_GT_U64, false},
+    {0xf6u, Opcode::V_CMPX_GE_U64, false}, {0xf7u, Opcode::V_CMPX_T_U64, false},
     {0xe2u, Opcode::V_CMP_EQ_U64, false},  {0xe3u, Opcode::V_CMP_LE_U64, false},
     {0xe4u, Opcode::V_CMP_GT_U64, false},  {0xe5u, Opcode::V_CMP_NE_U64, false},
     {0xe6u, Opcode::V_CMP_GE_U64, false},  {0xf3u, Opcode::V_CMPX_LE_U64, false},
@@ -893,6 +901,7 @@ bool IsVopcFloatCompareOpcode(Opcode opcode) {
 		case Opcode::V_CMPX_LG_F32:
 		case Opcode::V_CMPX_GE_F32:
 		case Opcode::V_CMPX_O_F32:
+		case Opcode::V_CMPX_U_F32:
 		case Opcode::V_CMPX_NGE_F32:
 		case Opcode::V_CMPX_NLG_F32:
 		case Opcode::V_CMPX_NGT_F32:
@@ -1450,15 +1459,15 @@ bool SupportsNativeVop3ResultModifiers(Opcode opcode) {
 		case Opcode::V_MAD_F32:
 		case Opcode::V_FMA_F32:
 		case Opcode::V_FMA_F16:
+		case Opcode::V_MIN3_F16:
+		case Opcode::V_MAX3_F16:
+		case Opcode::V_MED3_F16:
 		case Opcode::V_CUBEID_F32:
 		case Opcode::V_CVT_PKRTZ_F16_F32:
 		case Opcode::V_LDEXP_F32:
 		case Opcode::V_MIN3_F32:
 		case Opcode::V_MAX3_F32:
-		case Opcode::V_MED3_F32:
-		case Opcode::V_MIN3_F16:
-		case Opcode::V_MAX3_F16:
-		case Opcode::V_MED3_F16: return true;
+		case Opcode::V_MED3_F32: return true;
 		default: return false;
 	}
 }
@@ -1483,11 +1492,10 @@ bool HasUnsupportedNativeVop3Modifiers(Opcode opcode, bool permlane, bool mad_mi
 		return clamp != 0u || omod != 0u;
 	}
 	if (IsNativeVop3F16TernaryOpcode(opcode)) {
-		// V_FMA_F16 keeps its historical handling; V_MIN3/MAX3/MED3_F16 accept
-		// clamp/omod output modifiers, propagated via the dst flags below.
-		return opcode != Opcode::V_FMA_F16 && opcode != Opcode::V_MIN3_F16 &&
-		       opcode != Opcode::V_MAX3_F16 && opcode != Opcode::V_MED3_F16 &&
-		       (clamp != 0u || omod != 0u);
+
+		// Clamp is applied by WriteF16 for every f16 ternary; omod only for V_FMA_F16.
+		return opcode != Opcode::V_FMA_F16 && omod != 0u;
+
 	}
 	if (IsNativeVop3I16TernaryOpcode(opcode)) {
 		return abs != 0u || (clamp != 0u && !clamp_modifier) || omod != 0u || neg != 0u;
@@ -1537,6 +1545,7 @@ bool IsVopcCompareExec(Opcode opcode) {
 		case Opcode::V_CMPX_LG_F32:
 		case Opcode::V_CMPX_GE_F32:
 		case Opcode::V_CMPX_O_F32:
+		case Opcode::V_CMPX_U_F32:
 		case Opcode::V_CMPX_NGE_F32:
 		case Opcode::V_CMPX_NLG_F32:
 		case Opcode::V_CMPX_NGT_F32:
@@ -1557,9 +1566,20 @@ bool IsVopcCompareExec(Opcode opcode) {
 		case Opcode::V_CMPX_GT_U32:
 		case Opcode::V_CMPX_NE_U32:
 		case Opcode::V_CMPX_GE_U32:
+		case Opcode::V_CMPX_F_I64:
+		case Opcode::V_CMPX_LT_I64:
+		case Opcode::V_CMPX_EQ_I64:
+		case Opcode::V_CMPX_LE_I64:
 		case Opcode::V_CMPX_NE_I64:
+		case Opcode::V_CMPX_T_I64:
+		case Opcode::V_CMPX_F_U64:
+		case Opcode::V_CMPX_LT_U64:
+		case Opcode::V_CMPX_EQ_U64:
 		case Opcode::V_CMPX_LE_U64:
+		case Opcode::V_CMPX_GT_U64:
 		case Opcode::V_CMPX_NE_U64:
+		case Opcode::V_CMPX_GE_U64:
+		case Opcode::V_CMPX_T_U64:
 		case Opcode::V_CMPX_LT_I16:
 		case Opcode::V_CMPX_EQ_I16:
 		case Opcode::V_CMPX_LE_I16:
