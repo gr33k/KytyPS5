@@ -2973,55 +2973,6 @@ int KYTY_SYSV_ABI KernelAioPollRequests(int32_t* ids, int32_t num, int32_t* stat
 	return OK;
 }
 
-int KYTY_SYSV_ABI KernelAioWaitRequests(int32_t* ids, int32_t num, int32_t* states, uint32_t mode,
-                                        uint32_t* usec) {
-	PRINT_NAME();
-
-	if (ids == nullptr || states == nullptr) {
-		return LibKernel::KERNEL_ERROR_EFAULT;
-	}
-	if (num <= 0 || num > KERNEL_AIO_MAX_REQUESTS ||
-	    (num != 1 && mode != KERNEL_AIO_WAIT_AND && mode != KERNEL_AIO_WAIT_OR)) {
-		return LibKernel::KERNEL_ERROR_EINVAL;
-	}
-
-	const auto collect_states = [&](bool notify) {
-		int32_t finished = 0;
-		bool newly_complete = false;
-		for (int32_t i = 0; i < num; i++) {
-			const auto current = kernel_aio_get_state(ids[i], notify);
-			states[i] = current;
-			finished += current != KERNEL_AIO_STATE_PROCESSING;
-			newly_complete |= current == KERNEL_AIO_STATE_COMPLETED || current == KERNEL_AIO_STATE_ABORTED;
-		}
-		return finished == num || (mode == KERNEL_AIO_WAIT_OR && newly_complete);
-	};
-	const auto start = std::chrono::steady_clock::now();
-	for (;;) {
-		const bool complete = collect_states(false);
-		const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-		                         std::chrono::steady_clock::now() - start).count();
-		const bool timed_out = usec != nullptr && elapsed >= *usec;
-		if (complete || timed_out) {
-			// A competing waiter can claim the newly completed request after the first scan.
-			if (collect_states(true)) {
-				if (usec != nullptr) {
-					*usec = elapsed < *usec ? *usec - static_cast<uint32_t>(elapsed) : 0;
-				}
-				return OK;
-			}
-			if (timed_out) {
-				return LibKernel::KERNEL_ERROR_ETIMEDOUT;
-			}
-		}
-		Common::Thread::SleepMicro(10);
-	}
-}
-
-int KYTY_SYSV_ABI KernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* usec) {
-	return KernelAioWaitRequests(&id, 1, state, KERNEL_AIO_WAIT_AND, usec);
-}
-
 int KYTY_SYSV_ABI KernelAioWaitRequests(int32_t id[], int32_t num, int32_t state[], uint32_t mode,
                                         uint32_t* usec) {
 	PRINT_NAME();
@@ -3065,6 +3016,10 @@ int KYTY_SYSV_ABI KernelAioWaitRequests(int32_t id[], int32_t num, int32_t state
 		return LibKernel::KERNEL_ERROR_ETIMEDOUT;
 	}
 	return OK;
+}
+
+int KYTY_SYSV_ABI KernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* usec) {
+	return KernelAioWaitRequests(&id, 1, state, KERNEL_AIO_WAIT_AND, usec);
 }
 
 int KYTY_SYSV_ABI KernelAioDeleteRequest(int32_t id, int32_t* ret) {
