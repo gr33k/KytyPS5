@@ -73,66 +73,69 @@ emulator progress.
 
 ## Compatibility (This Fork, Test Platform Above)
 
-54 titles tested: 4 InGame, 2 Unknown (reported working, awaiting
-re-confirmation), 19 MainMenu, 13 Logo, 16 DoesntBoot. Dates are the test
+56 titles tested: 4 InGame, 2 Unknown (reported working, awaiting
+re-confirmation), 19 MainMenu, 13 Logo, 18 DoesntBoot. Dates are the test
+dates (M/D/YY). Names are taken from the local dump folder names.
 dates (M/D/YY). Names are taken from the local dump folder names.
 
 | Game | Title ID | Status | Notes |
 | ---- | -------- | ------ | ----- |
-| Alone in the Dark | PPSA08240 | InGame | Boots, but shaders/graphics corrupt in-game - 10/5/26 |
-| Control Ultimate Edition | PPSA01949 | InGame | Menu loads; in-game but dark (shader issue?), not playable - 10/2/26 |
-| Werewolf The Apocalypse - Earthblood | PPSA02113 | InGame | Menu loads; in-game video black, HUD visible - 10/5/26 |
-| WWE 2K22 | PPSA02460 | InGame | Boots in-game - 10/5/26 |
-| Ninja Turtles Cowabunga Collection | PPSA04489 | Unknown | Works great - 10/5/26 |
-| Port Royal 4 | PPSA02815 | Unknown | In-game experience, possible shader issues but playable - 10/2/26 |
-| Alan Wake Remastered | PPSA01925 | MainMenu | Startup video plays, crashes before in-game - 10/2/26 |
-| Avatar The Last Airbender - Quest for Balance | PPSA04341 | MainMenu | No notes recorded |
-| Call of the Sea | PPSA01546 | MainMenu | Crashes before loading in-game - 10/2/26 |
-| Chernobylite | PPSA04747 | MainMenu | Freezes after logo, then menu; crashes before in-game - 10/2/26 |
-| Five Nights at Freddys Security Breach | PPSA04677 | MainMenu | Starts video, crashes before in-game; upstream reports in-game - 10/2/26 |
-| Ghostwire Tokyo | PPSA01337 | MainMenu | Starts loading, crashes before gameplay - 10/2/26 |
-| Grand Theft Auto San Andreas - The Definitive Edition | PPSA03524 | MainMenu | Crashes on start; upstream reports in-game (2026-09-27-421684e) - 10/2/26 |
-| Grand Theft Auto Vice City - The Definitive Edition | PPSA03530 | MainMenu | Crashes on start - 10/2/26 |
-| Hotwheels Unleashed | PPSA02325 | MainMenu | Crashes in menu - 10/2/26 |
-| Madison | PPSA07370 | MainMenu | No notes recorded |
-| Maneater | PPSA01862 | MainMenu | Crashes in menu - 10/2/26 |
-| Mortal Kombat 11 Ultimate | PPSA01619 | MainMenu | Crashes after menu selection - 10/2/26 |
-| MX vs ATV Legends | PPSA04734 | MainMenu | Crashes while loading in-game - 10/5/26 |
-| MXGP 2020 | PPSA01646 | MainMenu | Items not rendering, eventually crashes - 10/2/26 |
-| Resident Evil 8 - Maiden Demo | PPSA01859 | MainMenu | Reaches menu (prior no-boot fixed) - 10/2/26 |
-| Ride 4 | PPSA01599 | MainMenu | Crashes loading inside menu - 10/2/26 |
-| The King of Fighters XV | PPSA02213 | MainMenu | Crashes before loading in-game - 10/5/26 |
-| Tony Hawks Pro Skater 1 and 2 | PPSA02176 | MainMenu | Crashes before in-game loads - 10/5/26 |
-| Train Sim World 2 Rush Hour | PPSA03944 | MainMenu | Very slow; crashes loading in-game - 10/5/26 |
-| Back 4 Blood | PPSA01695 | Logo | Crashes before menu - 10/2/26 |
-| Borderlands 3 | PPSA01462 | Logo | Loading animation, then crashes - 10/2/26 |
-| Indiana Jones and The Great Circle | PPSA26786 | Logo | Crashes before menu - 10/5/26 |
-| It Takes Two | PPSA02343 | Logo | Crashes before menu - 10/2/26 |
-| Jumanji The Video Game | PPSA03973 | Logo | Crashes before menu - 10/2/26 |
-| LEGO Star Wars The Skywalker Saga | PPSA01865 | Logo | Crashes before menu - 10/2/26 |
-| Observer System Redux | PPSA02118 | Logo | Past a few logos, crashes before menu - 10/2/26 |
-| Sackboy a Big Adventure | PPSA01288 | Logo | Starts loading, never reaches menu - 10/2/26 |
-| Sifu | PPSA03001 | Logo | Loading clouds, never reaches menu - 10/2/26 |
-| Star Wars Jedi Fallen Order | PPSA02198 | Logo | Crashes after logo - 10/2/26 |
-| Terminator Resistance Enhanced | PPSA02474 | Logo | Logo for a few seconds, then crashes - 10/5/26 |
-| The Devil In Me | PPSA05921 | Logo | Loading progress bar, crashes before menu - 10/5/26 |
-| Tropico 6 | PPSA05682 | Logo | Crashes loading toward menu - 10/5/26 |
-| A Plague Tale - Innocence | PPSA02388 | DoesntBoot | Audio but no video - 10/2/26 |
-| Away - The Survival Series | PPSA04555 | DoesntBoot | No boot - 10/2/26 |
-| Beyond a Steel Sky | PPSA03979 | DoesntBoot | No boot - 10/2/26 |
-| DIRT5 | PPSA01552 | DoesntBoot | No boot - 10/2/26 |
-| Fishing North Atlantic Enhanced Edition | PPSA02985 | DoesntBoot | No boot - 10/2/26 |
-| Ghost of Tsushima Directors Cut | PPSA03208 | DoesntBoot | No boot - 10/2/26 |
-| Ghostrunner | PPSA03682 | DoesntBoot | Brief video, then crashes - 10/2/26 |
-| Grand Theft Auto III - The Definitive Edition | PPSA03527 | DoesntBoot | No boot - 10/2/26 |
-| GreedFall | PPSA02982 | DoesntBoot | No boot - 10/2/26 |
-| Martha is Dead | PPSA02006 | DoesntBoot | No boot - 10/2/26 |
-| Medium | PPSA03717 | DoesntBoot | No boot - 10/5/26 |
-| Planet Coaster (EU) | PPSA01735 | DoesntBoot | No boot - 10/2/26 |
-| Planet Coaster (US) | PPSA01736 | DoesntBoot | No boot here; upstream reports main-menu (KytyPS5-2026-08-28-c52bf45) - 10/2/26 |
-| The Ascent | PPSA02593 | DoesntBoot | Audio but no video - 10/5/26 |
-| The Matrix Awakens Demo | PPSA05754 | DoesntBoot | No boot - 10/5/26 |
-| The Riftbreaker | PPSA03753 | DoesntBoot | No boot - 10/5/26 |
+| Control Ultimate Edition | PPSA01949 | InGame | Game boots to menu - Loads and gets in-game but looks dark (shader issue?) - not playable - 10/2/26 |
+| PPSA08240 | PPSA08240 | InGame | Game boots but the shaders/graphic corrupt in game - 10/5/26 |
+| WWE 2K22 | PPSA02460 | InGame | Boots in game - 10/5/26 |
+| Werewolf The Apocalypse - Earthblood | PPSA02113 | InGame | Boots to menu - Loads to game but game is black on HUD shows - 10/5/26 |
+| Ninja Turtles Cowabunga Collection | PPSA04489 | Unknown | Game Works Great! - 10/5/26 |
+| Port Royal 4 | PPSA02815 | Unknown | Boots to in-game experience (possible shader issues but playable!) - 10/2/26 |
+| Alan Wake Remastered | PPSA01925 | MainMenu | Game boots to menu - startup video plays - game crashes before reaching in-game - 10/2/26 |
+| Call of the Sea | PPSA01546 | MainMenu | Game boots to menu - crashes before loading in-game - 10/2/26 |
+| Chernobylite | PPSA04747 | MainMenu | Game boots to initial logo - then freezes for a while (press buttons?) - then proceeds to game menu and crashes before getting in-game - 10/2/26 |
+| Five Nights at Freddys Security Breach | PPSA04677 | MainMenu | Game boots to menu - Starts video but crashes before in-game - 10/2/26 (Github states in-game) |
+| Ghostwire Tokyo | PPSA01337 | MainMenu | Game boots to menu - Starts loading game then crashes before game plan - 10/2/26 |
+| Grand Theft Auto San Andreas - The Definitive Edition | PPSA03524 | MainMenu | Game boots to menu - Crashes when start - 10/2/26 (Github states in-game 1 report · status: in-game · tested on 2026-09-27-421684e) |
+| Grand Theft Auto Vice City - The Definitive Edition | PPSA03530 | MainMenu | Game boots to menu - Crashes when start - 10/2/26 |
+| Hotwheels Unleashed | PPSA02325 | MainMenu | Game boots to menu - Crashes in menu - 10/2/26 |
+| MXGP 2020 | PPSA01646 | MainMenu | Game boots to menu - graphical issue items not rendering and eventually crashes - 10/2/26 |
+| Madison | PPSA07370 | MainMenu |  |
+| Maneater | PPSA01862 | MainMenu | Game boots to menu - crashes in menu - 10/2/26 |
+| PPSA01619 | PPSA01619 | MainMenu | Game boot to menu - crashes once making a selection to proceed in-game - 10/2/26 |
+| PPSA04341 | PPSA04341 | MainMenu |  |
+| PPSA04734 | PPSA04734 | MainMenu | Game boots to menu - crashes while loading to in-game - 10/5/26 |
+| Resident Evil 8 - Maiden Demo | PPSA01859 | MainMenu | Boots to menu now - Muse Spark fixed no boot 10/2/26 |
+| Ride 4 | PPSA01599 | MainMenu | Boots to menu - crashes when loading in menu (before attempting to start game) - 10/2/26 |
+| The King of Fighters XV | PPSA02213 | MainMenu | Boots to menu - crashes before loading in-game - 10/5/26 |
+| Tony Hawks Pro Skater 1 and 2 | PPSA02176 | MainMenu | Boots to menu - crashes before in-game loads - 10/5/26 |
+| Train Sim World 2 Rush Hour | PPSA03944 | MainMenu | Game boots to menu - Very slow - Loading to game it crashes - 10/5/26 |
+| Back 4 Blood | PPSA01695 | Logo | Game boots - game crashes before reaching menu - 10/2/26 |
+| Borderlands 3 | PPSA01462 | Logo | Game boots - Gets to loading animation then crashes - 10/2/26 |
+| It Takes Two | PPSA02343 | Logo | Game boots to logo - crashes before reaching menu - 10/2/26 |
+| Jumanji The Video Game | PPSA03973 | Logo | Game boots to logo - crashes before reaching menu - 10/2/26 |
+| LEGO Star Wars The Skywalker Saga | PPSA01865 | Logo | Game boots to logo - crashes before reaching menu - 10/2/26 |
+| Observer System Redux | PPSA02118 | Logo | Game boots to a few logos - crashes before reaching menu - 10/2/26 |
+| PPSA05921 | PPSA05921 | Logo | Boots loading progress bar - crashes before getting to menu - 10/5/26 |
+| PPSA26786 | PPSA26786 | Logo | Boot logo - Crashes before Menu - 10/5/26 |
+| Sackboy a Big Adventure | PPSA01288 | Logo | Boots to logo - starts loading but never seems to get to menu - 10/2/26 |
+| Sifu | PPSA03001 | Logo | Boots logo - starts loading shows clouds but never seems to get to menu - 10/2/26 |
+| Star Wars Jedi Fallen Order | PPSA02198 | Logo | Boots logo - crashes - 10/2/26 |
+| Terminator Resistance Enhanced | PPSA02474 | Logo | See logo for a few seconds and crashes - 10/5/26 |
+| Tropico 6 | PPSA05682 | Logo | Boots logo and loading to menu it crashes - 10/5/26 |
+| A Plague Tale - Innocence | PPSA02388 | DoesntBoot | Boots with audio but no video - 10/2/26 |
+| Away - The Survival Series | PPSA04555 | DoesntBoot | No Boot - 10/2/26 |
+| Beyond a Steel Sky | PPSA03979 | DoesntBoot | No Boot - 10/2/26 |
+| DIRT5 | PPSA01552 | DoesntBoot | No Boot - 10/2/26 |
+| Fishing North Atlantic Enhanced Edition | PPSA02985 | DoesntBoot | No Boot - 10/2/26 |
+| Five Nights at Freddy's Help Wanted 2 | PPSA18887 | DoesntBoot | GPU flip submission failed at boot (result=-2144796661), no video - 10/8/26 (reconstructed from log; original note lost) |
+| Ghost of Tsushima Directors Cut | PPSA03208 | DoesntBoot | No Boot - 10/2/26 |
+| Ghostrunner | PPSA03682 | DoesntBoot | Starts video briefly and crashed (essentially doesn't boot) - 10/2/26 |
+| Grand Theft Auto III - The Definitive Edition | PPSA03527 | DoesntBoot | No Boot - 10/2/26 |
+| GreedFall | PPSA02982 | DoesntBoot | No Boot - 10/2/26 |
+| MARVEL Tokon Fighting Souls | PPSA15595 | DoesntBoot | Guest abort() in libC at boot, no submits - 10/8/26 (reconstructed from log; original note lost) |
+| Martha is Dead | PPSA02006 | DoesntBoot | No Boot - 10/2/26 |
+| Medium | PPSA03717 | DoesntBoot | No Boot - 10/5/26 |
+| Planet Coaster (EU) | PPSA01735 | DoesntBoot | No Boot - 10/2/26 |
+| Planet Coaster (US) | PPSA01736 | DoesntBoot | No Boot - 10/2/26 (github has 1 report · status: main-menu · tested on KytyPS5-2026-08-28-c52bf45) |
+| The Ascent | PPSA02593 | DoesntBoot | Boots with audio but no video - 10/5/26 |
+| The Matrix Awakens Demo | PPSA05754 | DoesntBoot | No Boot - 10/5/26 |
+| The Riftbreaker | PPSA03753 | DoesntBoot | No Boot - 10/5/26 |
 
 ## System Requirements
 
@@ -152,8 +155,23 @@ for Windows**, Qt 6 for MSVC 2022 64-bit (Concurrent, Network, Widgets), and
 `glslangValidator` on `PATH`. The MSVC compiler (`cl.exe`) is not supported;
 use `clang-cl`.
 
-From an **x64 Native Tools Command Prompt for VS 2022** in the repo root
-(replace the Qt path with the installed version):
+
+### Build requirements (Windows)
+
+- Git
+- CMake 3.22.1 or newer
+- Ninja
+- Visual Studio 2022 or Build Tools 2022 with the **Desktop development with C++** workload and
+  **C++ Clang tools for Windows** component
+- Qt 6 for MSVC 2022 64-bit, including Concurrent, Network, and Widgets
+- [glslang](https://github.com/KhronosGroup/glslang/releases) (`glslang` or `glslangValidator`) on `PATH`
+- Python 3 on `PATH`; the bundled SPIRV-Tools runs it at configure time
+
+The Microsoft C++ compiler (`cl.exe`) is not supported; use `clang-cl`.
+
+Open an **x64 Native Tools Command Prompt for Visual Studio 2022** (or the equivalent Developer
+PowerShell), change to the repository root, and initialize the dependencies:
+
 
 ```powershell
 git submodule update --init --recursive
@@ -166,9 +184,22 @@ The runnable application lands in `_Build/windows/install`.
 
 ### Linux
 
-Install Clang, CMake, Ninja, glslang, Qt 6 (Concurrent, Network, Widgets), and
-the SDL3 backend dev packages (audio, Wayland, udev — without them the build
-silently lacks sound and gamepad hotplug). Then:
+
+Install the toolchain and the libraries the bundled SDL3 needs. Without the audio, Wayland and
+udev development packages SDL3 quietly configures itself without those backends, and the resulting
+build has no working sound and no gamepad hotplug:
+
+```bash
+sudo apt-get install --no-install-recommends \
+  clang lld ninja-build cmake git glslang-tools python3 pkg-config \
+  libgl1-mesa-dev libx11-dev libxcursor-dev libxext-dev libxfixes-dev \
+  libxi-dev libxrandr-dev libxss-dev libxtst-dev libxkbcommon-dev \
+  libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libwayland-dev wayland-protocols
+```
+
+Qt 6 (Concurrent, Network, Widgets) is required for the launcher — either the distribution packages
+(`qt6-base-dev`) or an official Qt installation.
+
 
 ```bash
 git submodule update --init --recursive
@@ -189,7 +220,91 @@ Experimental: x86-64 builds run under Rosetta 2 on Apple Silicon (Xcode CLT,
 `-DCMAKE_OSX_ARCHITECTURES=x86_64`, build and install as on Linux; see
 upstream docs for the MoltenVK `libMoltenVK.dylib` signing steps.
 
-### Regression Tests
+
+cmake -S . -B _Build/linux-no-qt -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DKYTY_BUILD_LAUNCHER=OFF
+
+cmake --build _Build/linux-no-qt --target kyty_emulator kyty_tests --parallel
+```
+
+As on Windows, the MSVC compiler is not used; Clang is required. `cl.exe` is rejected at configure
+time.
+
+The CMake source root is the repository root.
+
+### Building on NixOS
+
+A development shell provides Clang, CMake, Ninja, Qt 6, the Vulkan headers, and the SDL3 backend
+libraries. Enter it and configure exactly as on other Linux distributions; the shell exports
+`CMAKE_PREFIX_PATH` and `QT_PLUGIN_PATH`, so the `-DCMAKE_PREFIX_PATH="$Qt6_DIR"` argument is not
+needed:
+
+```bash
+nix-shell # or: nix develop
+git submodule update --init --recursive
+
+cmake -S . -B _Build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+
+cmake --build _Build/linux --target launcher --parallel
+cmake --install _Build/linux --prefix _Build/linux/install
+```
+
+The configure step downloads the FFmpeg prebuilts and the `xbyak`, `zydis`, `zstd`, and ZArchive
+sources, so it needs network access; a fully sandboxed `nix build` would require vendoring those
+inputs. A Vulkan 1.3 driver must be available at runtime (on NixOS,
+`hardware.graphics.enable = true`).
+
+### Building on macOS
+
+macOS builds target x86-64 and run under Rosetta 2 on Apple Silicon, so the PS5's x86-64 game
+code executes through the same translation layer as the emulator itself. Prebuilt archives are
+attached to releases; the steps below are for building from source.
+
+Requirements:
+
+- An Apple Silicon Mac with Rosetta 2 installed (`softwareupdate --install-rosetta`)
+- Xcode (or the Command Line Tools)
+- Homebrew packages: `brew install cmake ninja glslang python`
+- Qt 6 (Concurrent, Network, Widgets) with x86-64 support. The official Qt installation is
+  universal and works; Homebrew's Qt is arm64-only and will not link
+
+```bash
+git submodule update --init --recursive
+
+cmake -S . -B _Build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_PREFIX_PATH="$Qt6_DIR"
+
+cmake --build _Build/macos --target launcher --parallel
+cmake --install _Build/macos --prefix _Build/macos/install
+```
+
+The build re-signs `kyty_emulator` with the JIT entitlements it needs to execute translated
+guest code; no manual signing step is required. When the launcher is built, the install
+also produces `_Build/macos/install/KytyPS5.app` — double-click to launch the GUI.
+A flat `kyty_emulator` is kept for CLI usage.
+
+Vulkan comes from MoltenVK. Download `MoltenVK-macos.tar` from the
+[MoltenVK releases](https://github.com/KhronosGroup/MoltenVK/releases), then copy
+`MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib` next to the flat `kyty_emulator`
+(and, for the bundle, into `KytyPS5.app/Contents/Frameworks/`) and ad-hoc sign it:
+
+```bash
+codesign --force --sign - _Build/macos/install/libMoltenVK.dylib
+# For the bundle (if present):
+codesign --force --sign - _Build/macos/install/KytyPS5.app/Contents/Frameworks/libMoltenVK.dylib
+codesign --force --sign - _Build/macos/install/KytyPS5.app
+```
+
+Release archives already include a signed `libMoltenVK.dylib` (both flat and inside the bundle).
+
+### Regression tests
+
+Build every regression executable and run the registered tests with:
+
 
 ```powershell
 cmake --build _Build/windows --target kyty_tests

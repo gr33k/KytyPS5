@@ -251,7 +251,7 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/loader/*.h"
 )
 
-find_program(KYTY_GLSLANG_VALIDATOR glslangValidator REQUIRED)
+find_program(KYTY_GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
 set(gpu_tiler_shader_dir "${KYTY_SOURCE_DIR}/graphics/host_gpu/shaders")
 set(gpu_tiler_generated_dir "${PROJECT_BINARY_DIR}/gpu_tiler_shaders")
 set(gpu_tiler_shader_names
