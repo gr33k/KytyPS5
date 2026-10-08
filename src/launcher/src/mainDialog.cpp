@@ -271,11 +271,18 @@ void MainDialogPrivate::BuildChrome() {
 	        &ConfigurationListWidget::open_game_folder);
 
 	m_action_trophies = new QAction(
-	    window->style()->standardIcon(QStyle::SP_FileDialogContentsView),
+	    QIcon(QStringLiteral(":/icons/trophy.svg")),
 	    tr("View &Trophies..."), window);
 	m_action_trophies->setStatusTip(tr("View the selected game's trophies"));
 	connect(m_action_trophies, &QAction::triggered, m_ui->widget,
 	        &ConfigurationListWidget::ViewTrophies);
+
+	auto* action_trophy_overview = new QAction(
+	    QIcon(QStringLiteral(":/icons/trophy.svg")),
+	    tr("Trophy &Overview"), window);
+	action_trophy_overview->setStatusTip(tr("View trophies across all games"));
+	connect(action_trophy_overview, &QAction::triggered, m_ui->widget,
+	        &ConfigurationListWidget::ViewTrophyOverview);
 
 	m_action_patches = new QAction(tr("&Cheats (experimental)..."), window);
 	m_action_patches->setStatusTip(tr("Edit cheats for the selected game"));
@@ -395,8 +402,15 @@ void MainDialogPrivate::BuildChrome() {
 	m_toolbar->addAction(action_rescan);
 	m_toolbar->addSeparator();
 	m_toolbar->addAction(action_add_folder);
+	m_toolbar->addSeparator();
 	m_toolbar->addAction(action_global);
 	m_toolbar->addAction(action_inputs);
+	m_toolbar->addSeparator();
+	m_toolbar->addAction(m_action_edit);
+	m_toolbar->addAction(m_action_delete);
+	m_toolbar->addSeparator();
+	m_toolbar->addAction(m_action_trophies);
+	m_toolbar->addAction(action_trophy_overview);
 
 	auto* toolbar_spacer = new QWidget(window);
 	toolbar_spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);

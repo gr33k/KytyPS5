@@ -36,7 +36,6 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
-#include <QPainter>
 #include <QPalette>
 #include <QPointer>
 #include <QProcess>
@@ -47,7 +46,6 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QStyle>
-#include <QToolButton>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QtCore>
@@ -233,17 +231,6 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 	connect(m_ui->refresh_action, &QAction::triggered, this,
 	        &ConfigurationListWidget::ScanGameDirectory);
 
-	connect(m_ui->global_settings_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::edit_global_settings);
-	connect(m_ui->input_mapping_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::edit_input_mapping);
-	connect(m_ui->edit_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::edit_configuration);
-	connect(m_ui->delete_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::delete_configuartion);
-	connect(m_ui->trophy_overview_button, &QToolButton::clicked, this,
-	        &ConfigurationListWidget::ViewTrophyOverview);
-
 	connect(m_ui->cfgs_list, &QTreeWidget::currentItemChanged, this,
 	        &ConfigurationListWidget::SelectItem);
 	connect(m_ui->cfgs_list, &QTreeWidget::itemDoubleClicked, this,
@@ -263,34 +250,6 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 ConfigurationListWidget::~ConfigurationListWidget() {
 	qDeleteAll(m_custom_infos);
 	delete m_ui;
-}
-
-
-void ConfigurationListWidget::changeEvent(QEvent* event) {
-	QWidget::changeEvent(event);
-	if (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange) {
-		UpdateToolbarIcons();
-	}
-}
-
-void ConfigurationListWidget::UpdateToolbarIcons() {
-	const auto color = palette().color(QPalette::Window).lightness() < 128 ? QColor(Qt::white)
-	                                                                      : QColor(Qt::black);
-	const auto set_icon = [&color](QToolButton* button, const QString& resource) {
-		auto pixmap = QIcon(resource).pixmap(button->iconSize(), button->devicePixelRatioF());
-		QPainter painter(&pixmap);
-		painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-		painter.fillRect(pixmap.rect(), color);
-		button->setIcon(QIcon(pixmap));
-	};
-
-	set_icon(m_ui->refresh_button, QStringLiteral(":/icons/refresh.svg"));
-	m_ui->refresh_action->setIcon(m_ui->refresh_button->icon());
-	set_icon(m_ui->global_settings_button, QStringLiteral(":/icons/global-settings.svg"));
-	set_icon(m_ui->input_mapping_button, QStringLiteral(":/icons/input-mapping.svg"));
-	set_icon(m_ui->edit_button, QStringLiteral(":/icons/edit-configuration.svg"));
-	set_icon(m_ui->delete_button, QStringLiteral(":/icons/remove-configuration.svg"));
-	set_icon(m_ui->trophy_overview_button, QStringLiteral(":/icons/trophy.svg"));
 }
 
 

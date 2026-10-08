@@ -71,9 +71,6 @@ public slots:
 	void remove_save_data();
 	void filter_configurations(const QString& text);
 
-protected:
-	void changeEvent(QEvent* event) override;
-
 protected slots:
 
 	void list_itemDoubleClicked(QTreeWidgetItem* witem, int column);
@@ -82,7 +79,6 @@ protected slots:
 private:
 	void               SelectItem(QTreeWidgetItem* witem);
 	void               ApplyCompatibility();
-	void               UpdateToolbarIcons();
 	void               ImportGameSettings(QWidget* parent);
 	void               ExportGameSettings(QWidget* parent) const;
 	[[nodiscard]] bool HasValidGameDirectory() const;
