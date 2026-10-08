@@ -121,6 +121,49 @@ void CheckSaveRename(const std::filesystem::path &root,
         "renamed save contents");
 }
 
+void TestRandomDevices() {
+  for (const auto* path : {"/dev/urandom", "/dev/random"}) {
+    const int fd = FileSystem::KernelOpen(path, 0, 0);
+    FileSystem::FileStat stat {};
+    Check(fd >= 3 && FileSystem::KernelFstat(fd, &stat) == OK &&
+              (stat.st_mode & 0170000) == 0020000,
+          "entropy sources are character devices");
+    std::array<uint8_t, 32> entropy {};
+    Check(FileSystem::KernelRead(fd, entropy.data(), entropy.size()) == entropy.size(),
+          "character device supplies requested entropy");
+    Check(FileSystem::KernelClose(fd) == OK, "close entropy source");
+  }
+}
+
+void TestFileDescriptorFlags() {
+  Loader::SymbolDatabase symbols;
+  Libs::InitLibKernel_1(&symbols);
+  const auto* symbol = symbols.Find(
+      {"8nY19bKoiZk", "Posix", 1, "libkernel", 1, 1, Loader::SymbolType::Func});
+  Check(symbol != nullptr, "POSIX fcntl export resolves");
+  const auto fcntl = reinterpret_cast<int (KYTY_SYSV_ABI *)(int, int, int)>(symbol->vaddr);
+  Check(fcntl(std::numeric_limits<int>::min(), 1, 0) == -1 &&
+            *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EBADF,
+        "invalid descriptor reports EBADF");
+  for (const auto* path : {"/dev/urandom", "/dev/random"}) {
+    const int fd = FileSystem::KernelOpen(path, 0, 0);
+    Check(fd >= 3, "open descriptor for flag checks");
+    Check(fcntl(fd, 1, 0) == 0 && fcntl(fd, 2, 1) == 0 && fcntl(fd, 1, 0) == 1,
+          "entropy descriptor retains close-on-exec flag");
+    Check(fcntl(fd, 2, 0) == 0 && fcntl(fd, 1, 0) == 0,
+          "close-on-exec flag can be cleared");
+    Check(fcntl(fd, -1, 0) == -1 && *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EINVAL,
+          "unsupported fcntl command reports EINVAL");
+    Check(FileSystem::KernelClose(fd) == OK, "close entropy source");
+    Check(fcntl(fd, 1, 0) == -1 && *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_EBADF,
+          "closed descriptor reports EBADF");
+    const int cloexec_fd = FileSystem::KernelOpen(path, 0x00100000, 0);
+    Check(cloexec_fd >= 3 && fcntl(cloexec_fd, 1, 0) == 1,
+          "O_CLOEXEC sets the descriptor flag on open");
+    Check(FileSystem::KernelClose(cloexec_fd) == OK, "close flagged entropy source");
+  }
+}
+
 void TestSaveOpenVisibility() {
   constexpr char Path[] = "/savedata0/visible-save.dat";
   constexpr char Payload[] = "saved progress";
@@ -669,6 +712,10 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
   using Offset = uint64_t (KYTY_SYSV_ABI *)(void *);
   using WaitAddress = int (KYTY_SYSV_ABI *)(void *, volatile uint64_t *, uint64_t,
                                           uint8_t, uint8_t);
+  using WaitCounter = int (KYTY_SYSV_ABI *)(void *, uint8_t, uint8_t, uint64_t,
+                                          uint8_t, uint8_t, uint64_t, uint8_t);
+  using WriteCounter = int (KYTY_SYSV_ABI *)(void *, uint8_t, uint8_t, uint64_t,
+                                           uint8_t, uint32_t);
   using WriteAddress = int (KYTY_SYSV_ABI *)(void *, volatile uint64_t *, uint64_t);
   using ReadFile = int (KYTY_SYSV_ABI *)(void *, uint64_t, uint64_t, uint32_t,
                                        void *, uint64_t, uint64_t);
@@ -685,6 +732,8 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
   const auto set_buffer = reinterpret_cast<SetBuffer>(find("N-FSPA4S3nI"));
   const auto offset = reinterpret_cast<Offset>(find("GnxKOHEawhk"));
   const auto wait_address = reinterpret_cast<WaitAddress>(find("DLfoNxTFNVk"));
+  const auto wait_counter = reinterpret_cast<WaitCounter>(find("cQb8Zr8Q0Y0"));
+  const auto write_counter = reinterpret_cast<WriteCounter>(find("jK+yuYCI7MA"));
   const auto write_address = reinterpret_cast<WriteAddress>(find("sJXyWHjP-F8"));
   const auto read_file = reinterpret_cast<ReadFile>(find("mQ16-QdKv7k"));
   const auto write_event = reinterpret_cast<WriteKernelEvent>(find("H896Pt-yB4I"));
@@ -757,6 +806,59 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
       Check(result.result == OK,
             "submission wait observes the completed result");
     }
+  }
+  constexpr std::array counter_comparisons {
+      Comparison{1, 0, 0, 1}, Comparison{1, 0, 0, 1},
+      Comparison{4, 0x7ffffffe, 0x7fffffff, 0x80000000},
+      Comparison{5, 0xffffffff, 0, 1}};
+  for (const auto &comparison : counter_comparisons) {
+    reset(1);
+    auto *producer = buffers[0].header.data();
+    auto *consumer = buffers[1].header.data();
+    auto *lower = buffers[2].header.data();
+    constexpr uint8_t Counter = 127;
+    constexpr auto Invalid = Libs::LibKernel::KERNEL_ERROR_EINVAL;
+    Check(write_counter(producer, 128, 1, 1, 0, 0) == Invalid &&
+              write_counter(producer, Counter, 8, 1, 0, 0) == Invalid &&
+              write_counter(producer, Counter, 1, 1, 5, 0) == Invalid &&
+              write_counter(producer, Counter, 1, 1, 0, 2) == Invalid &&
+              wait_counter(consumer, Counter, 8, 0, 1, 0, 0, 0) == Invalid &&
+              wait_counter(consumer, Counter, 1, 0, 7, 0, 0, 0) == Invalid &&
+              wait_counter(consumer, Counter, 1, 0, 1, 2, 0, 0) == Invalid &&
+              wait_counter(consumer, Counter, 1, 0, 1, 0, 0, 2) == Invalid &&
+              offset(producer) == 0 && offset(consumer) == 0,
+          "invalid counter operations fail without appending a command");
+    uint64_t retired = 0, lower_done = 0;
+    std::array<char, 3> output {};
+    Result result {1234, 5678};
+    std::array<uint32_t, 4> ids {};
+    if (comparison.blocked != 0) {
+      auto *initializer = buffers[3].header.data();
+      Check(write_counter(initializer, Counter, 1, comparison.blocked, 0, 0) == OK &&
+                submit_amm(buffers[3].data.data(), static_cast<uint32_t>(offset(initializer)),
+                           0, &ids[3]) == OK && wait_amm(ids[3]) == OK,
+            "initialize shared counter before dependent submissions");
+    }
+    Check(read_file(producer, reinterpret_cast<uint64_t>(&buffers[0].header[3]),
+                    reinterpret_cast<uint64_t>(&buffers[0].header[4]), file_id,
+                    output.data(), output.size(), 0) == OK &&
+              write_counter(producer, Counter, 1, comparison.released, 0, 0) == OK &&
+              wait_counter(consumer, Counter, 1, comparison.reference, comparison.compare,
+                           0, 0, 0) == OK &&
+              write_counter(consumer, Counter, 1, 0, 0, 0) == OK &&
+              write_address(consumer, &retired, 1) == OK &&
+              write_address(lower, &lower_done, 1) == OK,
+          "build APR completion and dependent AMM counter reset");
+    Check(submit_amm(buffers[1].data.data(), static_cast<uint32_t>(offset(consumer)),
+                     0, &ids[1]) == OK &&
+              submit_amm(buffers[2].data.data(), static_cast<uint32_t>(offset(lower)),
+                         1, &ids[2]) == OK && wait_amm(ids[2]) == OK &&
+              lower_done == 1 && retired == 0,
+          "counter wait blocks AMM retirement while its lower priority progresses");
+    Check(submit_apr(producer, 3, &result, &ids[0]) == OK && wait_amm(ids[1]) == OK &&
+              wait_apr(ids[0]) == OK && result.result == OK && retired == 1 &&
+              std::memcmp(output.data(), "APR", 3) == 0,
+          "shared counter completion releases AMM only after APR read and resets for reuse");
   }
   reset(1);
   namespace EventQueue = Libs::LibKernel::EventQueue;
@@ -857,6 +959,36 @@ void CheckAprPaths(const std::filesystem::path &root) {
             ids[0] == 0xffffffffu && ids[1] == expected_id && sizes[0] == 0 && sizes[1] == 3,
         "APR foreach reports a missing path and continues to the valid file");
 
+  // These paths share the old 31-bit FNV-1a ID (0x122d1544).
+  const char *collision_paths[] = {"perf-audit/test_00015ddf.bin",
+                                   "perf-audit/test_000389b8.bin"};
+  Check(std::filesystem::create_directory(root / "perf-audit"), "create APR collision directory");
+  for (size_t i = 0; i < 2; ++i) {
+    Check(fixture.Create(root / collision_paths[i]), "create APR collision fixture");
+    fixture.Write(i == 0 ? "APR" : "OTHER", i == 0 ? 3 : 5);
+    fixture.Close();
+  }
+  uint32_t collision_ids[2] = {};
+  Check(resolve("/app0/", collision_paths, 2, collision_ids, sizes, &error_index) == OK &&
+            collision_ids[0] != collision_ids[1] && collision_ids[0] != 0xffffffffu &&
+            collision_ids[1] != 0xffffffffu && sizes[0] == 3 && sizes[1] == 5,
+        "APR assigns distinct valid IDs to colliding paths");
+  const auto *stat_symbol = symbols.FindByNid("ApkYaHb8Sek", Loader::SymbolType::Func);
+  const auto *size_symbol = symbols.FindByNid("WvEu7yl3Ivg", Loader::SymbolType::Func);
+  Check(stat_symbol && size_symbol, "APR file metadata exports are registered");
+  using Stat = int (KYTY_SYSV_ABI *)(uint32_t, FileSystem::FileStat *);
+  using Size = int (KYTY_SYSV_ABI *)(uint32_t, uint64_t *);
+  for (size_t i = 0; i < 2; ++i) {
+    FileSystem::FileStat stat {};
+    uint64_t size = 0;
+    Check(resolve("/app0/", &collision_paths[i], 1, ids, nullptr, &error_index) == OK &&
+              ids[0] == collision_ids[i] &&
+              reinterpret_cast<Stat>(stat_symbol->vaddr)(ids[0], &stat) == OK &&
+              reinterpret_cast<Size>(size_symbol->vaddr)(ids[0], &size) == OK &&
+              stat.st_size == static_cast<int64_t>(sizes[i]) && size == sizes[i],
+          "APR re-resolution preserves each file's ID, host path and cached size");
+  }
+
   // PATH_MAX includes NUL; all components remain below NAME_MAX (255).
   std::string longest = "/app0/";
   for (int i = 0; i < 3; ++i) {
@@ -880,7 +1012,7 @@ void CheckAprPaths(const std::filesystem::path &root) {
   Check(resolve(unterminated.data(), paths, 1, ids, sizes, &error_index) == -1 &&
             *Libs::Posix::GetErrorAddr() == Libs::Posix::POSIX_ENAMETOOLONG,
         "APR rejects an unterminated prefix");
-  CheckAmprOrdering(symbols, expected_id);
+  CheckAmprOrdering(symbols, collision_ids[0]);
   FileSystem::Umount("/app0");
 }
 
@@ -1087,6 +1219,38 @@ void CheckSocketReceiveBuffer(int reader, int writer) {
         "close UDP truncation fixture");
 }
 #endif
+
+void CheckEtherAddressFormatting() {
+  Loader::SymbolDatabase symbols;
+  Libs::LibNet::InitNet_1_Net(&symbols);
+  const auto *format_symbol = symbols.FindByNid("v6M4txecCuo", Loader::SymbolType::Func);
+  const auto *errno_symbol = symbols.FindByNid("HQOwnfMGipQ", Loader::SymbolType::Func);
+  Check(format_symbol && errno_symbol, "Ethernet formatting and errno exports resolve");
+  using Format = int (KYTY_SYSV_ABI *)(const Libs::Network::Net::NetEtherAddr *, char *, size_t);
+  using Errno = int *(KYTY_SYSV_ABI *)();
+  const auto format = reinterpret_cast<Format>(format_symbol->vaddr);
+  auto *net_errno = reinterpret_cast<Errno>(errno_symbol->vaddr)();
+  for (const auto address : {Libs::Network::Net::NetEtherAddr{},
+                             Libs::Network::Net::NetEtherAddr{{0x01, 0x23, 0x45, 0xab, 0xcd, 0xef}}}) {
+    const auto *expected = address.data[0] == 0 ? "00:00:00:00:00:00" : "01:23:45:ab:cd:ef";
+    for (const size_t size : {18u, 127u}) {
+      std::array<char, 128> text;
+      text.fill('!');
+      Check(format(&address, text.data(), size) == OK &&
+                std::strcmp(text.data(), expected) == 0 && text[18] == '!',
+            "Ethernet formatting accepts exact and larger buffers");
+    }
+  }
+  const Libs::Network::Net::NetEtherAddr address{};
+  std::array<char, 18> text;
+  text.fill('!');
+  Check(format(&address, text.data(), 17) == Libs::Network::NET_ERROR_EINVAL &&
+            *net_errno == Libs::Posix::POSIX_EINVAL &&
+            std::all_of(text.begin(), text.end(), [](char c) { return c == '!'; }) &&
+            format(nullptr, text.data(), text.size()) == Libs::Network::NET_ERROR_EINVAL &&
+            format(&address, nullptr, text.size()) == Libs::Network::NET_ERROR_EINVAL,
+        "Ethernet formatting rejects invalid arguments without writing output");
+}
 
 void CheckSocketWakeup() {
   namespace Net = Libs::Network::Net;
@@ -1369,6 +1533,8 @@ int main(int, char**) {
 
   TempDirectory temporary;
   FileSystem::Initialize();
+  TestRandomDevices();
+  TestFileDescriptorFlags();
   CheckMountRoot(temporary.Path());
   CheckUnmappedPaths(temporary.Path());
   CheckArchiveMount(temporary.Path());
@@ -1383,6 +1549,7 @@ int main(int, char**) {
   CheckSaveRename(temporary.Path(), "replacement-save");
   FileSystem::Shutdown();
   CheckSocketWakeup();
+  CheckEtherAddressFormatting();
   TestNpWebApi2Memory();
   graphics.reset();
   subsystems.Destroy();

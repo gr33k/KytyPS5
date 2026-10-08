@@ -36,7 +36,7 @@ constexpr Vop2OpcodeInfo VOP2_OPCODE_LIST[] = {
     {0x05u, Opcode::V_SUBREV_F32},
     {0x08u, Opcode::V_MUL_F32, Vop2SdwaProfile::Float32},
     {0x09u, Opcode::V_MUL_I32_I24, Vop2SdwaProfile::IntegerPartialDestination},
-    {0x0bu, Opcode::V_MUL_U32_U24, Vop2SdwaProfile::IntegerFullDestination},
+    {0x0bu, Opcode::V_MUL_U32_U24, Vop2SdwaProfile::IntegerPartialDestination},
     {0x0fu, Opcode::V_MIN_F32},
     {0x10u, Opcode::V_MAX_F32},
     {0x11u, Opcode::V_MIN_I32},
@@ -245,7 +245,8 @@ constexpr VopcOpcodeInfo VOPC_OPCODE_LIST[] = {
     {0x88u, Opcode::V_CMP_CLASS_F32},      {0x89u, Opcode::V_CMP_LT_I16},
     {0x8au, Opcode::V_CMP_EQ_I16},         {0x8bu, Opcode::V_CMP_LE_I16},
     {0x8cu, Opcode::V_CMP_GT_I16},         {0x8du, Opcode::V_CMP_NE_I16},
-    {0x8eu, Opcode::V_CMP_GE_I16},         {0x91u, Opcode::V_CMPX_LT_I32},
+    {0x8eu, Opcode::V_CMP_GE_I16},         {0x8fu, Opcode::V_CMP_CLASS_F16, false},
+    {0x91u, Opcode::V_CMPX_LT_I32},
     {0x92u, Opcode::V_CMPX_EQ_I32},        {0x93u, Opcode::V_CMPX_LE_I32},
     {0x94u, Opcode::V_CMPX_GT_I32},        {0x95u, Opcode::V_CMPX_NE_I32},
     {0x96u, Opcode::V_CMPX_GE_I32},        {0x98u, Opcode::V_CMPX_CLASS_F32},
@@ -319,6 +320,7 @@ constexpr OpcodeMap VOP3_OPCODE_LIST[] = {
     {0x152u, Opcode::V_MIN3_I32},
     {0x153u, Opcode::V_MIN3_U32},
     {0x351u, Opcode::V_MIN3_F16},
+    {0x353u, Opcode::V_MIN3_U16},
     {0x154u, Opcode::V_MAX3_F32},
     {0x155u, Opcode::V_MAX3_I32},
     {0x156u, Opcode::V_MAX3_U32},
@@ -469,8 +471,9 @@ bool IsNativeVop3F16TernaryOpcode(Opcode opcode) {
 	       opcode == Opcode::V_MED3_F16 || opcode == Opcode::V_FMA_F16;
 }
 
-bool IsNativeVop3I16TernaryOpcode(Opcode opcode) {
-	return opcode == Opcode::V_MED3_I16 || opcode == Opcode::V_MAD_I16;
+bool IsNativeVop3B16TernaryOpcode(Opcode opcode) {
+	return opcode == Opcode::V_MIN3_U16 || opcode == Opcode::V_MED3_I16 ||
+	       opcode == Opcode::V_MAD_I16;
 }
 
 bool IsNativeVop3B16BinaryOpcode(Opcode opcode) {
@@ -577,7 +580,7 @@ struct Vop1SdwaRule {
 
 constexpr Vop1SdwaRule VOP1_SDWA_RULES[] = {
     {Opcode::V_MOV_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), SdwaSelBytes() | SdwaSelWords(),
-     SdwaSelWords() | SdwaSelFull(), false},
+     SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), false},
     {Opcode::V_CVT_F32_U32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_CVT_F32_I32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_CVT_F32_UBYTE0, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
@@ -928,6 +931,7 @@ bool IsVopcFloatCompareOpcode(Opcode opcode) {
 		case Opcode::V_CMPX_NEQ_F16:
 		case Opcode::V_CMPX_NLT_F16:
 		case Opcode::V_CMP_CLASS_F32:
+		case Opcode::V_CMP_CLASS_F16:
 		case Opcode::V_CMPX_CLASS_F16:
 		case Opcode::V_CMPX_CLASS_F32: return true;
 		default: return false;
@@ -1376,7 +1380,7 @@ void ApplyNativeVop3TernaryModifiers(Instruction& inst, uint32_t op_sel, uint32_
 	inst.dst.sdwa_sel = ((op_sel & 0x8u) != 0) ? 5u : 4u;
 }
 
-void ApplyNativeVop3I16TernarySelectors(Instruction& inst, uint32_t op_sel) {
+void ApplyNativeVop3B16TernarySelectors(Instruction& inst, uint32_t op_sel) {
 	Operand* sources[] = {&inst.src0, &inst.src1, &inst.src2};
 	for (uint32_t i = 0; i < 3u; i++) {
 		sources[i]->op_sel = ((op_sel >> i) & 1u) != 0;
@@ -1497,7 +1501,7 @@ bool HasUnsupportedNativeVop3Modifiers(Opcode opcode, bool permlane, bool mad_mi
 		return opcode != Opcode::V_FMA_F16 && omod != 0u;
 
 	}
-	if (IsNativeVop3I16TernaryOpcode(opcode)) {
+	if (IsNativeVop3B16TernaryOpcode(opcode)) {
 		return abs != 0u || (clamp != 0u && !clamp_modifier) || omod != 0u || neg != 0u;
 	}
 	if (IsNativeVop3B16BinaryOpcode(opcode)) {
@@ -1735,7 +1739,7 @@ void DecodeVop3(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	const bool vop3b_uses_sdst = carry_in_out || vop3b_carry_out || vop3b_mad_u64;
 	const bool mad_mix         = false;
 	const bool f16_ternary     = IsNativeVop3F16TernaryOpcode(inst.opcode);
-	const bool i16_ternary     = IsNativeVop3I16TernaryOpcode(inst.opcode);
+	const bool b16_ternary     = IsNativeVop3B16TernaryOpcode(inst.opcode);
 	const bool b16_binary      = IsNativeVop3B16BinaryOpcode(inst.opcode);
 	const bool pack_b32_f16    = inst.opcode == Opcode::V_PACK_B32_F16;
 	const bool permlane        = IsPermlaneOpcode(inst.opcode);
@@ -1846,8 +1850,8 @@ void DecodeVop3(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 		ApplyNativeVop3TernaryModifiers(inst, op_sel, abs, neg);
 	} else if (f16_ternary) {
 		ApplyNativeVop3TernaryModifiers(inst, op_sel, abs, neg);
-	} else if (i16_ternary) {
-		ApplyNativeVop3I16TernarySelectors(inst, op_sel);
+	} else if (b16_ternary) {
+		ApplyNativeVop3B16TernarySelectors(inst, op_sel);
 	} else if (b16_binary) {
 		ApplyNativeVop3B16BinaryModifiers(inst, op_sel);
 	} else if (pack_b32_f16) {

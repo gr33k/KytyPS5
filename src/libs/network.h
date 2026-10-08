@@ -16,7 +16,9 @@ struct Lifecycle {
 
 namespace Net {
 
-struct NetEtherAddr;
+struct NetEtherAddr {
+	uint8_t data[6] = {0};
+};
 
 union NetEpollData {
 	void*    ptr;

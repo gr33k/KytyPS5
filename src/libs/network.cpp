@@ -832,10 +832,6 @@ namespace Net {
 
 LIB_NAME("Net", "Net");
 
-struct NetEtherAddr {
-	uint8_t data[6] = {0};
-};
-
 #if defined(_WIN32)
 using NativeSocket                                  = SOCKET;
 static constexpr NativeSocket INVALID_NATIVE_SOCKET = INVALID_SOCKET;
@@ -1564,14 +1560,12 @@ const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, uint32
 int KYTY_SYSV_ABI NetEtherNtostr(const NetEtherAddr* n, char* str, size_t len) {
 	PRINT_NAME();
 
-	NetEtherAddr zero {};
+	if (n == nullptr || str == nullptr || len < 18) {
+		return NET_ERROR_EINVAL;
+	}
 
-	EXIT_NOT_IMPLEMENTED(len != 18);
-	EXIT_NOT_IMPLEMENTED(n == nullptr);
-	EXIT_NOT_IMPLEMENTED(str == nullptr);
-	EXIT_NOT_IMPLEMENTED(memcmp(n->data, zero.data, sizeof(zero.data)) != 0);
-
-	strcpy(str, "00:00:00:00:00:00"); // NOLINT
+	std::snprintf(str, len, "%02x:%02x:%02x:%02x:%02x:%02x", n->data[0], n->data[1],
+	              n->data[2], n->data[3], n->data[4], n->data[5]);
 
 	return OK;
 }

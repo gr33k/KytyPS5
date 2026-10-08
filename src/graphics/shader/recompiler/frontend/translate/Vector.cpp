@@ -377,6 +377,7 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_CMPX_U_F32: EmitFloatOrderedCompare(inst, false, true); return;
 		case O::V_CMP_CLASS_F32: EmitFloatClassCompare(inst, false); return;
 		case O::V_CMPX_CLASS_F32: EmitFloatClassCompare(inst, true); return;
+		case O::V_CMP_CLASS_F16: EmitFloatClassCompare(inst, false, true); return;
 		case O::V_CMPX_CLASS_F16: EmitFloatClassCompare(inst, true, true); return;
 
 		case O::V_CVT_F32_UBYTE0: V_CVT_F32_UBYTE(inst, 0); return;
@@ -425,7 +426,8 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_SUB_NC_I16: return Integer16Binary(inst, IR::ValueOpcode::ISub32, false);
 		case O::V_MUL_LO_U16: return Integer16Binary(inst, IR::ValueOpcode::IMul32, false);
 		case O::V_MAD_I16: return V_MAD_I16(inst);
-		case O::V_MED3_I16: return V_MED3_I16(inst);
+		case O::V_MED3_I16: return Integer16Ternary(inst, IR::ValueOpcode::SMedTri32, true);
+		case O::V_MIN3_U16: return Integer16Ternary(inst, IR::ValueOpcode::UMinTri32, false);
 		case O::V_MIN_I16: return Integer16Binary(inst, IR::ValueOpcode::SMin32, true);
 		case O::V_MAX_I16: return Integer16Binary(inst, IR::ValueOpcode::SMax32, true);
 		case O::V_MIN_U16: return Integer16Binary(inst, IR::ValueOpcode::UMin32, false);

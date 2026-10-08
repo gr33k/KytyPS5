@@ -716,18 +716,38 @@ uint32_t FormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Me
 			return LoadWordPrepared(ctx, inst, RebaseRawComponent(mem, 0u), resource);
 		}
 		const auto plan = PrepareFormattedMemory(ctx, inst, mem, resource, info);
-		return EmitValueOrDefaultIfCondition(
+		const auto value = EmitValueOrDefaultIfCondition(
 		    ctx.state, plan.in_bounds, TypeU32(ctx.state),
 		    FormattedOutOfBoundsValue(ctx, mem, plan, 1u),
 		    [&]() { return LoadFormattedInBounds(ctx, mem, plan, 0u); });
+		if (mem.data_bits != 16u) {
+			return value;
+		}
+		if (info.type == Format::ComponentType::Uint) {
+			return EmitUMin32(ctx.state, value, ConstantU32(ctx.state, 0xffffu));
+		}
+		if (info.type == Format::ComponentType::Sint) {
+			const auto lower = EmitSMax32(ctx.state, value, ConstantU32(ctx.state, 0xffff8000u));
+			return EmitSMin32(ctx.state, lower, ConstantU32(ctx.state, 0x7fffu));
+		}
+		return EmitConvertF16F32(ctx.state, EmitBitCastF32U32(ctx.state, value));
 	});
 }
 
 uint32_t EncodeFormattedStoreComponent(ValueEmitContext& ctx,
                                        const Format::BufferFormatInfo& info,
-                                       uint32_t component, uint32_t data) {
+                                       uint32_t component, uint32_t data, uint32_t data_bits) {
 	auto& state = ctx.state;
 	const auto bits = info.component_bits[component];
+	if (data_bits == 16u) {
+		if (info.type == Format::ComponentType::Uint) {
+			data = EmitBitFieldUExtract(state, data, ConstantU32(state, 0), ConstantU32(state, 16));
+		} else if (info.type == Format::ComponentType::Sint) {
+			data = EmitBitFieldSExtract(state, data, ConstantU32(state, 0), ConstantU32(state, 16));
+		} else {
+			data = EmitBitCastU32F32(state, EmitF16BitsToF32(state, data));
+		}
+	}
 	const bool normalized = info.type == Format::ComponentType::Unorm ||
 	                        info.type == Format::ComponentType::Snorm;
 	const bool scaled = info.type == Format::ComponentType::Uscaled ||
@@ -779,7 +799,7 @@ void StoreFormattedPrepared(ValueEmitContext& ctx, const IR::Inst& inst,
 					                              value, data, component);
 				}
 			}
-			value = EncodeFormattedStoreComponent(ctx, info, component, value);
+			value = EncodeFormattedStoreComponent(ctx, info, component, value, mem.data_bits);
 			const auto bits = info.component_bits[component];
 			if (info.packed_bitfield) {
 				packed = EmitBitFieldInsert(

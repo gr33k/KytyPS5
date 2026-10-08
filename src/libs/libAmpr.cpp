@@ -1,4 +1,5 @@
 #include "common/abi.h"
+#include "common/assert.h"
 #include "common/dateTime.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -52,6 +53,7 @@ struct ResolvedPathInfo {
 
 static std::mutex                                        g_mutex;
 static uint32_t                                          g_next_submission_id = 1;
+static uint32_t                                          g_next_file_id       = 1;
 static std::unordered_map<uint32_t, bool>                g_submissions;
 static std::condition_variable                           g_submission_cv;
 static std::unordered_map<uint32_t, std::string>         g_files;
@@ -92,15 +94,6 @@ static bool WriteGuest(uint64_t addr, const T& value) {
 	return WriteGuestBytes(addr, &value, sizeof(T));
 }
 
-static uint32_t ComputeFileId(const char* guest_path) {
-	uint32_t hash = 2166136261u;
-	for (auto* p = reinterpret_cast<const uint8_t*>(guest_path); p != nullptr && *p != 0; ++p) {
-		hash ^= *p;
-		hash *= 16777619u;
-	}
-	return hash & static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
-}
-
 static int ReadGuestCString(uint64_t addr, char* out, size_t out_size) {
 	if (addr == 0) {
 		return LibKernel::KERNEL_ERROR_EFAULT;
@@ -118,18 +111,6 @@ static int ReadGuestCString(uint64_t addr, char* out, size_t out_size) {
 	}
 
 	return LibKernel::KERNEL_ERROR_ENAMETOOLONG;
-}
-
-static void RegisterHostPathLocked(uint32_t file_id, const std::string& host_path,
-                                   uint64_t file_size, bool is_dir) {
-	g_files[file_id]      = host_path;
-	g_file_sizes[file_id] = is_dir ? 0 : file_size;
-}
-
-static void RegisterHostPath(uint32_t file_id, const std::string& host_path, uint64_t file_size,
-                             bool is_dir) {
-	std::scoped_lock lock(g_mutex);
-	RegisterHostPathLocked(file_id, host_path, file_size, is_dir);
 }
 
 static bool TryGetHostPath(uint32_t file_id, std::string* out) {
@@ -213,7 +194,6 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 
 	if (!found) {
 		const auto real_path = LibKernel::FileSystem::GetRealFilename(path);
-		info.file_id         = AprShared::ComputeFileId(guest_path);
 		info.host_path       = Common::PathToString(real_path);
 
 		if (Common::File::IsDirectoryExisting(real_path)) {
@@ -232,7 +212,14 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 			if (!inserted) {
 				info = it->second;
 			} else if (info.result == OK) {
-				RegisterHostPathLocked(info.file_id, info.host_path, info.file_size, info.is_dir);
+				// Allocate once under the cache lock; distinct paths can share a hash.
+				if (g_next_file_id == 0xffffffffu) {
+					info.result = it->second.result = LibKernel::KERNEL_ERROR_ENFILE;
+				} else {
+					info.file_id = it->second.file_id = g_next_file_id++;
+					g_files.emplace(info.file_id, info.host_path);
+					g_file_sizes.emplace(info.file_id, info.is_dir ? 0 : info.file_size);
+				}
 			} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
 				log_missing = true;
 			}
@@ -240,8 +227,6 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 		if (log_missing) {
 			LOGF("\tAPR resolve missing path: %s -> %s\n", guest_path, info.host_path.c_str());
 		}
-	} else if (info.result == OK) {
-		AprShared::RegisterHostPath(info.file_id, info.host_path, info.file_size, info.is_dir);
 	}
 
 	if (info.result != OK) {
@@ -665,10 +650,15 @@ struct CommandBufferState {
 		uint64_t address = 0;
 		uint64_t value   = 0;
 	};
-	struct WaitAddressCommand {
-		uint64_t address;
+	struct WaitCommand {
+		uint64_t source;
 		uint64_t value;
 		uint8_t  compare;
+		bool     is_counter;
+	};
+	struct WriteCounterCommand {
+		uint8_t  index;
+		uint32_t value;
 	};
 	struct AmmMapCommand {
 		AmmCommandKind kind        = AmmCommandKind::MapAuto;
@@ -680,7 +670,7 @@ struct CommandBufferState {
 		uint8_t        gpu_mask_id = 0;
 	};
 	using CommandData = std::variant<ReadFileCommand, KernelEventCommand, WriteAddressCommand,
-	                                 AmmMapCommand, WaitAddressCommand>;
+	                                 AmmMapCommand, WaitCommand, WriteCounterCommand>;
 	struct Command {
 		uint64_t record_offset;
 		CommandData data;
@@ -705,6 +695,8 @@ static_assert(sizeof(AmmUsageStatsData) == 0x18);
 static std::mutex                                       g_command_buffer_mutex;
 static std::unordered_map<uint64_t, CommandBufferState> g_command_buffers;
 static std::unordered_map<uint64_t, uint64_t>           g_command_buffer_aliases;
+// AMM and APR share 256 32-bit counters; only the first 128 are application-writable.
+static std::array<std::atomic<uint32_t>, 256> g_counters {};
 using CommandBufferIterator = std::unordered_map<uint64_t, CommandBufferState>::iterator;
 
 static void RegisterCommandBufferAliasLocked(uint64_t command_buffer, uint64_t buffer) {
@@ -1207,6 +1199,9 @@ static int ExecuteCommand(const CommandBufferState::Command& entry) {
 		const auto& command = *payload;
 		std::atomic_ref(*reinterpret_cast<uint64_t*>(command.address))
 		    .store(command.value, std::memory_order_release);
+	} else if (const auto* command =
+	               std::get_if<CommandBufferState::WriteCounterCommand>(&entry.data)) {
+		g_counters[command->index].store(command->value, std::memory_order_release);
 	} else if (const auto* payload = std::get_if<CommandBufferState::AmmMapCommand>(&entry.data)) {
 		const auto& command = *payload;
 		int         result  = OK;
@@ -1235,17 +1230,20 @@ struct Submission {
 	uint32_t                                 id     = 0;
 };
 
-static bool IsWaitSatisfied(const CommandBufferState::WaitAddressCommand& wait) {
-	const uint64_t value =
-	    std::atomic_ref(*reinterpret_cast<uint64_t*>(wait.address)).load(std::memory_order_acquire);
+static bool IsWaitSatisfied(const CommandBufferState::WaitCommand& wait) {
+	const uint64_t value = wait.is_counter
+	                           ? g_counters[wait.source].load(std::memory_order_acquire)
+	                           : std::atomic_ref(*reinterpret_cast<uint64_t*>(wait.source))
+	                                 .load(std::memory_order_acquire);
+	const uint64_t sign = uint64_t {1} << (wait.is_counter ? 31 : 63);
 	switch (wait.compare) {
 		case 0: return value == wait.value;
 		case 1: return value > wait.value;
 		case 2: return value < wait.value;
 		case 3: return value != wait.value;
-		case 4: return static_cast<int64_t>(value - wait.value) >= 0;
-		case 5: return static_cast<int64_t>(value) > static_cast<int64_t>(wait.value);
-		default: return static_cast<int64_t>(value) < static_cast<int64_t>(wait.value);
+		case 4: return ((value - wait.value) & sign) == 0;
+		case 5: return (value ^ sign) > (wait.value ^ sign);
+		default: return (value ^ sign) < (wait.value ^ sign);
 	}
 }
 
@@ -1279,7 +1277,7 @@ private:
 				pending          = true;
 				auto& submission = queue.front();
 				if (submission.cursor < submission.commands.size()) {
-					const auto* wait = std::get_if<CommandBufferState::WaitAddressCommand>(
+					const auto* wait = std::get_if<CommandBufferState::WaitCommand>(
 					    &submission.commands[submission.cursor].data);
 					if (wait != nullptr && !IsWaitSatisfied(*wait)) {
 						continue;
@@ -1927,18 +1925,27 @@ static int KYTY_SYSV_ABI CommandBufferWaitOnAddress(void*              command_b
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
-	                           CommandBufferState::WaitAddressCommand {
-	                               reinterpret_cast<uint64_t>(address), value, compare},
+	                           CommandBufferState::WaitCommand {
+	                               reinterpret_cast<uint64_t>(address), value, compare, false},
 	                           0x20)
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
-static int KYTY_SYSV_ABI CommandBufferWaitOnCounter(void* command_buffer, uint8_t, uint8_t,
-                                                    uint64_t, uint8_t, uint8_t, uint64_t, uint8_t) {
+static int KYTY_SYSV_ABI CommandBufferWaitOnCounter(void* command_buffer, uint8_t index,
+                                                    uint8_t access, uint64_t value, uint8_t compare,
+                                                    uint8_t mask_op, uint64_t, uint8_t flush) {
 	PRINT_NAME();
 
-	return AppendNoOpCommand(command_buffer, 0x20);
+	if (command_buffer == nullptr || access > 7 || compare > 6 || mask_op > 1 || flush > 1) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	EXIT_NOT_IMPLEMENTED(access != 1 || mask_op != 0 || flush != 0 || value > UINT32_MAX);
+	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
+	                           CommandBufferState::WaitCommand {index, value, compare, true},
+	                           0x20)
+	           ? OK
+	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
 static int AppendWriteAddressCommand(void* command_buffer, volatile uint64_t* address,
@@ -1970,11 +1977,21 @@ static int KYTY_SYSV_ABI CommandBufferWriteAddressOnCompletion(void*            
 	return AppendWriteAddressCommand(command_buffer, address, value);
 }
 
-static int KYTY_SYSV_ABI CommandBufferWriteCounter(void* command_buffer, uint8_t, uint8_t, uint64_t,
-                                                   uint8_t, uint32_t) {
+static int KYTY_SYSV_ABI CommandBufferWriteCounter(void* command_buffer, uint8_t index,
+                                                   uint8_t access, uint64_t value,
+                                                   uint8_t operation, uint32_t mode) {
 	PRINT_NAME();
 
-	return AppendNoOpCommand(command_buffer, 0x20);
+	if (command_buffer == nullptr || index >= 128 || access > 7 || operation > 4 || mode > 1) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	EXIT_NOT_IMPLEMENTED(access != 1 || operation != 0 || mode != 0);
+	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
+	                           CommandBufferState::WriteCounterCommand {
+	                               index, static_cast<uint32_t>(value)},
+	                           0x20)
+	           ? OK
+	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteCounterOnCompletion(void* command_buffer, uint8_t,

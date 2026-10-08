@@ -1974,6 +1974,12 @@ int64_t KYTY_SYSV_ABI fstat(int d, LibKernel::FileSystem::FileStat* sb) {
 	return POSIX_N_CALL(LibKernel::FileSystem::KernelFstat(d, sb));
 }
 
+int KYTY_SYSV_ABI fcntl(int d, int command, int arg) {
+	PRINT_NAME();
+
+	return POSIX_N_CALL(LibKernel::FileSystem::KernelFcntl(d, command, arg));
+}
+
 int KYTY_SYSV_ABI ftruncate(int d, int64_t length) {
 	PRINT_NAME();
 
@@ -2163,6 +2169,7 @@ LIB_DEFINE(InitLibKernel_1_Posix) {
 	LIB_FUNC("E6ao34wPw+U", stat);
 	LIB_FUNC("JGMio+21L4c", mkdir);
 	LIB_FUNC("ih4CD9-gghM", Posix::ftruncate);
+	LIB_FUNC("8nY19bKoiZk", Posix::fcntl);
 	LIB_FUNC("pDuPEf3m4fI", Posix::sem_init);
 	LIB_FUNC("cDW233RAwWo", Posix::sem_destroy);
 	LIB_FUNC("YCV5dGGBcCo", Posix::sem_wait);
