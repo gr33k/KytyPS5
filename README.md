@@ -73,19 +73,20 @@ emulator progress.
 
 ## Compatibility (This Fork, Test Platform Above)
 
-56 titles tested: 4 InGame, 2 Unknown (reported working, awaiting
+56 titles tested: 6 InGame, 0 Unknown (reported working, awaiting
 re-confirmation), 19 MainMenu, 13 Logo, 18 DoesntBoot. Dates are the test
+dates (M/D/YY). Names are taken from the local dump folder names.
 dates (M/D/YY). Names are taken from the local dump folder names.
 dates (M/D/YY). Names are taken from the local dump folder names.
 
 | Game | Title ID | Status | Notes |
 | ---- | -------- | ------ | ----- |
 | Control Ultimate Edition | PPSA01949 | InGame | Game boots to menu - Loads and gets in-game but looks dark (shader issue?) - not playable - 10/2/26 |
+| Ninja Turtles Cowabunga Collection | PPSA04489 | InGame | Game Works Great! - 10/5/26 |
 | PPSA08240 | PPSA08240 | InGame | Game boots but the shaders/graphic corrupt in game - 10/5/26 |
+| Port Royal 4 | PPSA02815 | InGame | Boots to in-game experience (possible shader issues but playable!) - 10/2/26 |
 | WWE 2K22 | PPSA02460 | InGame | Boots in game - 10/5/26 |
 | Werewolf The Apocalypse - Earthblood | PPSA02113 | InGame | Boots to menu - Loads to game but game is black on HUD shows - 10/5/26 |
-| Ninja Turtles Cowabunga Collection | PPSA04489 | Unknown | Game Works Great! - 10/5/26 |
-| Port Royal 4 | PPSA02815 | Unknown | Boots to in-game experience (possible shader issues but playable!) - 10/2/26 |
 | Alan Wake Remastered | PPSA01925 | MainMenu | Game boots to menu - startup video plays - game crashes before reaching in-game - 10/2/26 |
 | Call of the Sea | PPSA01546 | MainMenu | Game boots to menu - crashes before loading in-game - 10/2/26 |
 | Chernobylite | PPSA04747 | MainMenu | Game boots to initial logo - then freezes for a while (press buttons?) - then proceeds to game menu and crashes before getting in-game - 10/2/26 |
