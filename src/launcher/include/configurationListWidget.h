@@ -82,8 +82,6 @@ public slots:
 
 protected slots:
 
-	void show_context_menu(const QPoint& pos);
-
 private:
 	void               SelectItem(QTreeWidgetItem* witem);
 	void               ShowContextMenu(QTreeWidgetItem* witem);
