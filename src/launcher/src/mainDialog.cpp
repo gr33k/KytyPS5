@@ -4,7 +4,7 @@
 #include "configuration.h"
 #include "configurationItem.h"
 #include "configurationListWidget.h"
-#include "controllerLightbar.h"
+#include "controllerPreview.h"
 #include "gameContent.h"
 #include "launcherTheme.h"
 #include "patchesDialog.h"
@@ -45,6 +45,7 @@
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QSlider>
 #include <QStringList>
 #include <QStatusBar>
 #include <QStyle>
@@ -121,7 +122,7 @@ private:
 	Ui::MainDialog* m_ui             = {nullptr};
 	MainDialog*     m_main_dialog    = nullptr;
 	UpdateChecker*  m_update_checker = nullptr;
-	ControllerLightbar m_lightbar;
+	ControllerPreview m_controller_preview;
 	QString         m_interpreter;
 	QString         m_version;
 
@@ -167,6 +168,7 @@ MainDialogPrivate::~MainDialogPrivate() {
 void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui = new Ui::MainDialog;
 	m_ui->setupUi(main_dialog);
+	m_ui->widget->SetControllerPreview(&m_controller_preview);
 
 	m_main_dialog    = main_dialog;
 	m_update_checker = new UpdateChecker(main_dialog);
@@ -181,7 +183,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(m_ui->widget, &ConfigurationListWidget::PreviewControllerColor, this,
 	        [this](const QString& color) {
 		        if (m_process.state() == QProcess::NotRunning) {
-			        m_lightbar.SetColor(color);
+			        m_controller_preview.SetColor(color);
 		        }
 	        });
 	connect(m_ui->widget, &ConfigurationListWidget::Run, this, &MainDialogPrivate::Run);
@@ -411,6 +413,34 @@ void MainDialogPrivate::BuildChrome() {
 	m_toolbar->addSeparator();
 	m_toolbar->addAction(m_action_trophies);
 	m_toolbar->addAction(action_trophy_overview);
+	m_toolbar->addSeparator();
+
+	auto* action_grid_view = new QAction(QIcon(QStringLiteral(":/icons/grid-view.svg")),
+	                                     tr("Grid View"), window);
+	action_grid_view->setStatusTip(tr("Toggle grid view"));
+	action_grid_view->setCheckable(true);
+	action_grid_view->setChecked(m_ui->widget->IsGridView());
+	connect(action_grid_view, &QAction::toggled, m_ui->widget,
+	        &ConfigurationListWidget::SetGridView);
+	m_toolbar->addAction(action_grid_view);
+
+	auto* grid_size_slider = new QSlider(Qt::Horizontal, window);
+	grid_size_slider->setObjectName(QStringLiteral("grid_size_slider"));
+	grid_size_slider->setToolTip(tr("Game image size"));
+	grid_size_slider->setAccessibleName(tr("Game image size"));
+	grid_size_slider->setMinimum(128);
+	grid_size_slider->setMaximum(320);
+	grid_size_slider->setSingleStep(16);
+	grid_size_slider->setPageStep(32);
+	grid_size_slider->setValue(m_ui->widget->GridIconWidth());
+	grid_size_slider->setVisible(m_ui->widget->IsGridView());
+	grid_size_slider->setMaximumWidth(140);
+	connect(action_grid_view, &QAction::toggled, grid_size_slider, &QWidget::setVisible);
+	connect(grid_size_slider, &QSlider::valueChanged, m_ui->widget,
+	        &ConfigurationListWidget::SetGridSize);
+	connect(grid_size_slider, &QSlider::sliderReleased, m_ui->widget,
+	        &ConfigurationListWidget::WriteSettings);
+	m_toolbar->addWidget(grid_size_slider);
 
 	auto* toolbar_spacer = new QWidget(window);
 	toolbar_spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -883,7 +913,7 @@ void MainDialogPrivate::Run() {
 	}
 
 	m_running_item->SetRunning(true);
-	m_lightbar.Stop();
+	m_controller_preview.SetSuspended(true);
 
 	auto info = m_ui->widget->CreateConfiguration(*m_running_item);
 	m_run_timer.start();
@@ -1015,10 +1045,11 @@ void MainDialogPrivate::Update() {
 	m_status_games->setText(status_text);
 
 	if (m_process.state() != QProcess::NotRunning) {
-		m_lightbar.Stop();
+		m_controller_preview.SetSuspended(true);
 		return;
 	}
-	m_lightbar.SetColor(m_ui->widget->GetGlobalControllerColor());
+	m_controller_preview.SetSuspended(false);
+	m_controller_preview.SetColor(m_ui->widget->GetGlobalControllerColor());
 }
 
 #include "mainDialog.moc"

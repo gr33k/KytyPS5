@@ -1,3 +1,13 @@
+QListView#cfgs_grid {
+    background: palette(base);
+    border: 1px solid palette(mid);
+    color: palette(text);
+}
+
+QListView#cfgs_grid::item {
+    padding: 8px;
+}
+
 GameListTreeWidget#cfgs_list {
     background: transparent;
     border: 1px solid palette(mid);
@@ -38,6 +48,7 @@ QLineEdit#search_line_edit {
 QLineEdit#search_line_edit:focus {
     border-color: palette(highlight);
 }
+
 
 QComboBox#game_status_editor {
     background: transparent;

@@ -78,6 +78,7 @@ re-confirmation), 19 MainMenu, 13 Logo, 18 DoesntBoot. Dates are the test
 dates (M/D/YY). Names are taken from the local dump folder names.
 dates (M/D/YY). Names are taken from the local dump folder names.
 dates (M/D/YY). Names are taken from the local dump folder names.
+dates (M/D/YY). Names are taken from the local dump folder names.
 
 | Game | Title ID | Status | Notes |
 | ---- | -------- | ------ | ----- |
@@ -138,7 +139,40 @@ dates (M/D/YY). Names are taken from the local dump folder names.
 | The Matrix Awakens Demo | PPSA05754 | DoesntBoot | No Boot - 10/5/26 |
 | The Riftbreaker | PPSA03753 | DoesntBoot | No Boot - 10/5/26 |
 
-## System Requirements
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <strong>Astro Bot</strong><br>
+      <img src="docs/screenshots/ps5-01.png" width="300" alt="Astro Bot running in KytyPS5">
+    </td>
+    <td align="center">
+      <strong>Saros</strong><br>
+      <img src="docs/screenshots/ps5-03.png" width="300" alt="Saros running in KytyPS5">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Neptunia ReVerse</strong><br>
+      <img src="docs/screenshots/ps5-04.png" width="300" alt="Neptunia ReVerse running in KytyPS5">
+    </td>
+    <td align="center">
+      <strong>SILENT HILL: The Short Message</strong><br>
+      <img src="docs/screenshots/ps5-05.png" width="300" alt="SILENT HILL: The Short Message running in KytyPS5">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Demon's Souls</strong><br>
+      <img src="docs/screenshots/ps5-02.png" width="300" alt="Demon's Souls running in KytyPS5">
+    </td>
+    <td align="center">
+      <strong>UFC 6</strong><br>
+      <img src="docs/screenshots/ps5-06.jpg" width="300" alt="UFC 6 running in KytyPS5">
+    </td>
+  </tr>
+</table>
+
 
 - Windows 10 version 1803, a current Linux distribution, or macOS on Apple
   Silicon
