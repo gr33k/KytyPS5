@@ -22,6 +22,13 @@ struct SrtRuntime {
 	std::span<const uint32_t> workgroup_counts;
 };
 
+// Retained reads no longer need the guest instruction PC. A clean read evaluates
+// its address and bounds through the strict reader as well as the final DWORD.
+struct SrtReadFlags {
+	uint32_t index = 0;
+	uint32_t clean = 0;
+};
+
 enum class RuntimeValueType { Any, Integer };
 
 bool ValidateRuntimeValue(const ResourcePlan& program, Value value,
@@ -33,8 +40,7 @@ SrtRuntime CleanRuntime(SrtRuntime runtime);
 class SrtWalker {
 public:
 	SrtWalker(const ResourcePlan& program, const SrtRuntime& runtime,
-	          std::span<const uint8_t> clean_flat_slots = {}, SrtWalker* clean_evaluator = nullptr,
-	          Value active_mask = {});
+	          SrtWalker* clean_evaluator = nullptr, Value active_mask = {});
 	~SrtWalker();
 	SrtWalker(const SrtWalker&)            = delete;
 	SrtWalker& operator=(const SrtWalker&) = delete;
@@ -56,7 +62,6 @@ private:
 
 	const ResourcePlan&              m_program;
 	SrtRuntime                      m_runtime;
-	std::span<const uint8_t>         m_clean_flat_slots;
 	SrtWalker*                      m_clean_evaluator = nullptr;
 	Value                           m_active_mask;
 	ResourcePlan::EvaluationContext& m_context;

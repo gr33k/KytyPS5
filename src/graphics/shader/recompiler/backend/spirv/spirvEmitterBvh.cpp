@@ -223,7 +223,7 @@ uint32_t Boxes(EmitterState& s, uint32_t first, uint32_t second, uint32_t half,
 } // namespace
 
 void DefineBvhIntersect(EmitterState& s) {
-	if (!s.requirements.bvh) return;
+	if (!s.program.info.bvh) return;
 	const auto u = TypeU32(s), f = TypeF32(s), b = TypeBool(s), wide = TypeU64(s);
 	const auto vec4 = TypeU32Vector(s, 4), vec3 = TypeF32Vector(s, 3);
 	const auto signature = s.builder.Type(spv::OpTypeFunction, vec4, vec4, wide, f, vec3, vec3, vec3);

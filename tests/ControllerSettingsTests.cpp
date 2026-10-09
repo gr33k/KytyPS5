@@ -110,6 +110,8 @@ struct Controller {
 		now                    = 1000;
 		haptics_handles_rumble = false;
 		Initialize();
+		Check(PadInit() == 0 && PadOpen(Config::GetUserId(), 0, 0, nullptr) == 1,
+		      "the standard controller port did not open");
 		Connect(1);
 		Check(GetSettingScale(Setting::SpeakerVolume) ==
 		              Config::GetControllerSpeakerVolume() / 50.0f &&
@@ -141,6 +143,54 @@ int ZoneStrength(const uint8_t* effect, int zone) {
 void SetRumble(uint8_t large, uint8_t small) {
 	const PadVibrationParam param {large, small};
 	Check(PadSetVibration(1, &param) == 0, "vibration request failed");
+}
+
+void TestPadPortOwnership() {
+	Initialize();
+	const int user = Config::GetUserId();
+	constexpr auto not_initialized = static_cast<int32_t>(0x80920005u);
+	constexpr auto already_opened = static_cast<int32_t>(0x80920004u);
+	constexpr auto invalid_handle = static_cast<int32_t>(0x80920003u);
+	constexpr auto no_handle = static_cast<int32_t>(0x80920008u);
+	PadData data {};
+	Check(PadOpen(user, 0, 0, nullptr) == not_initialized &&
+	          PadGetHandle(user, 0, 0) == not_initialized &&
+	          PadReadState(1, &data) == not_initialized,
+	      "an uninitialized library exposed a controller port");
+	Check(PadInit() == 0 && PadGetHandle(user, 0, 0) == no_handle,
+	      "initializing the library opened a controller port");
+	const int handle = PadOpen(user, 0, 0, nullptr);
+	Check(handle == 1 && PadInit() == 0 && PadGetHandle(user, 0, 0) == handle,
+	      "reinitializing the library lost the open port");
+	for (int duplicate = 0; duplicate < 4; duplicate++) {
+		const int rejected = PadOpen(user, 0, 0, nullptr);
+		Check(rejected == already_opened,
+		      "opening one pad five times exposed duplicate connected controllers");
+		Check(PadClose(rejected) == invalid_handle && PadGetHandle(user, 0, 0) == handle,
+		      "closing a rejected duplicate released the original owner");
+	}
+	Check(PadGetHandle(user + 1, 0, 0) == no_handle &&
+	          PadGetHandle(user, 2, 0) == no_handle && PadGetHandle(user, 0, 1) == no_handle,
+	      "a different port tuple aliased the open standard pad");
+	SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, true);
+	Check(PadReadState(handle, &data) == 0 && data.connected &&
+	          data.buttons == PAD_BUTTON_CROSS,
+	      "keyboard Cross did not reach the owned port");
+	SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, false);
+	Connect(1);
+	SetButton(1, PAD_BUTTON_CROSS, true);
+	Check(PadReadState(handle, &data) == 0 && data.buttons == PAD_BUTTON_CROSS,
+	      "the physical controller did not share the owned port");
+	Disconnect(1);
+	Check(PadGetHandle(user, 0, 0) == handle && PadOpen(user, 0, 0, nullptr) == already_opened,
+	      "host disconnection released guest port ownership");
+	Check(PadClose(handle) == 0 && PadGetHandle(user, 0, 0) == no_handle &&
+	          PadReadState(handle, &data) == invalid_handle &&
+	          PadRead(handle, &data, 1) == invalid_handle && PadClose(handle) == invalid_handle,
+	      "a closed port retained a usable handle");
+	Check(PadOpen(user, 0, 0, nullptr) == handle && PadReadState(handle, &data) == 0,
+	      "a closed port could not reopen");
+	Shutdown();
 }
 
 void TestSettingCycles() {
@@ -503,6 +553,7 @@ void TestTriggerEffectState() {
 
 int main() {
 	Config::Initialize();
+	TestPadPortOwnership();
 	TestSettingCycles();
 	TestGlobalControllerLevels();
 	// Each following test initializes another controller and requires strong defaults.

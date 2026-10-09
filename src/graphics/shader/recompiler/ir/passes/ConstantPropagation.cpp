@@ -215,6 +215,24 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			return;
 		case ValueOpcode::SelectU32:
 		case ValueOpcode::SelectF32: FoldSelect(inst); return;
+		case ValueOpcode::FPCmpClass32: {
+			const auto mask = Arg(inst, 1);
+			if (!IsImmediate(mask, Type::U32)) {
+				return;
+			}
+			switch (mask.U32() & 0x3ffu) {
+				case 0u: Replace(inst, Value(false)); break;
+				case 0x3ffu: Replace(inst, Value(true)); break;
+				case 3u: {
+					const auto result = block.PrependNewInst(
+					    instruction, ValueOpcode::FPIsNan32, {Arg(inst, 0)});
+					Replace(inst, Value(&*result));
+					break;
+				}
+				default: break;
+			}
+			return;
+		}
 		case ValueOpcode::BitFieldInsert: {
 			const auto base   = Arg(inst, 0);
 			const auto insert = Arg(inst, 1);

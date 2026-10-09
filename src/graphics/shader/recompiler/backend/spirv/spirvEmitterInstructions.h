@@ -23,13 +23,8 @@ uint32_t              EmitConvertF16F32(EmitterState& state, uint32_t arg0);
 inline constexpr auto EmitConvertF32F16 = EmitF16BitsToF32;
 uint32_t              EmitConvertS32F32(EmitterState& state, uint32_t arg0);
 uint32_t              EmitConvertU32F32(EmitterState& state, uint32_t arg0);
-template <IR::Type type>
-uint32_t EmitConvertSigned32ToFloat(EmitterState& state, uint32_t arg0) {
-	const auto signed_value = Unary(state, spv::OpBitcast, TypeI32(state), arg0);
-	return EmitNative<spv::OpConvertSToF, type>(state, signed_value);
-}
-inline constexpr auto EmitConvertF32S32 = EmitConvertSigned32ToFloat<IR::Type::F32>;
-inline constexpr auto EmitConvertF64S32 = EmitConvertSigned32ToFloat<IR::Type::F64>;
+EMIT_NATIVE(ConvertF32S32, OpConvertSToF, F32, uint32_t)
+EMIT_NATIVE(ConvertF64S32, OpConvertSToF, F64, uint32_t)
 uint32_t              EmitConvertF32F64(EmitterState& state, uint32_t arg0);
 uint32_t              EmitConvertF64F32(EmitterState& state, uint32_t arg0);
 EMIT_NATIVE(ConvertF32U32, OpConvertUToF, F32, uint32_t)
@@ -69,7 +64,7 @@ EMIT_NATIVE(IMul64, OpIMul, U64, uint32_t, uint32_t)
 EMIT_NATIVE(IAddCarry32, OpIAddCarry, U32x2, uint32_t, uint32_t)
 uint32_t EmitSMulHi(EmitterState& state, uint32_t arg0, uint32_t arg1);
 uint32_t EmitUMulHi(EmitterState& state, uint32_t arg0, uint32_t arg1);
-uint32_t EmitIAbs32(EmitterState& state, uint32_t arg0);
+inline constexpr auto EmitIAbs32 = EmitGlsl<GLSLstd450SAbs, IR::Type::U32, uint32_t>;
 EMIT_NATIVE(ShiftLeftLogical32, OpShiftLeftLogical, U32, uint32_t, uint32_t)
 EMIT_NATIVE(ShiftRightLogical32, OpShiftRightLogical, U32, uint32_t, uint32_t)
 EMIT_NATIVE(ShiftRightArithmetic32, OpShiftRightArithmetic, U32, uint32_t, uint32_t)
@@ -96,13 +91,13 @@ EMIT_NATIVE(BitwiseAnd64, OpBitwiseAnd, U64, uint32_t, uint32_t)
 EMIT_NATIVE(BitReverse32, OpBitReverse, U32, uint32_t)
 EMIT_NATIVE(BitCount32, OpBitCount, U32, uint32_t)
 uint32_t EmitBitCount64(EmitterState& state, uint32_t arg0);
-uint32_t EmitFindILsb32(EmitterState& state, uint32_t arg0);
-uint32_t EmitFindUMsb32(EmitterState& state, uint32_t arg0);
+inline constexpr auto EmitFindILsb32 = EmitGlsl<GLSLstd450FindILsb, IR::Type::U32, uint32_t>;
+inline constexpr auto EmitFindUMsb32 = EmitGlsl<GLSLstd450FindUMsb, IR::Type::U32, uint32_t>;
 uint32_t EmitFindUMsb64(EmitterState& state, uint32_t arg0);
-uint32_t EmitSMin32(EmitterState& state, uint32_t arg0, uint32_t arg1);
-uint32_t EmitSMax32(EmitterState& state, uint32_t arg0, uint32_t arg1);
-uint32_t EmitUMin32(EmitterState& state, uint32_t arg0, uint32_t arg1);
-uint32_t EmitUMax32(EmitterState& state, uint32_t arg0, uint32_t arg1);
+inline constexpr auto EmitSMin32 = EmitGlsl<GLSLstd450SMin, IR::Type::U32, uint32_t, uint32_t>;
+inline constexpr auto EmitSMax32 = EmitGlsl<GLSLstd450SMax, IR::Type::U32, uint32_t, uint32_t>;
+inline constexpr auto EmitUMin32 = EmitGlsl<GLSLstd450UMin, IR::Type::U32, uint32_t, uint32_t>;
+inline constexpr auto EmitUMax32 = EmitGlsl<GLSLstd450UMax, IR::Type::U32, uint32_t, uint32_t>;
 uint32_t EmitSMinTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2);
 uint32_t EmitSMaxTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2);
 uint32_t EmitUMinTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2);
@@ -162,7 +157,7 @@ inline constexpr auto EmitFPOrdLessThanEqual32 = EmitFloatCompare32<spv::OpFOrdL
 inline constexpr auto EmitFPUnordLessThanEqual32 = EmitFloatCompare32<spv::OpFUnordLessThanEqual>;
 inline constexpr auto EmitFPOrdGreaterThanEqual32 = EmitFloatCompare32<spv::OpFOrdGreaterThanEqual>;
 inline constexpr auto EmitFPUnordGreaterThanEqual32 = EmitFloatCompare32<spv::OpFUnordGreaterThanEqual>;
-uint32_t              EmitFPIsNan32(EmitterState& state, uint32_t arg0);
+EMIT_NATIVE(FPIsNan32, OpIsNan, U1, uint32_t)
 inline constexpr auto EmitFPCmpClass32 = EmitClassMaskF32;
 inline constexpr auto EmitFPCmpClass16 = EmitClassMaskF16;
 EMIT_NATIVE(FPAdd32, OpFAdd, F32, uint32_t, uint32_t)

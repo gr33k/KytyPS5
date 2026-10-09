@@ -615,8 +615,7 @@ private:
 		value           = value.Resolve();
 		const auto* phi = value.TryInstruction();
 		if (m_shader_writes || phi == nullptr || phi->GetOpcode() != ValueOpcode::Phi ||
-		    phi->NumArgs() != 2u || phi->NumPhiBlocks() != 2u || phi->GetType() != Type::U32 ||
-		    m_program.blocks.size() != m_program.block_info.size()) {
+		    phi->NumArgs() != 2u || phi->NumPhiBlocks() != 2u || phi->GetType() != Type::U32) {
 			return value;
 		}
 		const auto* merge = phi->Parent();
@@ -639,7 +638,7 @@ private:
 		if (branch == merge || branch->ImmSuccessors().size() != 2u) {
 			return value;
 		}
-		std::array<uint32_t, 2> target_ids;
+		std::array<const Block*, 2> targets;
 		for (uint32_t arm = 0; arm < 2; arm++) {
 			const auto* incoming = phi->PhiBlock(arm);
 			if (incoming == merge ||
@@ -650,29 +649,20 @@ private:
 			      incoming->ImmSuccessors()[0] != merge))) {
 				return value;
 			}
-			const auto* target = incoming == branch ? merge : incoming;
-			const auto  it     = std::ranges::find(m_program.blocks, target);
-			if (it == m_program.blocks.end()) {
-				return value;
-			}
-			target_ids[arm] = m_program.block_info[it - m_program.blocks.begin()].id;
+			targets[arm] = incoming == branch ? merge : incoming;
 		}
-		const auto branch_it = std::ranges::find(m_program.blocks, branch);
-		if (branch_it == m_program.blocks.end()) {
-			return value;
-		}
-		const auto& info = m_program.block_info[branch_it - m_program.blocks.begin()];
+		const auto& info = *branch;
 		const auto& term = info.terminator;
 		if (term.kind != CFG::TerminatorKind::ConditionalBranch ||
-		    !((term.true_block == target_ids[0] && term.false_block == target_ids[1]) ||
-		      (term.false_block == target_ids[0] && term.true_block == target_ids[1])) ||
+		    !((term.true_block == targets[0] && term.false_block == targets[1]) ||
+		      (term.false_block == targets[0] && term.true_block == targets[1])) ||
 		    !ValidateRuntimeValue(m_program, info.condition, RuntimeValueType::Integer) ||
 		    !ValidateRuntimeValue(m_program, phi->Arg(0)) ||
 		    !ValidateRuntimeValue(m_program, phi->Arg(1))) {
 			return value;
 		}
 		// Retain a host expression; replacing the GPU Phi would break SSA dominance.
-		const auto true_arg = term.true_block == target_ids[0] ? 0u : 1u;
+		const auto true_arg = term.true_block == targets[0] ? 0u : 1u;
 		auto&      selected = m_program.value_storage.emplace_back(ValueOpcode::SelectU32);
 		selected.SetArg(0, info.condition);
 		selected.SetArg(1, phi->Arg(true_arg));
@@ -854,9 +844,9 @@ private:
 					if (entry.source.dwords[word].Resolve() == Value(read))
 						entry.source.dwords[word] = flat;
 			}
-			for (auto& info: m_program.block_info) {
-				if (info.condition.Resolve() == Value(read)) info.condition = flat;
-				if (info.indirect_target.Resolve() == Value(read)) info.indirect_target = flat;
+			for (auto* block: m_program.blocks) {
+				if (block->condition.Resolve() == Value(read)) block->condition = flat;
+				if (block->indirect_target.Resolve() == Value(read)) block->indirect_target = flat;
 			}
 			if (keep) {
 				if (resolved->planning_handle.IsEmpty()) {
@@ -1024,9 +1014,6 @@ private:
 	};
 
 	bool NonzeroOnEntry(Value value, const Block* block) const {
-		if (m_program.blocks.size() != m_program.block_info.size()) {
-			return false;
-		}
 		// Each unique predecessor must execute before this use. Stop at joins: an
 		// unrelated comparison is not a bound on FindILsb's zero-input sentinel.
 		for (size_t depth = 0; block != nullptr && depth < m_program.blocks.size(); ++depth) {
@@ -1100,15 +1087,11 @@ private:
 	}
 
 	std::optional<EdgePredicate> ConditionalEdge(const Block* from, const Block* to) const {
-		const auto position = std::ranges::find(m_program.blocks, from);
-		const auto target = std::ranges::find(m_program.blocks, to);
-		if (position == m_program.blocks.end() || target == m_program.blocks.end()) return {};
-		const auto& info = m_program.block_info[position - m_program.blocks.begin()];
-		const auto& term = info.terminator;
-		const auto id = m_program.block_info[target - m_program.blocks.begin()].id;
+		const auto& term = from->terminator;
 		if (term.kind != CFG::TerminatorKind::ConditionalBranch ||
-		    (term.true_block == id) == (term.false_block == id)) return {};
-		EdgePredicate edge {info.condition, term.true_block == id};
+		    (term.true_block == to) == (term.false_block == to))
+			return {};
+		EdgePredicate edge {from->condition, term.true_block == to};
 		while (const auto* inst = edge.condition.Resolve().TryInstruction()) {
 			if (inst->GetOpcode() == ValueOpcode::LogicalNot) {
 				edge.positive = !edge.positive;
@@ -1472,9 +1455,9 @@ private:
 
 	const Inst* BoundedLoop(Value key, const Block* use, const auto& accepts_bound) const {
 		const auto* phi = key.Resolve().TryInstruction();
-		if (phi == nullptr || phi->GetOpcode() != ValueOpcode::Phi ||
-		    phi->GetType() != Type::U32 || phi->NumArgs() != 2u || phi->NumPhiBlocks() != 2u ||
-		    m_program.blocks.size() != m_program.block_info.size()) return {};
+		if (phi == nullptr || phi->GetOpcode() != ValueOpcode::Phi || phi->GetType() != Type::U32 ||
+		    phi->NumArgs() != 2u || phi->NumPhiBlocks() != 2u)
+			return {};
 		const Block* increment_block = nullptr;
 		uint32_t initial_arm = 0;
 		for (uint32_t initial = 0; initial < 2u; ++initial) {
@@ -1906,22 +1889,13 @@ private:
 	}
 
 	bool ImpossibleSwitchEdge(const Block* from, const Block* to) const {
-		const auto from_it = std::ranges::find(m_program.blocks, from);
-		const auto to_it = std::ranges::find(m_program.blocks, to);
-		if (from_it == m_program.blocks.end() || to_it == m_program.blocks.end() ||
-		    m_program.block_info.size() != m_program.blocks.size()) return false;
-		const auto& info = m_program.block_info[from_it - m_program.blocks.begin()];
-		const auto& term = info.terminator;
-		if (term.kind != CFG::TerminatorKind::IndirectBranch ||
-		    term.indirect_selector_code == UINT32_MAX ||
-		    term.indirect_selector_values.empty() ||
-		    term.indirect_selector_values.size() != term.indirect_selector_targets.size()) return false;
-		const auto target = m_program.block_info[to_it - m_program.blocks.begin()].id;
-		const auto maximum = SelectorMaximum(info.indirect_target);
+		const auto& term = from->terminator;
+		if (term.kind != CFG::TerminatorKind::IndirectBranch || !term.indexed) return false;
+		const auto maximum = SelectorMaximum(from->indirect_target);
 		bool found = false;
-		for (size_t i = 0; i < term.indirect_selector_values.size(); ++i) {
-			if (term.indirect_selector_targets[i] != target) continue;
-			if (term.indirect_selector_values[i] <= maximum) return false;
+		for (const auto& branch: term.cases) {
+			if (branch.target != to) continue;
+			if (branch.value <= maximum) return false;
 			found = true;
 		}
 		return found;

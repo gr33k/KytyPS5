@@ -324,10 +324,9 @@ private:
 } // namespace
 
 SrtWalker::SrtWalker(const ResourcePlan& program, const SrtRuntime& runtime,
-                     std::span<const uint8_t> clean_flat_slots, SrtWalker* clean_evaluator,
-                     Value active_mask)
-    : m_program(program), m_runtime(runtime), m_clean_flat_slots(clean_flat_slots),
-      m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()),
+                     SrtWalker* clean_evaluator, Value active_mask)
+    : m_program(program), m_runtime(runtime), m_clean_evaluator(clean_evaluator),
+      m_active_mask(active_mask.Resolve()),
       m_context(AcquireContext(program)) {}
 
 SrtWalker::~SrtWalker() { --m_program.evaluation_depth; }
@@ -455,7 +454,7 @@ bool SrtWalker::EvaluateExtract(const Inst& inst, uint64_t& result) {
 }
 
 bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
-	const auto flags = inst.Flags<MemoryFlags>();
+	const auto flags = inst.Flags<SrtReadFlags>();
 	if (flags.index >= m_program.memory_info.size()) {
 		return false;
 	}
@@ -557,9 +556,8 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 				return EvaluateWide(inst.Arg(0), result);
 			}
 			const auto clean_runtime = CleanRuntime(m_runtime);
-			SrtWalker  clean_active(m_program, clean_runtime, {}, nullptr, inst.Arg(1));
-			SrtWalker  active(m_program, m_runtime, m_clean_flat_slots, &clean_active,
-			                  inst.Arg(1));
+			SrtWalker  clean_active(m_program, clean_runtime, nullptr, inst.Arg(1));
+			SrtWalker  active(m_program, m_runtime, &clean_active, inst.Arg(1));
 			return active.EvaluateWide(inst.Arg(0), result);
 		}
 		case ValueOpcode::BitCastU32F32:
@@ -573,25 +571,14 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 			result = static_cast<uint32_t>(a) |
 			         (static_cast<uint64_t>(static_cast<uint32_t>(b)) << 32u);
 			return true;
-		case ValueOpcode::ReadConst: {
-			const auto slot = inst.Arg(1).Resolve();
-			if (!slot.IsImmediate() || slot.GetType() != Type::U32 ||
-			    slot.U32() >= m_program.srt_reads.size()) {
-				return false;
-			}
-			if (slot.U32() < m_clean_flat_slots.size() &&
-			    m_clean_flat_slots[slot.U32()] != 0u && m_clean_evaluator != nullptr) {
-				return m_clean_evaluator->EvaluateWide(m_program.srt_reads[slot.U32()].value,
-				                                       result);
-			}
-			return EvaluateWide(m_program.srt_reads[slot.U32()].value, result);
-		}
 		case ValueOpcode::LoadAddressU32:
 		case ValueOpcode::ReadConstBuffer:
 		case ValueOpcode::LoadBufferU32:
 			if (IsRawRead(m_program, inst)) {
-				if (inst.GetOpcode() == ValueOpcode::LoadBufferU32 && m_clean_evaluator != nullptr &&
-				    m_clean_evaluator->m_active_mask == m_active_mask) {
+				if (m_clean_evaluator != nullptr &&
+				    (inst.Flags<SrtReadFlags>().clean != 0u ||
+				     (inst.GetOpcode() == ValueOpcode::LoadBufferU32 &&
+				      m_clean_evaluator->m_active_mask == m_active_mask))) {
 					return m_clean_evaluator->EvaluateWide(Value(const_cast<Inst*>(&inst)), result);
 				}
 				return EvaluateRawRead(inst, result);
@@ -934,8 +921,8 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_program.srt_reads.size()) return false;
 		const auto& read = m_program.srt_reads[slot];
-		const bool clean = read.flat_offset < m_clean_flat_slots.size() &&
-		                   m_clean_flat_slots[read.flat_offset] != 0u;
+		const auto* inst = read.value.ResolveInstruction();
+		const bool clean = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;
 		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr))
 			return false;
 		auto& evaluator = clean ? *m_clean_evaluator : *this;

@@ -735,7 +735,7 @@ void Translator::WriteCompareResult(const Decoder::Operand& operand, IR::U1 valu
 }
 
 void Translator::AddBranchCondition(const CFG::Graph& graph, const CFG::BasicBlock& source,
-                                    IR::BlockInfo& info) {
+                                    IR::Block& info) {
 	const auto native_condition = [&](CFG::BranchCondition kind) -> IR::U1 {
 		IR::U1 condition;
 		switch (kind) {
@@ -1023,45 +1023,67 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 
 	result.block_storage.reserve(cfg.blocks.size() + 1u);
 	result.blocks.reserve(cfg.blocks.size() + 1u);
-	result.block_info.reserve(cfg.blocks.size() + 1u);
 	const auto max_id = std::ranges::max_element(cfg.blocks, {}, [](const CFG::BasicBlock& block) {
 		                    return block.id;
 	                    })->id;
 	if (max_id == UINT32_MAX) {
 		EXIT("cannot allocate a typed entry block id");
 	}
-	CFG::Terminator terminator;
-	terminator.kind       = CFG::TerminatorKind::Branch;
-	terminator.true_block = cfg.blocks.front().id;
 	result.block_storage.push_back(std::make_unique<IR::Block>());
 	result.blocks.push_back(result.block_storage.back().get());
-	result.block_info.push_back({max_id + 1u, cfg.blocks.front().start_pc,
-	                             cfg.blocks.front().start_pc, std::move(terminator)});
+	auto& entry    = *result.blocks.front();
+	entry.id       = max_id + 1u;
+	entry.start_pc = entry.end_pc = cfg.blocks.front().start_pc;
+	entry.terminator.kind         = CFG::TerminatorKind::Branch;
 
-	std::unordered_map<uint32_t, size_t> block_indices;
-	block_indices.reserve(cfg.blocks.size());
-	for (const auto& source_block: cfg.blocks) {
-		if (!block_indices.emplace(source_block.id, result.blocks.size()).second) {
-			EXIT("CFG contains duplicate block id %u", source_block.id);
+	std::unordered_map<uint32_t, IR::Block*> blocks_by_id;
+	blocks_by_id.reserve(cfg.blocks.size());
+	for (const auto& source: cfg.blocks) {
+		auto& block = *result.block_storage.emplace_back(std::make_unique<IR::Block>());
+		if (!blocks_by_id.emplace(source.id, &block).second) {
+			EXIT("CFG contains duplicate block id %u", source.id);
 		}
-		result.block_storage.push_back(std::make_unique<IR::Block>());
-		result.blocks.push_back(result.block_storage.back().get());
-		result.block_info.push_back(
-		    {source_block.id, source_block.start_pc, source_block.end_pc, source_block.terminator});
+		result.blocks.push_back(&block);
+		block.id       = source.id;
+		block.start_pc = source.start_pc;
+		block.end_pc   = source.end_pc;
 	}
-	for (const auto& source_block: cfg.blocks) {
-		const auto source_index = block_indices.at(source_block.id);
-		for (const auto successor: source_block.successors) {
-			const auto target = block_indices.find(successor);
-			if (target == block_indices.end()) {
-				EXIT("CFG block %u has unknown successor %u", source_block.id, successor);
+	const auto target_block = [&](uint32_t id) -> IR::Block* {
+		return id == UINT32_MAX ? nullptr : blocks_by_id.at(id);
+	};
+	entry.terminator.true_block = target_block(cfg.blocks.front().id);
+	for (const auto& source: cfg.blocks) {
+		auto&       block               = *blocks_by_id.at(source.id);
+		const auto& term                = source.terminator;
+		block.terminator.kind           = term.kind;
+		block.terminator.true_block     = target_block(term.true_block);
+		block.terminator.false_block    = target_block(term.false_block);
+		block.terminator.merge_block    = target_block(term.merge_block);
+		block.terminator.continue_block = target_block(term.continue_block);
+		block.terminator.loop_header    = term.loop_header;
+		block.terminator.indexed        = term.indirect_selector_code != UINT32_MAX;
+		const auto& values =
+		    block.terminator.indexed ? term.indirect_selector_values : term.indirect_target_pcs;
+		const auto& targets =
+		    block.terminator.indexed ? term.indirect_selector_targets : term.indirect_targets;
+		if (values.size() != targets.size()) {
+			EXIT("CFG block %u has inconsistent indirect targets", source.id);
+		}
+		block.terminator.cases.reserve(values.size());
+		for (size_t index = 0; index < values.size(); ++index) {
+			block.terminator.cases.push_back({values[index], target_block(targets[index])});
+		}
+		for (const auto successor: source.successors) {
+			const auto target = blocks_by_id.find(successor);
+			if (target == blocks_by_id.end()) {
+				EXIT("CFG block %u has unknown successor %u", source.id, successor);
 			}
-			result.blocks[source_index]->AddBranch(result.blocks[target->second]);
+			block.AddBranch(target->second);
 		}
 	}
 	{
-		result.blocks.front()->AddBranch(result.blocks.at(block_indices.at(cfg.blocks.front().id)));
-		IR::IREmitter entry_ir(result.blocks.front());
+		entry.AddBranch(entry.terminator.true_block);
+		IR::IREmitter entry_ir(&entry);
 		const auto    builtin = [&](IR::StageInputKind kind, uint32_t component = 0u) {
 			return IR::U32(
 			    entry_ir.Emit(IR::ValueOpcode::GetBuiltin,
@@ -1331,10 +1353,10 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 		}
 	}
 	const bool flush_f32_inputs = options.stage == ShaderType::Compute &&
-	                             (options.input_info.compute->float_mode & 0x10u) == 0;
+	                              (options.input_info.compute->float_mode & 0x10u) == 0;
 	for (const auto& cfg_block: cfg.blocks) {
-		const auto typed_index = block_indices.at(cfg_block.id);
-		Translator translator(result, result.blocks[typed_index], vector_limit, flush_f32_inputs);
+		auto*      block = blocks_by_id.at(cfg_block.id);
+		Translator translator(result, block, vector_limit, flush_f32_inputs);
 		for (uint32_t index = cfg_block.inst_begin; index < cfg_block.inst_end; index++) {
 			const auto& instruction = decoded.instructions[index];
 			if (IsCodeTableLoad(cfg, instruction.pc)) {
@@ -1357,7 +1379,7 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			}
 			translator.TranslateInstruction(instruction);
 		}
-		translator.AddBranchCondition(cfg, cfg_block, result.block_info[typed_index]);
+		translator.AddBranchCondition(cfg, cfg_block, *block);
 	}
 	IR::ValidateProgram(result, false);
 	return result;

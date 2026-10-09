@@ -81,9 +81,12 @@ enum class Setting { SpeakerVolume, VibrationIntensity, TriggerEffectIntensity }
 void  CycleSetting(Setting setting);
 float GetSettingScale(Setting setting);
 
+int PadCheckHandle(int handle);
+
 int KYTY_SYSV_ABI PadInit();
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param);
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index);
+int KYTY_SYSV_ABI PadClose(int handle);
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable);
 int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable);
 int KYTY_SYSV_ABI PadResetOrientation(int handle);

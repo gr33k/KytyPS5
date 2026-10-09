@@ -82,35 +82,12 @@ uint32_t EmitF32ToF16RtzBits(EmitterState& state, uint32_t f32) {
 	return EmitAndConstant(state, EmitSelectValueU32(state, exp_eq_255, special, finite2), 0xffffu);
 }
 
-uint32_t EmitMinMaxU32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
-	const auto cond = state.builder.AllocateId();
-	const auto ret  = state.builder.AllocateId();
-	state.builder.AddFunction(max_value ? spv::OpUGreaterThan : spv::OpULessThan, TypeBool(state),
-	                          cond, lhs, rhs);
-	state.builder.AddFunction(spv::OpSelect, TypeU32(state), ret, cond, lhs, rhs);
-	return ret;
-}
-
-uint32_t EmitMinMaxI32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
-	const auto cond = state.builder.AllocateId();
-	const auto ret  = state.builder.AllocateId();
-	state.builder.AddFunction(max_value ? spv::OpSGreaterThan : spv::OpSLessThan, TypeBool(state),
-	                          cond, lhs, rhs);
-	state.builder.AddFunction(spv::OpSelect, TypeU32(state), ret, cond, lhs, rhs);
-	return ret;
-}
-
 F32Class EmitClassifyF32Bits(EmitterState& state, uint32_t bits) {
 	F32Class cls;
-	cls.bits                 = bits;
-	const auto abs_bits      = EmitAndConstant(state, cls.bits, 0x7fffffffu);
-	const auto exponent_bits = EmitAndConstant(state, abs_bits, 0x7f800000u);
-	const auto mantissa_bits = EmitAndConstant(state, abs_bits, 0x007fffffu);
-	const auto exponent_max =
-	    EmitCompareU32Constant(state, spv::OpIEqual, exponent_bits, 0x7f800000u);
-	const auto mantissa_nonzero = EmitCompareU32Constant(state, spv::OpINotEqual, mantissa_bits, 0);
-	cls.nan  = EmitLogicalAndBool(state, exponent_max, mantissa_nonzero);
-	cls.zero                    = EmitCompareU32Constant(state, spv::OpIEqual, abs_bits, 0);
+	cls.bits            = bits;
+	const auto abs_bits = EmitAndConstant(state, cls.bits, 0x7fffffffu);
+	cls.nan  = EmitCompareU32Constant(state, spv::OpUGreaterThan, abs_bits, 0x7f800000u);
+	cls.zero = EmitCompareU32Constant(state, spv::OpIEqual, abs_bits, 0);
 	return cls;
 }
 

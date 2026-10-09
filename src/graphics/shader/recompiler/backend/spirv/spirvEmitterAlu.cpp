@@ -56,33 +56,14 @@ uint32_t EmitMulHigh(EmitterState& state, uint32_t lhs, uint32_t rhs, bool signe
 	return signed_value ? Unary(state, spv::OpBitcast, TypeU32(state), high) : high;
 }
 
-uint32_t EmitMinMax3(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool signed_value,
-                     bool max_value) {
-	const auto ab = signed_value ? EmitMinMaxI32Value(state, a, b, max_value)
-	                             : EmitMinMaxU32Value(state, a, b, max_value);
-	return signed_value ? EmitMinMaxI32Value(state, ab, c, max_value)
-	                    : EmitMinMaxU32Value(state, ab, c, max_value);
-}
-
-uint32_t EmitMed3(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool signed_value) {
-	const auto minimum = EmitMinMax3(state, a, b, c, signed_value, false);
-	const auto maximum = EmitMinMax3(state, a, b, c, signed_value, true);
-	const auto ab      = Binary(state, spv::OpIAdd, TypeU32(state), a, b);
-	const auto abc     = Binary(state, spv::OpIAdd, TypeU32(state), ab, c);
-	return Binary(state, spv::OpISub, TypeU32(state),
-	              Binary(state, spv::OpISub, TypeU32(state), abc, minimum), maximum);
-}
-
 uint32_t EmitFMinMax3(EmitterState& state, uint32_t a, uint32_t b, uint32_t c, bool max_value) {
 	return EmitMinMaxF32Value(state, EmitMinMaxF32Value(state, a, b, max_value), c, max_value);
 }
 
 uint32_t EmitExt(EmitterState& state, uint32_t type, uint32_t opcode,
                  std::initializer_list<uint32_t> args) {
-	const auto            result = state.builder.AllocateId();
-	std::vector<uint32_t> words {spv::OpExtInst, type, result, GlslStd450(state), opcode};
-	words.insert(words.end(), args.begin(), args.end());
-	state.builder.AddFunction(words);
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpExtInst, type, result, GlslStd450(state), opcode, args);
 	return result;
 }
 
@@ -248,14 +229,6 @@ uint32_t EmitUMulHi(EmitterState& state, uint32_t arg0, uint32_t arg1) {
 	return EmitMulHigh(state, arg0, arg1, false);
 }
 
-uint32_t EmitIAbs32(EmitterState& state, uint32_t arg0) {
-	const auto value = arg0;
-	const auto neg   = Unary(state, spv::OpSNegate, TypeU32(state), value);
-	const auto negative =
-	    Binary(state, spv::OpSLessThan, TypeBool(state), value, ConstantU32(state, 0));
-	return Select(state, TypeU32(state), negative, neg, value);
-}
-
 uint32_t EmitBitCount64(EmitterState& state, uint32_t arg0) {
 	// Vulkan bit-count operands remain 32-bit, including when counting a U64.
 	const auto unpacked = Unary(state, spv::OpBitcast, TypeU32Vector(state, 2), arg0);
@@ -264,58 +237,30 @@ uint32_t EmitBitCount64(EmitterState& state, uint32_t arg0) {
 	return Binary(state, spv::OpIAdd, TypeU32(state), pair.low, pair.high);
 }
 
-uint32_t EmitFindILsb32(EmitterState& state, uint32_t arg0) {
-	const auto value = EmitExt(state, TypeI32(state), GLSLstd450FindILsb, {arg0});
-	return Unary(state, spv::OpBitcast, TypeU32(state), value);
-}
-
-uint32_t EmitFindUMsb32(EmitterState& state, uint32_t arg0) {
-	const auto value = EmitExt(state, TypeI32(state), GLSLstd450FindUMsb, {arg0});
-	return Unary(state, spv::OpBitcast, TypeU32(state), value);
-}
-
-uint32_t EmitSMin32(EmitterState& state, uint32_t arg0, uint32_t arg1) {
-	return EmitMinMaxI32Value(state, arg0, arg1, false);
-}
-
-uint32_t EmitSMax32(EmitterState& state, uint32_t arg0, uint32_t arg1) {
-	return EmitMinMaxI32Value(state, arg0, arg1, true);
-}
-
-uint32_t EmitUMin32(EmitterState& state, uint32_t arg0, uint32_t arg1) {
-	return EmitMinMaxU32Value(state, arg0, arg1, false);
-}
-
-uint32_t EmitUMax32(EmitterState& state, uint32_t arg0, uint32_t arg1) {
-	return EmitMinMaxU32Value(state, arg0, arg1, true);
-}
-
 uint32_t EmitSMinTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2) {
-	return EmitMinMax3(state, arg0, arg1, arg2, true, false);
+	return EmitSMin32(state, arg0, EmitSMin32(state, arg1, arg2));
 }
 
 uint32_t EmitSMaxTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2) {
-	return EmitMinMax3(state, arg0, arg1, arg2, true, true);
+	return EmitSMax32(state, arg0, EmitSMax32(state, arg1, arg2));
 }
 
 uint32_t EmitUMinTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2) {
-	return EmitMinMax3(state, arg0, arg1, arg2, false, false);
+	return EmitUMin32(state, arg0, EmitUMin32(state, arg1, arg2));
 }
 
 uint32_t EmitUMaxTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2) {
-	return EmitMinMax3(state, arg0, arg1, arg2, false, true);
+	return EmitUMax32(state, arg0, EmitUMax32(state, arg1, arg2));
 }
 
 uint32_t EmitSMedTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2) {
-	return EmitMed3(state, arg0, arg1, arg2, true);
+	const auto high_min = EmitSMin32(state, EmitSMax32(state, arg0, arg1), arg2);
+	return EmitSMax32(state, EmitSMin32(state, arg0, arg1), high_min);
 }
 
 uint32_t EmitUMedTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2) {
-	return EmitMed3(state, arg0, arg1, arg2, false);
-}
-
-uint32_t EmitFPIsNan32(EmitterState& state, uint32_t arg0) {
-	return EmitNative<spv::OpFUnordNotEqual, IR::Type::U1>(state, arg0, arg0);
+	const auto high_min = EmitUMin32(state, EmitUMax32(state, arg0, arg1), arg2);
+	return EmitUMax32(state, EmitUMin32(state, arg0, arg1), high_min);
 }
 
 uint32_t EmitFPMin32(EmitterState& state, uint32_t arg0, uint32_t arg1) {

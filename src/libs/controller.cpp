@@ -24,8 +24,12 @@ namespace Libs::Controller {
 
 LIB_NAME("Pad", "Pad");
 
-constexpr int PAD_ERROR_INVALID_ARG    = -2137915391; /* 0x80920001 */
-constexpr int PAD_ERROR_INVALID_HANDLE = -2137915389; /* 0x80920003 */
+constexpr int PAD_ERROR_INVALID_ARG     = -2137915391; /* 0x80920001 */
+constexpr int PAD_ERROR_INVALID_HANDLE  = -2137915389; /* 0x80920003 */
+constexpr int PAD_ERROR_ALREADY_OPENED  = -2137915388; /* 0x80920004 */
+constexpr int PAD_ERROR_NOT_INITIALIZED = -2137915387; /* 0x80920005 */
+constexpr int PAD_ERROR_NO_HANDLE       = -2137915384; /* 0x80920008 */
+constexpr int PAD_HANDLE                = 1;
 
 constexpr uint32_t RUMBLE_DURATION_MS = 0xffff;
 constexpr uint32_t RELEASE_FLUSH_MS   = 50;
@@ -107,6 +111,12 @@ public:
 
 	KYTY_CLASS_NO_COPY(GameController);
 
+	int InitPort();
+	int OpenPort(int user_id, int type, int index);
+	int GetPortHandle(int user_id, int type, int index);
+	int ClosePort(int handle);
+	int CheckPortHandle(int handle);
+
 	void Connect(int id);
 	void Disconnect(int id);
 	void Button(int id, uint32_t button, bool down);
@@ -131,6 +141,9 @@ public:
 
 private:
 	static constexpr uint32_t STATES_MAX = 64;
+	enum class PortState { Uninitialized, Closed, Open };
+
+	int CheckPortHandleLocked(int handle) const;
 
 	void CheckActive();
 	void AddState();
@@ -140,6 +153,7 @@ private:
 	void UpdateTriggerEffectState();
 
 	Common::Mutex    m_mutex;
+	PortState        m_port_state      = PortState::Uninitialized;
 	std::vector<int> m_connected_ids;
 	int              m_active_id       = -1;
 	bool             m_connected       = false;
@@ -925,21 +939,71 @@ int GetActiveControllerId() {
 	return g_controller != nullptr ? g_controller->GetActiveControllerId() : -1;
 }
 
-int KYTY_SYSV_ABI PadInit() {
-	PRINT_NAME();
+static bool PadOpenArgsAreValid(int user_id, int type, int index) {
+	// The host keyboard and gamepad feed one standard port for the configured user.
+	return user_id == Config::GetUserId() && type == 0 && index == 0;
+}
 
+int GameController::InitPort() {
+	Common::LockGuard lock(m_mutex);
+	if (m_port_state == PortState::Uninitialized) {
+		m_port_state = PortState::Closed;
+	}
 	return OK;
 }
 
-static bool PadOpenArgsAreValid(int user_id, int type, int index) {
-	constexpr int user_id_system     = 0xff;
-	constexpr int port_type_standard = 0;
-	constexpr int port_type_special  = 2;
-	constexpr int port_type_remote   = 16;
-	const bool    personal_port =
-	    user_id == Config::GetUserId() && (type == port_type_standard || type == port_type_special);
-	const bool system_remote_control = user_id == user_id_system && type == port_type_remote;
-	return index == 0 && (personal_port || system_remote_control);
+int GameController::OpenPort(int user_id, int type, int index) {
+	Common::LockGuard lock(m_mutex);
+	if (m_port_state == PortState::Uninitialized) {
+		return PAD_ERROR_NOT_INITIALIZED;
+	}
+	if (!PadOpenArgsAreValid(user_id, type, index)) {
+		return PAD_ERROR_INVALID_ARG;
+	}
+	if (m_port_state == PortState::Open) {
+		return PAD_ERROR_ALREADY_OPENED;
+	}
+	m_port_state = PortState::Open;
+	return PAD_HANDLE;
+}
+
+int GameController::GetPortHandle(int user_id, int type, int index) {
+	Common::LockGuard lock(m_mutex);
+	if (m_port_state == PortState::Uninitialized) {
+		return PAD_ERROR_NOT_INITIALIZED;
+	}
+	return m_port_state == PortState::Open && PadOpenArgsAreValid(user_id, type, index) ? PAD_HANDLE
+	                                                                               : PAD_ERROR_NO_HANDLE;
+}
+
+int GameController::CheckPortHandleLocked(int handle) const {
+	if (m_port_state == PortState::Uninitialized) {
+		return PAD_ERROR_NOT_INITIALIZED;
+	}
+	return m_port_state == PortState::Open && handle == PAD_HANDLE ? OK : PAD_ERROR_INVALID_HANDLE;
+}
+
+int GameController::CheckPortHandle(int handle) {
+	Common::LockGuard lock(m_mutex);
+	return CheckPortHandleLocked(handle);
+}
+
+int GameController::ClosePort(int handle) {
+	Common::LockGuard lock(m_mutex);
+	if (const auto error = CheckPortHandleLocked(handle); error != OK) {
+		return error;
+	}
+	m_port_state = PortState::Closed;
+	return OK;
+}
+
+int PadCheckHandle(int handle) {
+	return g_controller->CheckPortHandle(handle);
+}
+
+int KYTY_SYSV_ABI PadInit() {
+	PRINT_NAME();
+	return g_controller->InitPort();
 }
 
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param) {
@@ -951,15 +1015,7 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param) {
 	     "\t param   = 0x%016" PRIx64 "\n",
 	     user_id, type, index, reinterpret_cast<uint64_t>(param));
 
-	constexpr int pad_error_invalid_arg = -2137915391; /* 0x80920001 */
-
-	if (!PadOpenArgsAreValid(user_id, type, index)) {
-		return pad_error_invalid_arg;
-	}
-
-	int handle = 1;
-
-	return handle;
+	return g_controller->OpenPort(user_id, type, index);
 }
 
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index) {
@@ -970,20 +1026,20 @@ int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index) {
 	     "\t index   = %d\n",
 	     user_id, type, index);
 
-	constexpr int pad_error_device_no_handle = -2137915384; /* 0x80920008 */
+	return g_controller->GetPortHandle(user_id, type, index);
+}
 
-	if (!PadOpenArgsAreValid(user_id, type, index)) {
-		return pad_error_device_no_handle;
-	}
-
-	return 1;
+int KYTY_SYSV_ABI PadClose(int handle) {
+	PRINT_NAME();
+	LOGF("\t handle = %d\n", handle);
+	return g_controller->ClosePort(handle);
 }
 
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 
 	LOGF("\t enable = %s\n", (enable ? "true" : "false"));
@@ -995,8 +1051,8 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable) {
 int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 
 	LOGF("\t enable = %s\n", (enable ? "true" : "false"));
@@ -1007,8 +1063,8 @@ int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable) {
 int KYTY_SYSV_ABI PadResetOrientation(int handle) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 
 	g_controller->ResetOrientation();
@@ -1018,17 +1074,16 @@ int KYTY_SYSV_ABI PadResetOrientation(int handle) {
 int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformation* info) {
 	PRINT_NAME();
 
-	int  connected_count = 0;
-	bool connected       = false;
-
-	g_controller->GetConnectionInfo(&connected, &connected_count);
-
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (info == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
 	}
+
+	int  connected_count = 0;
+	bool connected       = false;
+	g_controller->GetConnectionInfo(&connected, &connected_count);
 
 	std::memset(info, 0, sizeof(*info));
 
@@ -1048,8 +1103,8 @@ int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformati
 int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (is_remote == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
@@ -1062,8 +1117,8 @@ int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote) {
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (data == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
@@ -1084,8 +1139,8 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	PRINT_NAME();
 
 	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (data == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
@@ -1116,8 +1171,8 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (param == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
@@ -1135,8 +1190,8 @@ int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param) {
 int KYTY_SYSV_ABI PadResetLightBar(int handle) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 
 	return OK;
@@ -1145,8 +1200,8 @@ int KYTY_SYSV_ABI PadResetLightBar(int handle) {
 int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (param == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
@@ -1160,8 +1215,8 @@ int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param) {
 int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const PadTriggerEffectParam* param) {
 	PRINT_NAME();
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (param == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
@@ -1175,8 +1230,8 @@ int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInfo
 
 	LOGF("\t handle = %d\n", handle);
 
-	if (handle != 1) {
-		return PAD_ERROR_INVALID_HANDLE;
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
 	}
 	if (info == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
