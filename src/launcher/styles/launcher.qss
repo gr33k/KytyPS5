@@ -5,7 +5,20 @@ QListView#cfgs_grid {
 }
 
 QListView#cfgs_grid::item {
+    border: 1px solid transparent;
+    border-radius: 8px;
     padding: 8px;
+}
+
+QListView#cfgs_grid::item:hover:!selected {
+    background: palette(midlight);
+    border-color: palette(mid);
+}
+
+QListView#cfgs_grid::item:selected {
+    background: palette(highlight);
+    border-color: palette(highlight);
+    color: palette(highlighted-text);
 }
 
 GameListTreeWidget#cfgs_list {

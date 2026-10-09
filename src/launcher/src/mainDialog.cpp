@@ -236,7 +236,7 @@ void MainDialogPrivate::BuildChrome() {
 	connect(m_action_run, &QAction::triggered, this, &MainDialogPrivate::Run);
 
 	auto* action_add_folder = new QAction(
-	    window->style()->standardIcon(QStyle::SP_DirOpenIcon), tr("Add Game &Folder..."), window);
+	    QIcon(QStringLiteral(":/icons/folder.svg")), tr("Add Game &Folder..."), window);
 	action_add_folder->setShortcut(QKeySequence::Open);
 	action_add_folder->setStatusTip(tr("Manage game folders in global settings"));
 	connect(action_add_folder, &QAction::triggered, m_ui->widget,
@@ -518,8 +518,7 @@ void MainDialogPrivate::UpdateToolbarIcons() {
 		    m_main_dialog->style()->standardIcon(QStyle::SP_MediaPlay)));
 	}
 	if (m_action_add_folder != nullptr) {
-		m_action_add_folder->setIcon(tinted_icon(
-		    m_main_dialog->style()->standardIcon(QStyle::SP_DirOpenIcon)));
+		m_action_add_folder->setIcon(tinted(QStringLiteral(":/icons/folder.svg")));
 	}
 
 	if (m_action_rescan != nullptr) {
