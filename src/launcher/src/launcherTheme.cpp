@@ -17,20 +17,23 @@ bool     g_defaults_captured = false;
 
 QPalette DarkPalette() {
 	QPalette palette;
-	palette.setColor(QPalette::Window, QColor(53, 53, 53));
+	palette.setColor(QPalette::Window, QColor(30, 30, 32));
 	palette.setColor(QPalette::WindowText, Qt::white);
-	palette.setColor(QPalette::Base, QColor(25, 25, 25));
-	palette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
-	palette.setColor(QPalette::ToolTipBase, Qt::white);
+	palette.setColor(QPalette::Base, QColor(16, 16, 19));
+	palette.setColor(QPalette::AlternateBase, QColor(38, 38, 42));
+	palette.setColor(QPalette::ToolTipBase, QColor(32, 32, 34));
 	palette.setColor(QPalette::ToolTipText, Qt::white);
-	palette.setColor(QPalette::Text, Qt::white);
-	palette.setColor(QPalette::Button, QColor(53, 53, 53));
+	palette.setColor(QPalette::Text, QColor(225, 225, 225));
+	palette.setColor(QPalette::Button, QColor(45, 45, 48));
 	palette.setColor(QPalette::ButtonText, Qt::white);
 	palette.setColor(QPalette::BrightText, Qt::red);
-	palette.setColor(QPalette::Link, QColor(42, 130, 218));
-	palette.setColor(QPalette::Highlight, QColor(42, 130, 218));
+	palette.setColor(QPalette::Link, QColor(85, 170, 255));
+	palette.setColor(QPalette::Highlight, QColor(20, 120, 215));
 	palette.setColor(QPalette::HighlightedText, Qt::white);
-	palette.setColor(QPalette::PlaceholderText, QColor(127, 127, 127));
+	palette.setColor(QPalette::PlaceholderText, QColor(140, 140, 140));
+	palette.setColor(QPalette::Mid, QColor(55, 55, 60));
+	palette.setColor(QPalette::Midlight, QColor(70, 70, 76));
+	palette.setColor(QPalette::Shadow, Qt::black);
 
 	palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(127, 127, 127));
 	palette.setColor(QPalette::Disabled, QPalette::Text, QColor(127, 127, 127));

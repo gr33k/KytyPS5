@@ -143,6 +143,8 @@ private:
 	QAction*  m_action_open_folder   = nullptr;
 	QAction*  m_action_patches       = nullptr;
 	QAction*  m_action_trophies      = nullptr;
+	QAction*  m_action_trophy_overview = nullptr;
+	QAction*  m_action_grid_view     = nullptr;
 	QAction*  m_action_updates       = nullptr;
 	QAction*  m_action_check_startup = nullptr;
 	QMenu*    m_menu_columns         = nullptr;
@@ -285,6 +287,7 @@ void MainDialogPrivate::BuildChrome() {
 	action_trophy_overview->setStatusTip(tr("View trophies across all games"));
 	connect(action_trophy_overview, &QAction::triggered, m_ui->widget,
 	        &ConfigurationListWidget::ViewTrophyOverview);
+	m_action_trophy_overview = action_trophy_overview;
 
 	m_action_patches = new QAction(tr("&Cheats (experimental)..."), window);
 	m_action_patches->setStatusTip(tr("Edit cheats for the selected game"));
@@ -402,17 +405,16 @@ void MainDialogPrivate::BuildChrome() {
 	m_toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 	m_toolbar->addAction(m_action_run);
 	m_toolbar->addAction(action_rescan);
-	m_toolbar->addSeparator();
 	m_toolbar->addAction(action_add_folder);
 	m_toolbar->addSeparator();
 	m_toolbar->addAction(action_global);
-	m_toolbar->addAction(action_inputs);
-	m_toolbar->addSeparator();
 	m_toolbar->addAction(m_action_edit);
 	m_toolbar->addAction(m_action_delete);
 	m_toolbar->addSeparator();
+	m_toolbar->addAction(action_inputs);
+	m_toolbar->addSeparator();
 	m_toolbar->addAction(m_action_trophies);
-	m_toolbar->addAction(action_trophy_overview);
+	m_toolbar->addAction(m_action_trophy_overview);
 	m_toolbar->addSeparator();
 
 	auto* action_grid_view = new QAction(QIcon(QStringLiteral(":/icons/grid-view.svg")),
@@ -422,6 +424,7 @@ void MainDialogPrivate::BuildChrome() {
 	action_grid_view->setChecked(m_ui->widget->IsGridView());
 	connect(action_grid_view, &QAction::toggled, m_ui->widget,
 	        &ConfigurationListWidget::SetGridView);
+	m_action_grid_view = action_grid_view;
 	m_toolbar->addAction(action_grid_view);
 
 	auto* grid_size_slider = new QSlider(Qt::Horizontal, window);
@@ -515,6 +518,15 @@ void MainDialogPrivate::UpdateToolbarIcons() {
 	}
 	if (m_action_delete != nullptr) {
 		m_action_delete->setIcon(tinted(QStringLiteral(":/icons/remove-configuration.svg")));
+	}
+	if (m_action_trophies != nullptr) {
+		m_action_trophies->setIcon(tinted(QStringLiteral(":/icons/trophy.svg")));
+	}
+	if (m_action_trophy_overview != nullptr) {
+		m_action_trophy_overview->setIcon(tinted(QStringLiteral(":/icons/trophy.svg")));
+	}
+	if (m_action_grid_view != nullptr) {
+		m_action_grid_view->setIcon(tinted(QStringLiteral(":/icons/grid-view.svg")));
 	}
 }
 
