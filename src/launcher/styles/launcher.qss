@@ -21,6 +21,12 @@ QListView#cfgs_grid::item:selected {
     color: palette(highlighted-text);
 }
 
+QListView#cfgs_grid::item:focus {
+    background: transparent;
+    border-color: transparent;
+    outline: 0;
+}
+
 GameListTreeWidget#cfgs_list {
     background: transparent;
     border: 1px solid palette(mid);

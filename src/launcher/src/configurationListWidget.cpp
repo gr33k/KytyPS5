@@ -158,6 +158,9 @@ protected:
 	void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override {
 		const auto image_size = option->decorationSize;
 		QStyledItemDelegate::initStyleOption(option, index);
+		// The tile highlight (QSS ::item:selected) is the selection indicator;
+		// suppress the extra focus/text box painted on top of it.
+		option->state &= ~QStyle::State_HasFocus;
 		option->decorationSize      = image_size;
 		option->decorationPosition  = QStyleOptionViewItem::Top;
 		option->decorationAlignment = Qt::AlignCenter;
