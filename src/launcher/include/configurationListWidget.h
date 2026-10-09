@@ -31,6 +31,9 @@ public:
 	void SetRuntimeDirectory(const QString& directory) { m_runtime_directory = directory; }
 	void SetControllerPreview(ControllerPreview* preview) { m_controller_preview = preview; }
 
+	[[nodiscard]] bool IsGridView() const { return m_grid_view; }
+	[[nodiscard]] int  GridIconWidth() const { return m_grid_icon_width; }
+
 	[[nodiscard]] const ConfigurationItem* GetSelectedItem() const { return m_selected_item; }
 	ConfigurationItem*                     GetSelectedItem() { return m_selected_item; }
 
@@ -88,9 +91,6 @@ private:
 	void               ImportGameSettings(QWidget* parent);
 	void               ExportGameSettings(QWidget* parent) const;
 	[[nodiscard]] bool HasValidGameDirectory() const;
-
-	[[nodiscard]] bool IsGridView() const { return m_grid_view; }
-	[[nodiscard]] int  GridIconWidth() const { return m_grid_icon_width; }
 
 	ConfigurationItem*            m_selected_item = nullptr;
 	bool                          m_run_enabled   = true;

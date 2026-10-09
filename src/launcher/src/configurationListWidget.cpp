@@ -277,8 +277,6 @@ ConfigurationListWidget::ConfigurationListWidget(QWidget* parent)
 	connect(m_ui->cfgs_list, &QTreeWidget::itemDoubleClicked, this,
 	        &ConfigurationListWidget::list_itemDoubleClicked);
 	connect(m_ui->cfgs_list, &QTreeWidget::customContextMenuRequested, this,
-
-	connect(m_ui->cfgs_list, &QTreeWidget::customContextMenuRequested, this,
 	        [this](const QPoint& pos) { ShowContextMenu(m_ui->cfgs_list->itemAt(pos)); });
 	connect(m_ui->cfgs_grid, &QListView::doubleClicked, this, [this](const QModelIndex& index) {
 		list_itemDoubleClicked(m_ui->cfgs_list->itemFromIndex(index), GAME_NAME_COLUMN);
