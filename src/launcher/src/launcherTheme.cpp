@@ -23,23 +23,55 @@ QPalette DarkPalette() {
 	palette.setColor(QPalette::AlternateBase, QColor(38, 38, 42));
 	palette.setColor(QPalette::ToolTipBase, QColor(32, 32, 34));
 	palette.setColor(QPalette::ToolTipText, Qt::white);
-	palette.setColor(QPalette::Text, QColor(225, 225, 225));
-	palette.setColor(QPalette::Button, QColor(45, 45, 48));
+	palette.setColor(QPalette::Text, QColor(232, 232, 232));
+	palette.setColor(QPalette::Button, QColor(48, 48, 52));
 	palette.setColor(QPalette::ButtonText, Qt::white);
 	palette.setColor(QPalette::BrightText, Qt::red);
 	palette.setColor(QPalette::Link, QColor(85, 170, 255));
+	palette.setColor(QPalette::LinkVisited, QColor(150, 120, 220));
 	palette.setColor(QPalette::Highlight, QColor(20, 120, 215));
 	palette.setColor(QPalette::HighlightedText, Qt::white);
-	palette.setColor(QPalette::PlaceholderText, QColor(140, 140, 140));
-	palette.setColor(QPalette::Mid, QColor(55, 55, 60));
+	palette.setColor(QPalette::PlaceholderText, QColor(150, 150, 150));
+	palette.setColor(QPalette::Light, QColor(90, 90, 96));
 	palette.setColor(QPalette::Midlight, QColor(70, 70, 76));
+	palette.setColor(QPalette::Dark, QColor(12, 12, 14));
+	palette.setColor(QPalette::Mid, QColor(58, 58, 64));
 	palette.setColor(QPalette::Shadow, Qt::black);
 
-	palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(127, 127, 127));
-	palette.setColor(QPalette::Disabled, QPalette::Text, QColor(127, 127, 127));
-	palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(127, 127, 127));
+	palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(140, 140, 140));
+	palette.setColor(QPalette::Disabled, QPalette::Text, QColor(140, 140, 140));
+	palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(140, 140, 140));
 	palette.setColor(QPalette::Disabled, QPalette::Highlight, QColor(80, 80, 80));
-	palette.setColor(QPalette::Disabled, QPalette::HighlightedText, QColor(127, 127, 127));
+	palette.setColor(QPalette::Disabled, QPalette::HighlightedText, QColor(140, 140, 140));
+	return palette;
+}
+
+QPalette LightPalette(const QPalette& standard) {
+	QPalette palette = standard;
+	palette.setColor(QPalette::Window, Qt::white);
+	palette.setColor(QPalette::WindowText, QColor(20, 20, 20));
+	palette.setColor(QPalette::Base, Qt::white);
+	palette.setColor(QPalette::AlternateBase, QColor(245, 245, 245));
+	palette.setColor(QPalette::ToolTipBase, QColor(255, 255, 220));
+	palette.setColor(QPalette::ToolTipText, QColor(20, 20, 20));
+	palette.setColor(QPalette::Text, QColor(20, 20, 20));
+	palette.setColor(QPalette::Button, QColor(240, 240, 240));
+	palette.setColor(QPalette::ButtonText, QColor(20, 20, 20));
+	palette.setColor(QPalette::BrightText, Qt::red);
+	palette.setColor(QPalette::Link, QColor(0, 90, 200));
+	palette.setColor(QPalette::LinkVisited, QColor(110, 70, 180));
+	palette.setColor(QPalette::Highlight, QColor(0, 110, 205));
+	palette.setColor(QPalette::HighlightedText, Qt::white);
+	palette.setColor(QPalette::PlaceholderText, QColor(120, 120, 120));
+	palette.setColor(QPalette::Light, Qt::white);
+	palette.setColor(QPalette::Midlight, QColor(225, 225, 225));
+	palette.setColor(QPalette::Dark, QColor(160, 160, 160));
+	palette.setColor(QPalette::Mid, QColor(190, 190, 190));
+	palette.setColor(QPalette::Shadow, QColor(105, 105, 105));
+
+	palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(140, 140, 140));
+	palette.setColor(QPalette::Disabled, QPalette::Text, QColor(140, 140, 140));
+	palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(140, 140, 140));
 	return palette;
 }
 
@@ -98,12 +130,7 @@ void ApplyTheme(Theme theme) {
 			break;
 		case Theme::Light: {
 			application->setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
-			application->setPalette(application->style()->standardPalette());
-			auto light = application->palette();
-			light.setColor(QPalette::Window, Qt::white);
-			light.setColor(QPalette::Base, Qt::white);
-			light.setColor(QPalette::AlternateBase, QColor(245, 245, 245));
-			application->setPalette(light);
+			application->setPalette(LightPalette(application->style()->standardPalette()));
 			break;
 		}
 		case Theme::System:
