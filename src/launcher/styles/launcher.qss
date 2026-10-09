@@ -131,10 +131,6 @@ QMenu::item:selected {
     color: palette(highlighted-text);
 }
 
-QMenu::item:disabled {
-    color: palette(mid);
-}
-
 QMenu::separator {
     background: palette(mid);
     height: 1px;
@@ -164,10 +160,6 @@ QToolBar QToolButton:hover {
 
 QToolBar QToolButton:pressed {
     background: palette(midlight);
-}
-
-QToolBar QToolButton:disabled {
-    color: palette(mid);
 }
 
 QToolBar::separator {

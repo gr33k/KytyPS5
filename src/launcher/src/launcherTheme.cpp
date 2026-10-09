@@ -96,10 +96,16 @@ void ApplyTheme(Theme theme) {
 			application->setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
 			application->setPalette(DarkPalette());
 			break;
-		case Theme::Light:
+		case Theme::Light: {
 			application->setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
 			application->setPalette(application->style()->standardPalette());
+			auto light = application->palette();
+			light.setColor(QPalette::Window, Qt::white);
+			light.setColor(QPalette::Base, Qt::white);
+			light.setColor(QPalette::AlternateBase, QColor(245, 245, 245));
+			application->setPalette(light);
 			break;
+		}
 		case Theme::System:
 			if (auto* style = QStyleFactory::create(g_default_style); style != nullptr) {
 				application->setStyle(style);

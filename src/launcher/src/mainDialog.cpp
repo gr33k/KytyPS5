@@ -138,6 +138,7 @@ private:
 	QAction*  m_action_global        = nullptr;
 	QAction*  m_action_inputs        = nullptr;
 	QAction*  m_action_run           = nullptr;
+	QAction*  m_action_add_folder    = nullptr;
 	QAction*  m_action_edit          = nullptr;
 	QAction*  m_action_delete        = nullptr;
 	QAction*  m_action_open_folder   = nullptr;
@@ -240,6 +241,7 @@ void MainDialogPrivate::BuildChrome() {
 	action_add_folder->setStatusTip(tr("Manage game folders in global settings"));
 	connect(action_add_folder, &QAction::triggered, m_ui->widget,
 	        &ConfigurationListWidget::edit_global_settings);
+	m_action_add_folder = action_add_folder;
 
 	auto* action_rescan = new QAction(QIcon(QStringLiteral(":/icons/refresh.svg")),
 	                                  tr("&Rescan Game List"), window);
@@ -503,6 +505,22 @@ void MainDialogPrivate::UpdateToolbarIcons() {
         painter.fillRect(pixmap.rect(), color);
         return QIcon(pixmap);
 	};
+	const auto tinted_icon = [&](const QIcon& source) {
+        auto pixmap = source.pixmap(icon_size, dpr);
+        QPainter painter(&pixmap);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(pixmap.rect(), color);
+        return QIcon(pixmap);
+	};
+
+	if (m_action_run != nullptr) {
+		m_action_run->setIcon(tinted_icon(
+		    m_main_dialog->style()->standardIcon(QStyle::SP_MediaPlay)));
+	}
+	if (m_action_add_folder != nullptr) {
+		m_action_add_folder->setIcon(tinted_icon(
+		    m_main_dialog->style()->standardIcon(QStyle::SP_DirOpenIcon)));
+	}
 
 	if (m_action_rescan != nullptr) {
 		m_action_rescan->setIcon(tinted(QStringLiteral(":/icons/refresh.svg")));
