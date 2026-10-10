@@ -19,6 +19,8 @@
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <bit>
 #include <limits>
 #include <span>
@@ -181,12 +183,24 @@ static vk::BlendOp GetBlendOp(uint32_t op) {
 static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>& descriptor_bindings,
                               const ShaderRecompiler::IR::CompiledShaderInfo& program,
                               vk::ShaderStageFlagBits              stage) {
+	static std::atomic_uint layout_log_count {0};
+	const bool              log_layout =
+	    layout_log_count.fetch_add(1, std::memory_order_relaxed) < 128;
 	for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
 		const auto index = std::countr_zero(mask);
 		const auto kind = static_cast<ShaderRecompiler::IR::DescriptorBindingKind>(index);
 		descriptor_bindings.push_back(
 		    {ShaderRecompiler::IR::NativeBinding(program.stage, kind), NativeDescriptorType(kind),
 		     program.bindings.descriptor_counts[index], stage, nullptr});
+		if (log_layout) {
+			std::printf("LayoutBinding: stage=0x%x hash=0x%016llx kind=%u count=%u\n",
+			            static_cast<uint32_t>(stage),
+			            static_cast<unsigned long long>(program.shader_hash),
+			            static_cast<uint32_t>(index), program.bindings.descriptor_counts[index]);
+		}
+	}
+	if (log_layout) {
+		std::fflush(stdout);
 	}
 }
 
