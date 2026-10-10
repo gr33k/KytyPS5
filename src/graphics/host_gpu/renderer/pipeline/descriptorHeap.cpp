@@ -5,6 +5,9 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
+#include <atomic>
+#include <cstdio>
+
 namespace Libs::Graphics {
 namespace {
 
@@ -54,7 +57,22 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 
 	m_sets.clear();
 	auto& fresh_batch = m_sets[layout];
-	EXIT_IF(!Allocate(layout, fresh_batch));
+	if (!Allocate(layout, fresh_batch)) {
+		// A reset pool can retain unusable state on some drivers, failing
+		// allocation despite adequate capacity. Fall back to a brand-new pool
+		// before giving up.
+		static std::atomic_uint pool_retry_count {0};
+		if (pool_retry_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+			std::printf("DescriptorHeap: fresh-pool allocate failed, retrying with new pool\n");
+			std::fflush(stdout);
+		}
+		m_pending_pools.emplace_back(m_current_pool, m_master_semaphore.CurrentTick());
+		CreateDescriptorPool();
+		m_sets.clear();
+		auto& retry_batch = m_sets[layout];
+		EXIT_IF(!Allocate(layout, retry_batch));
+		return retry_batch.sets[--retry_batch.size];
+	}
 	return fresh_batch.sets[--fresh_batch.size];
 }
 
