@@ -192,6 +192,15 @@ static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>& descr
 		descriptor_bindings.push_back(
 		    {ShaderRecompiler::IR::NativeBinding(program.stage, kind), NativeDescriptorType(kind),
 		     program.bindings.descriptor_counts[index], stage, nullptr});
+		// Pool-busting counts are always worth one line: a single binding over
+		// 1024 descriptors cannot fit the sampler/storage-image pools.
+		if (program.bindings.descriptor_counts[index] > 1024) {
+			std::printf("LayoutBinding HUGE: stage=0x%x hash=0x%016llx kind=%u count=%u\n",
+			            static_cast<uint32_t>(stage),
+			            static_cast<unsigned long long>(program.shader_hash),
+			            static_cast<uint32_t>(index), program.bindings.descriptor_counts[index]);
+			std::fflush(stdout);
+		}
 		if (log_layout) {
 			std::printf("LayoutBinding: stage=0x%x hash=0x%016llx kind=%u count=%u\n",
 			            static_cast<uint32_t>(stage),
