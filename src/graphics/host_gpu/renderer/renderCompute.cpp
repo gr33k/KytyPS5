@@ -577,6 +577,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	SplitOversizedSubmit();
+}
+
+void RenderExecutor::SplitOversizedSubmit() {
+	// Batches of hundreds of dispatches in one vkQueueSubmit hang some drivers;
+	// normal phases record an order of magnitude fewer (verified on RE Engine).
+	static constexpr uint32_t kMaxDispatchesPerSubmit = 64;
+	if (++m_dispatches_since_submit >= kMaxDispatchesPerSubmit) {
+		m_dispatches_since_submit = 0;
+		m_context.GetCommandScheduler().Flush();
+	}
 }
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
@@ -681,6 +692,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	SplitOversizedSubmit();
 }
 
 } // namespace Libs::Graphics

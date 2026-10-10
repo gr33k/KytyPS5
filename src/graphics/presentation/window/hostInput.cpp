@@ -218,6 +218,7 @@ uint32_t DefaultKeyboardButton(int key_code) {
 		case SDLK_DOWN: return Controller::PAD_BUTTON_DOWN;
 		case SDLK_RIGHT: return Controller::PAD_BUTTON_RIGHT;
 		case SDLK_J: return Controller::PAD_BUTTON_CROSS;
+		case SDLK_X: return Controller::PAD_BUTTON_CROSS;
 		case SDLK_I: return Controller::PAD_BUTTON_TRIANGLE;
 		case SDLK_K: return Controller::PAD_BUTTON_SQUARE;
 		case SDLK_L: return Controller::PAD_BUTTON_CIRCLE;

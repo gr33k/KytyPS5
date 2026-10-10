@@ -208,10 +208,15 @@ private:
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
 	                                              CommandBuffer& command, uint32_t group_x,
 	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);
+	// Flushes the command buffer once enough dispatches pile up: oversized
+	// submits (hundreds of dispatches) hang some drivers (TDR). Healthy
+	// phases stay far below the cap, so only spikes are split.
+	void SplitOversizedSubmit();
 
 	RenderContext&                        m_context;
 	GraphicsBindings                     m_graphics_bindings;
 	PreparedBindings                     m_compute_bindings;
+	uint32_t                             m_dispatches_since_submit = 0;
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
