@@ -392,6 +392,28 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			std::fflush(stdout);
 		}
 	}
+	if (resources.specialization_reads.empty() &&
+	    (TryConsumeComputeMetaClear(input_info, buffer) ||
+	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
+	                                 thread_group_z, mode))) {
+		ResetBindings();
+		return;
+	}
+
+	const bool large_workgroup =
+	    (input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2] >= 512);
+	const bool                   has_sampler = !program.info.samplers.empty();
+	static std::atomic<uint32_t> dispatch_log_count {0};
+	// Always detail-log the two kernels dominating TDR death batches.
+	const bool tdr_suspect = program.shader_hash == 0xdd7d9b716cfe5abaull ||
+	                         program.shader_hash == 0x0b3ee2d73a90eeb6ull;
+	static std::atomic<uint32_t> suspect_log_count {0};
+	const bool suspect_sample =
+	    tdr_suspect && (suspect_log_count.load(std::memory_order_relaxed) < 30 ||
+	                    (submit_id % 100 == 0 && suspect_log_count.load(std::memory_order_relaxed) < 3000));
+	if (suspect_sample) {
+		suspect_log_count.fetch_add(1, std::memory_order_relaxed);
+	}
 	// TEMP-DIAG (maiden TDR): one-line binding signature for every suspect
 	// dispatch, so the death batch can be compared against healthy batches.
 	// Flushed every line because aborts lose buffered output. Remove once
@@ -424,28 +446,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		            thread_group_y, thread_group_z, program.info.buffers.size(),
 		            program.info.images.size(), static_cast<unsigned long long>(sig));
 		std::fflush(stdout);
-	}
-	if (resources.specialization_reads.empty() &&
-	    (TryConsumeComputeMetaClear(input_info, buffer) ||
-	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
-	                                 thread_group_z, mode))) {
-		ResetBindings();
-		return;
-	}
-
-	const bool large_workgroup =
-	    (input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2] >= 512);
-	const bool                   has_sampler = !program.info.samplers.empty();
-	static std::atomic<uint32_t> dispatch_log_count {0};
-	// Always detail-log the two kernels dominating TDR death batches.
-	const bool tdr_suspect = program.shader_hash == 0xdd7d9b716cfe5abaull ||
-	                         program.shader_hash == 0x0b3ee2d73a90eeb6ull;
-	static std::atomic<uint32_t> suspect_log_count {0};
-	const bool suspect_sample =
-	    tdr_suspect && (suspect_log_count.load(std::memory_order_relaxed) < 30 ||
-	                    (submit_id % 100 == 0 && suspect_log_count.load(std::memory_order_relaxed) < 3000));
-	if (suspect_sample) {
-		suspect_log_count.fetch_add(1, std::memory_order_relaxed);
 	}
 	const bool detail_log_sample =
 	    ((large_workgroup || has_sampler) &&
