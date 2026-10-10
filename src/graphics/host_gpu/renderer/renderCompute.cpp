@@ -392,6 +392,39 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			std::fflush(stdout);
 		}
 	}
+	// TEMP-DIAG (maiden TDR): one-line binding signature for every suspect
+	// dispatch, so the death batch can be compared against healthy batches.
+	// Flushed every line because aborts lose buffered output. Remove once
+	// the poison binding combo is identified.
+	if (tdr_suspect) {
+		uint64_t sig = 1469598103934665603ull;
+		const auto mix = [&](uint64_t v) {
+			sig ^= v;
+			sig *= 1099511628211ull;
+		};
+		mix(program.shader_hash);
+		mix(thread_group_x);
+		mix(thread_group_y);
+		mix(thread_group_z);
+		for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+			const auto r = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
+			mix(r.Base48());
+			mix((static_cast<uint64_t>(r.NumRecords()) << 32) | r.Stride());
+		}
+		for (uint32_t i = 0; i < program.info.images.size(); i++) {
+			const auto r = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[i]);
+			mix(r.Base40());
+			mix((static_cast<uint64_t>(r.Format()) << 32) |
+			    (static_cast<uint64_t>(r.Width5()) << 16) | r.Height5());
+		}
+		std::printf("SUSPECTSIG: submit=%llu hash=0x%016llx groups=%ux%ux%u "
+		            "nb=%zu ni=%zu sig=0x%016llx\n",
+		            static_cast<unsigned long long>(submit_id),
+		            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
+		            thread_group_y, thread_group_z, program.info.buffers.size(),
+		            program.info.images.size(), static_cast<unsigned long long>(sig));
+		std::fflush(stdout);
+	}
 	if (resources.specialization_reads.empty() &&
 	    (TryConsumeComputeMetaClear(input_info, buffer) ||
 	     TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
