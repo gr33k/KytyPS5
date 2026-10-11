@@ -40,6 +40,7 @@ DescriptorHeap::~DescriptorHeap() {
 
 vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 	KYTY_PROFILER_FUNCTION();
+	std::lock_guard lock(m_mutex);
 	EXIT_IF(layout == nullptr);
 
 	auto& batch = m_sets[layout];

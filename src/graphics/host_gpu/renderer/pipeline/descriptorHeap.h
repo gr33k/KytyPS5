@@ -6,6 +6,7 @@
 
 #include <array>
 #include <deque>
+#include <mutex>
 #include <unordered_map>
 
 namespace Libs::Graphics {
@@ -38,6 +39,9 @@ private:
 	vk::DescriptorPool                                  m_current_pool = nullptr;
 	std::deque<std::pair<vk::DescriptorPool, uint64_t>> m_pending_pools;
 	std::unordered_map<vk::DescriptorSetLayout, Batch>  m_sets;
+	// Commits can race between the main thread and the priority-operations
+	// thread; every shared-pool mutation goes through Commit under lock.
+	std::mutex                                          m_mutex;
 };
 
 } // namespace Libs::Graphics
