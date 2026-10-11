@@ -13,8 +13,8 @@ namespace {
 
 constexpr uint32_t   DescriptorHeapCount = 1024;
 constexpr std::array DescriptorPoolSizes = {
-    vk::DescriptorPoolSize {vk::DescriptorType::eStorageBuffer, 8192},
-    vk::DescriptorPoolSize {vk::DescriptorType::eSampledImage, 8192},
+    vk::DescriptorPoolSize {vk::DescriptorType::eStorageBuffer, 32768},
+    vk::DescriptorPoolSize {vk::DescriptorType::eSampledImage, 32768},
     // Single layouts can bind hundreds of storage images/samplers in total
     // across many bindings (e.g. RE Engine streaming kernels); keep every
     // pool well above any one layout's summed demand so a fresh pool can

@@ -23,7 +23,10 @@ public:
 	[[nodiscard]] vk::DescriptorSet Commit(vk::DescriptorSetLayout layout);
 
 private:
-	static constexpr uint32_t DescriptorSetBatch = 32;
+	// Small batches waste less pool space per layout (a 32-set batch of a
+	// 1k-descriptor layout reserves 32k descriptors), so turnover - and
+	// its GPU-wait hitch - happens less often under backlog.
+	static constexpr uint32_t DescriptorSetBatch = 8;
 
 	struct Batch {
 		std::array<vk::DescriptorSet, DescriptorSetBatch> sets {};
