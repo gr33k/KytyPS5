@@ -328,6 +328,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// skip_cs_hashes.txt next to the executable for triage.
 	static constexpr uint64_t kHungComputeHashes[] = {0x5d7ccd5dbcdd0c9full};
 	static std::vector<uint64_t> extra_hashes;
+	// Conditional entries: {hash, min_groups} skips only dispatches whose
+	// x*y*z exceeds min_groups (file syntax HASH>MIN, MIN decimal).
+	static std::vector<std::pair<uint64_t, uint64_t>> extra_hash_limits;
 	static std::once_flag         hashes_once;
 	std::call_once(hashes_once, [] {
 		Common::File file;
@@ -352,9 +355,26 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			if (word.empty()) {
 				continue;
 			}
+			const auto gt = word.find('>');
+			const std::string hash_part =
+			    (gt == std::string::npos) ? word : word.substr(0, gt);
 			char*        end  = nullptr;
-			const uint64_t hash = std::strtoull(word.c_str(), &end, 16);
-			if (end != word.c_str() && *end == '\0') {
+			const uint64_t hash = std::strtoull(hash_part.c_str(), &end, 16);
+			if (end == hash_part.c_str()) {
+				continue;
+			}
+			if (gt != std::string::npos) {
+				if (*end != '\0') {
+					continue;
+				}
+				char*          lim_end = nullptr;
+				const uint64_t limit =
+				    std::strtoull(word.c_str() + gt + 1, &lim_end, 10);
+				if (lim_end == word.c_str() + gt + 1 || *lim_end != '\0') {
+					continue;
+				}
+				extra_hash_limits.emplace_back(hash, limit);
+			} else if (*end == '\0') {
 				extra_hashes.push_back(hash);
 			}
 		}
@@ -379,6 +399,16 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		if (program.shader_hash == hung) {
 			ResetBindings();
 			return;
+		}
+	}
+	{
+		const uint64_t groups = static_cast<uint64_t>(thread_group_x) * thread_group_y *
+		                        thread_group_z;
+		for (const auto& [hung, min_groups]: extra_hash_limits) {
+			if (program.shader_hash == hung && groups > min_groups) {
+				ResetBindings();
+				return;
+			}
 		}
 	}
 	// TEMP-DIAG: insane dispatch sizes hang the GPU (TDR) with no other trace.
