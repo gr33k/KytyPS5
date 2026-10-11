@@ -537,6 +537,25 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		ResetBindings();
 		return;
 	}
+	// TEMP-DIAG (maiden TDR): dd7d hangs on some inputs but not others; hash
+	// the final push dwords per dispatch so the death batch can be compared
+	// against healthy batches. Remove once the poison input is identified.
+	if (program.shader_hash == 0xdd7d9b716cfe5abaull && !bindings.shader_data.empty()) {
+		uint64_t h = 1469598103934665603ull;
+		for (const auto dw: bindings.shader_data) {
+			h ^= dw;
+			h *= 1099511628211ull;
+		}
+		std::printf("PUSHHASH: submit=%llu groups=%ux%ux%u ndw=%zu push=0x%016llx "
+		            "dw0=%u dw1=%u dw2=%u dw3=%u\n",
+		            static_cast<unsigned long long>(submit_id), thread_group_x,
+		            thread_group_y, thread_group_z, bindings.shader_data.size(),
+		            static_cast<unsigned long long>(h), bindings.shader_data[0],
+		            bindings.shader_data.size() > 1 ? bindings.shader_data[1] : 0u,
+		            bindings.shader_data.size() > 2 ? bindings.shader_data[2] : 0u,
+		            bindings.shader_data.size() > 3 ? bindings.shader_data[3] : 0u);
+		std::fflush(stdout);
+	}
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =
