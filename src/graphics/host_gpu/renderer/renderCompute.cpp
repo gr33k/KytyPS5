@@ -378,8 +378,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 				extra_hashes.push_back(hash);
 			}
 		}
-		if (!extra_hashes.empty()) {
-			std::printf("DispatchDirect: loaded %zu extra skip hashes\n", extra_hashes.size());
+		if (!extra_hashes.empty() || !extra_hash_limits.empty()) {
+			std::printf("DispatchDirect: loaded %zu extra skip hashes + %zu size-limited\n",
+			            extra_hashes.size(), extra_hash_limits.size());
 			std::fflush(stdout);
 		}
 	});
