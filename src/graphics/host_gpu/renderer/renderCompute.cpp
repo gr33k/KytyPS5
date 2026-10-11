@@ -453,6 +453,49 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	if (suspect_sample) {
 		suspect_log_count.fetch_add(1, std::memory_order_relaxed);
 	}
+	// TEMP-DIAG (maiden TDR): hash leading buffer contents for the suspect
+	// kernel: hash/groups/push are all identical across healthy and death
+	// batches, so the trigger must be in buffer contents (streaming data).
+	// ObtainBuffer runs before PrepareBindings (safe order: prepare
+	// re-resolves afterward). Remove once the poison input is identified.
+	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
+	    program.info.buffers.size() >= 1) {
+		uint64_t bh[2] = {0, 0};
+		for (uint32_t bi = 0; bi < 2 && bi < program.info.buffers.size(); bi++) {
+			const auto r =
+			    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[bi]);
+			const uint64_t sz = r.GetSize();
+			if (r.Base48() == 0 || sz == 0) {
+				continue;
+			}
+			const auto [cbuf, coff] = m_context.GetBufferCache().ObtainBuffer(
+			    r.Base48(), static_cast<uint32_t>(sz > 256 ? 256 : sz), false);
+			if (cbuf == nullptr) {
+				continue;
+			}
+			const auto mapped = cbuf->Mapped();
+			if (coff >= mapped.size()) {
+				continue;
+			}
+			const auto* dwords = reinterpret_cast<const uint32_t*>(mapped.data() + coff);
+			const size_t n =
+			    (mapped.size() - coff) / sizeof(uint32_t) > 64
+			        ? 64
+			        : (mapped.size() - coff) / sizeof(uint32_t);
+			uint64_t h = 1469598103934665603ull;
+			for (size_t k = 0; k < n; k++) {
+				h ^= dwords[k];
+				h *= 1099511628211ull;
+			}
+			bh[bi] = h;
+		}
+		std::printf("BUFHASH: submit=%llu groups=%ux%ux%u bh0=0x%016llx bh1=0x%016llx\n",
+		            static_cast<unsigned long long>(submit_id), thread_group_x,
+		            thread_group_y, thread_group_z,
+		            static_cast<unsigned long long>(bh[0]),
+		            static_cast<unsigned long long>(bh[1]));
+		std::fflush(stdout);
+	}
 	// TEMP-DIAG (maiden TDR): one-line binding signature for every suspect
 	// dispatch, so the death batch can be compared against healthy batches.
 	// Flushed every line because aborts lose buffered output. Remove once
