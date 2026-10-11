@@ -76,7 +76,31 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		CreateDescriptorPool();
 		m_sets.clear();
 		auto& retry_batch = m_sets[layout];
-		const bool retry_ok = Allocate(layout, retry_batch);
+		bool retry_ok = Allocate(layout, retry_batch);
+		if (!retry_ok) {
+			// Last resort: the driver reports even brand-new pools as fragmented
+			// (observed on amdvlk after hundreds of thousands of submits).
+			// Drain the GPU, tear down every pool, and start over. A
+			// multi-second hitch beats killing the game.
+			std::printf("DescriptorHeap: draining GPU and rebuilding all pools\n");
+			std::fflush(stdout);
+			const uint64_t last_tick = m_master_semaphore.CurrentTick();
+			if (last_tick > 0) {
+				m_master_semaphore.Wait(last_tick - 1);
+			}
+			for (const auto& [pool, tick]: m_pending_pools) {
+				m_graphics.device.destroyDescriptorPool(pool, nullptr);
+			}
+			m_pending_pools.clear();
+			m_graphics.device.destroyDescriptorPool(m_current_pool, nullptr);
+			CreateDescriptorPool();
+			m_sets.clear();
+			auto& rebuilt_batch = m_sets[layout];
+			retry_ok            = Allocate(layout, rebuilt_batch);
+			if (retry_ok) {
+				return rebuilt_batch.sets[--rebuilt_batch.size];
+			}
+		}
 		if (!retry_ok) {
 			std::printf("DescriptorHeap: FATAL layout=%p pending_pools=%zu batch_alloc=%u\n",
 			            static_cast<void*>(layout),
