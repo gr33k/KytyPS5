@@ -315,12 +315,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
-	// One line per dispatch (printf so it lands in the run log): submit ids
-	// in submit-failure reports map back to the exact shader hash here.
-	std::printf("DispatchDirect: submit=%llu shader_hash=0x%016llx groups=%ux%ux%u mode=0x%x wave=%u\n",
-	            static_cast<unsigned long long>(submit_id),
-	            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
-	            thread_group_y, thread_group_z, mode, program.wave_size);
 	// Known-hang compute shaders: skipping lets the game continue instead of
 	// hanging the GPU (TDR). 0x5d7ccd5dbcdd0c9f hangs amdvlk on first dispatch
 	// in RE Engine streaming loads; the game runs fine without its results.
@@ -407,11 +401,25 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		                        thread_group_z;
 		for (const auto& [hung, min_groups]: extra_hash_limits) {
 			if (program.shader_hash == hung && groups > min_groups) {
+				static std::atomic_uint limit_logged {0};
+				if (limit_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+					std::printf("DispatchDirect: size-skipped hash=0x%016llx groups=%ux%ux%u\n",
+					            static_cast<unsigned long long>(program.shader_hash),
+					            thread_group_x, thread_group_y, thread_group_z);
+					std::fflush(stdout);
+				}
 				ResetBindings();
 				return;
 			}
 		}
 	}
+	// One line per dispatch (printf so it lands in the run log): submit ids
+	// in submit-failure reports map back to the exact shader hash here.
+	// Placed after the skip checks so only executed dispatches are logged.
+	std::printf("DispatchDirect: submit=%llu shader_hash=0x%016llx groups=%ux%ux%u mode=0x%x wave=%u\n",
+	            static_cast<unsigned long long>(submit_id),
+	            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
+	            thread_group_y, thread_group_z, mode, program.wave_size);
 	// TEMP-DIAG: insane dispatch sizes hang the GPU (TDR) with no other trace.
 	{
 		const uint64_t total = static_cast<uint64_t>(thread_group_x) * thread_group_y * thread_group_z;
