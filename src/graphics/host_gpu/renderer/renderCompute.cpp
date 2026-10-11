@@ -493,8 +493,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+	                      std::span {&descriptor_stage, 1u})) {
+		ResetBindings();
+		return;
+	}
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =
@@ -668,8 +671,11 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	RebindBuffers(bindings);
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+	                      std::span {&descriptor_stage, 1u})) {
+		ResetBindings();
+		return;
+	}
 	const auto vk_buffer = buffer.Handle();
 	const bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage) ||

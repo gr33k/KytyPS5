@@ -102,12 +102,17 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 			}
 		}
 		if (!retry_ok) {
-			std::printf("DescriptorHeap: FATAL layout=%p pending_pools=%zu batch_alloc=%u\n",
-			            static_cast<void*>(layout),
-			            m_pending_pools.size() + 1, failed_alloc);
-			std::fflush(stdout);
+			// Give up on this draw/dispatch instead of killing the game: the
+			// caller skips it (logged, rate-limited). Observed on amdvlk where
+			// fresh pools can report fragmented after heavy turnover.
+			static std::atomic_uint skip_log_count {0};
+			if (skip_log_count.fetch_add(1, std::memory_order_relaxed) < 32) {
+				std::printf("DescriptorHeap: no set for layout=%p, skipping draw/dispatch\n",
+				            static_cast<void*>(layout));
+				std::fflush(stdout);
+			}
+			return nullptr;
 		}
-		EXIT_IF(!retry_ok);
 		return retry_batch.sets[--retry_batch.size];
 	}
 	return fresh_batch.sets[--fresh_batch.size];

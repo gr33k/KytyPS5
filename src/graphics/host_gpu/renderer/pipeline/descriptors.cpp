@@ -911,7 +911,7 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	}
 }
 
-void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
+bool RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     vk::PipelineBindPoint              pipeline_bind_point,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
@@ -1147,6 +1147,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			                               m_descriptor_writes.data());
 		} else {
 			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
+			if (set == nullptr) {
+				return false;
+			}
 			for (auto& write: m_descriptor_writes) {
 				write.dstSet = set;
 			}
@@ -1157,6 +1160,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			                             0, nullptr);
 		}
 	}
+	return true;
 }
 
 } // namespace Libs::Graphics
