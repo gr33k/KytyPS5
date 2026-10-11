@@ -52,12 +52,17 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 	}
 
 	m_pending_pools.emplace_back(m_current_pool, m_master_semaphore.CurrentTick());
-	if (const auto& [pool, tick] = m_pending_pools.front(); m_master_semaphore.IsFree(tick)) {
+	{
+		auto& [pool, tick] = m_pending_pools.front();
+		// Prefer reusing a rested pool over creating a new one: pools created
+		// while the GPU is backed up can report fragmented on first use
+		// (observed on amdvlk). A short hitch beats a wedged pool.
+		if (!m_master_semaphore.IsFree(tick)) {
+			m_master_semaphore.Wait(tick);
+		}
 		m_current_pool = pool;
 		m_pending_pools.pop_front();
 		EXIT_IF(m_graphics.device.resetDescriptorPool(m_current_pool, {}) != vk::Result::eSuccess);
-	} else {
-		CreateDescriptorPool();
 	}
 
 	const uint32_t failed_alloc = batch.allocation;
