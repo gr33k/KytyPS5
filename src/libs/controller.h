@@ -69,6 +69,9 @@ inline int controller_get_axis(int min, int max, int value) {
 void Connect(int id);
 void Disconnect(int id);
 void SetButton(int id, uint32_t button, bool down);
+// Latched on the first Cross press (game start); lets the renderer skip
+// kernels that are safe in menus but hang in gameplay (RE Engine Maiden).
+bool GameStartPressed();
 void SetAxis(int id, Axis axis, int value);
 void SetRightStick(int id, int x, int y);
 void SetTouchPad(int id, int finger, bool down, float x, float y);

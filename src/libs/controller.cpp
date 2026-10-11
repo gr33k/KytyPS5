@@ -911,8 +911,19 @@ void Disconnect(int id) {
 	g_controller->Disconnect(id);
 }
 
+namespace {
+std::atomic_bool g_game_start_pressed {false};
+}
+
 void SetButton(int id, uint32_t button, bool down) {
 	g_controller->Button(id, button, down);
+	if (down && button == PAD_BUTTON_CROSS) {
+		g_game_start_pressed.store(true, std::memory_order_release);
+	}
+}
+
+bool GameStartPressed() {
+	return g_game_start_pressed.load(std::memory_order_acquire);
 }
 
 void SetAxis(int id, Axis axis, int value) {

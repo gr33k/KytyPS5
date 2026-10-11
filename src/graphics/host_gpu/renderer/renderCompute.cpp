@@ -6,6 +6,7 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "libs/controller.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -389,6 +390,19 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			ResetBindings();
 			return;
 		}
+	}
+	// RE Engine Maiden: this kernel renders menus fine but hangs the GPU in
+	// the post-start streaming scene (data-dependent). Run it until the user
+	// presses Cross, then skip it so the game continues (dark but alive).
+	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
+	    Libs::Controller::GameStartPressed()) {
+		static std::atomic_uint start_skip_logged {0};
+		if (start_skip_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
+			std::printf("DispatchDirect: post-start skipping 0xdd7d9b716cfe5aba\n");
+			std::fflush(stdout);
+		}
+		ResetBindings();
+		return;
 	}
 	for (const auto hung : extra_hashes) {
 		if (program.shader_hash == hung) {
