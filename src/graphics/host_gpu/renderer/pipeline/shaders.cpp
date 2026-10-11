@@ -229,6 +229,25 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 	create.pBindings    = bindings.data();
 	EXIT_IF(graphics.device.createDescriptorSetLayout(
 	            &create, nullptr, &pipeline.descriptor_set_layout) != vk::Result::eSuccess);
+	// TEMP-DIAG (maiden descriptor fatal): one line per layout with summed
+	// per-type totals, so a pool-exhaustion death can be matched to the
+	// layout that busts the pool. Remove once the oversized layout is found.
+	{
+		uint32_t n_buf = 0, n_simg = 0, n_simg_st = 0, n_smp = 0;
+		for (const auto& binding: bindings) {
+			switch (binding.descriptorType) {
+			case vk::DescriptorType::eStorageBuffer: n_buf += binding.descriptorCount; break;
+			case vk::DescriptorType::eSampledImage: n_simg += binding.descriptorCount; break;
+			case vk::DescriptorType::eStorageImage: n_simg_st += binding.descriptorCount; break;
+			case vk::DescriptorType::eSampler: n_smp += binding.descriptorCount; break;
+			default: break;
+			}
+		}
+		std::printf("LayoutTotals: layout=%p push=%d nbuf=%u nimg=%u nstoreimg=%u nsmp=%u\n",
+		            static_cast<void*>(pipeline.descriptor_set_layout),
+		            pipeline.uses_push_descriptors ? 1 : 0, n_buf, n_simg, n_simg_st, n_smp);
+		std::fflush(stdout);
+	}
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

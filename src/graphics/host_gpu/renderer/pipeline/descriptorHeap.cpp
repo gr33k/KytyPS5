@@ -59,6 +59,7 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		CreateDescriptorPool();
 	}
 
+	const uint32_t failed_alloc = batch.allocation;
 	m_sets.clear();
 	auto& fresh_batch = m_sets[layout];
 	if (!Allocate(layout, fresh_batch)) {
@@ -78,7 +79,7 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		if (!retry_ok) {
 			std::printf("DescriptorHeap: FATAL layout=%p pending_pools=%zu batch_alloc=%u\n",
 			            static_cast<void*>(layout),
-			            m_pending_pools.size() + 1, batch.allocation);
+			            m_pending_pools.size() + 1, failed_alloc);
 			std::fflush(stdout);
 		}
 		EXIT_IF(!retry_ok);
