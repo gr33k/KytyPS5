@@ -107,6 +107,10 @@ bool DescriptorHeap::Allocate(vk::DescriptorSetLayout layout, Batch& batch) {
 		EXIT_IF(result != vk::Result::eErrorOutOfPoolMemory &&
 		        result != vk::Result::eErrorFragmentedPool);
 		if (batch.allocation == 1) {
+			std::printf("DescriptorHeap: alloc failed layout=%p count=%u result=%d pool=%p\n",
+			            static_cast<void*>(layout), allocate.descriptorSetCount,
+			            static_cast<int>(result), static_cast<void*>(m_current_pool));
+			std::fflush(stdout);
 			return false;
 		}
 		batch.allocation /= 2;
