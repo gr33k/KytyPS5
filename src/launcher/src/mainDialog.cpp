@@ -196,15 +196,9 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(main_dialog, &MainDialog::Resize, this,
 	        [this]() { SaveWindowState(); });
 
-	connect(m_ui->check_updates_link, &QLabel::linkActivated, this,
-	        [this](const QString&) { m_update_checker->Check(true); });
-	connect(m_update_checker, &UpdateChecker::CheckingChanged, m_ui->check_updates_link,
-	        &QLabel::setDisabled);
 	connect(m_update_checker, &UpdateChecker::InstallingChanged, this, &MainDialogPrivate::Update);
-	connect(m_ui->check_updates_on_startup, &QCheckBox::toggled, this, [this](bool checked) {
-		g_check_updates_on_startup = checked;
-		m_ui->widget->WriteSettings();
-	});
+	connect(m_update_checker, &UpdateChecker::InstallingChanged, m_action_updates,
+	        &QAction::setDisabled);
 	connect(main_dialog, &MainDialog::Resize, [this]() {
 		g_last_geometry = m_main_dialog->saveGeometry();
 		m_ui->widget->WriteSettings();
