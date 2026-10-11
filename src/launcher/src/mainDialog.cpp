@@ -1,4 +1,4 @@
-#include "mainDialog.h"
+﻿#include "mainDialog.h"
 
 #include "cheatFile.h"
 #include "configuration.h"
@@ -190,10 +190,25 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 		        }
 	        });
 	connect(m_ui->widget, &ConfigurationListWidget::Run, this, &MainDialogPrivate::Run);
+
 	connect(m_update_checker, &UpdateChecker::CheckingChanged, m_action_updates,
 	        &QAction::setDisabled);
 	connect(main_dialog, &MainDialog::Resize, this,
 	        [this]() { SaveWindowState(); });
+
+	connect(m_ui->check_updates_link, &QLabel::linkActivated, this,
+	        [this](const QString&) { m_update_checker->Check(true); });
+	connect(m_update_checker, &UpdateChecker::CheckingChanged, m_ui->check_updates_link,
+	        &QLabel::setDisabled);
+	connect(m_update_checker, &UpdateChecker::InstallingChanged, this, &MainDialogPrivate::Update);
+	connect(m_ui->check_updates_on_startup, &QCheckBox::toggled, this, [this](bool checked) {
+		g_check_updates_on_startup = checked;
+		m_ui->widget->WriteSettings();
+	});
+	connect(main_dialog, &MainDialog::Resize, [this]() {
+		g_last_geometry = m_main_dialog->saveGeometry();
+		m_ui->widget->WriteSettings();
+	});
 
 	connect(&m_process,
 	        static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
@@ -212,6 +227,7 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 		        }
 	        });
 	connect(&m_process, &QProcess::stateChanged, this, [this](QProcess::ProcessState state) {
+		m_update_checker->SetGameRunning(state != QProcess::NotRunning);
 		if (state == QProcess::NotRunning) {
 			if (m_running_item != nullptr) {
 				m_running_item->SetRunning(false);
@@ -572,6 +588,7 @@ void MainDialogPrivate::ShowAbout() {
 }
 
 void MainDialogPrivate::FindInterpreter() {
+	UpdateChecker::ShowPreviousResult(m_main_dialog);
 	QDir search_dir(QApplication::applicationDirPath());
 	m_interpreter = search_dir.absoluteFilePath(EMULATOR_EXE);
 
@@ -922,6 +939,11 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 }
 
 void MainDialogPrivate::Run() {
+
+	if (m_update_checker->IsInstalling()) {
+		return;
+	}
+
 	// Starting a game while another is running stops the previous one
 	// first, so a failed run can never block the next launch.
 	if (m_process.state() != QProcess::NotRunning) {
@@ -935,6 +957,7 @@ void MainDialogPrivate::Run() {
 		                     tr("The previous game is still running and could not be stopped."));
 		return;
 	}
+
 
 	m_running_item = m_ui->widget->GetSelectedItem();
 	if (m_running_item == nullptr) {
@@ -1025,11 +1048,14 @@ void MainDialogPrivate::ShowFailureDialog(int exitCode, QProcess::ExitStatus exi
 void MainDialogPrivate::Update() {
 	const auto* item = m_ui->widget->GetSelectedItem();
 
-	bool    run_enabled = (m_process.state() == QProcess::NotRunning && item != nullptr);
+
+	bool run_enabled = (m_process.state() == QProcess::NotRunning && item != nullptr &&
+	                    !m_update_checker->IsInstalling());
 	bool    folder_open = false;
 	bool    has_patches = false;
 	bool    has_trophies = false;
 	QString status_text;
+
 
 	const int games = m_ui->widget->GetGameCount();
 	status_text     = games == 1 ? tr("1 game") : tr("%1 games").arg(games);

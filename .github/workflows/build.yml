@@ -257,6 +257,7 @@ jobs:
             "$install_dir/libMoltenVK.dylib" \
             "$app_dir/Contents/MacOS/KytyPS5" \
             "$app_dir/Contents/MacOS/kyty_emulator" \
+            "$app_dir/Contents/MacOS/kyty_updater" \
             "$app_dir/Contents/Frameworks/libMoltenVK.dylib"; do
             file "$binary"
             lipo "$binary" -verify_arch x86_64
@@ -266,6 +267,7 @@ jobs:
             "$install_dir/libMoltenVK.dylib" \
             "$app_dir/Contents/MacOS/KytyPS5" \
             "$app_dir/Contents/MacOS/kyty_emulator" \
+            "$app_dir/Contents/MacOS/kyty_updater" \
             "$app_dir/Contents/Frameworks/libMoltenVK.dylib"; do
             codesign --verify --strict "$binary"
           done
@@ -407,6 +409,7 @@ jobs:
         run: |
           file _Build/linux/install/launcher
           file _Build/linux/install/kyty_emulator
+          test -x _Build/linux/install/kyty_updater
           file _Build/linux/install/kyty_emulator | grep -q "ELF 64-bit LSB .*x86-64"
           ldd _Build/linux/install/kyty_emulator > /dev/null
           readelf -d _Build/linux/install/launcher | grep -q 'RPATH.*\$ORIGIN/lib'
@@ -495,7 +498,8 @@ jobs:
           test -d "$linux_dir"
           chmod a+x \
             "$linux_dir/launcher" \
-            "$linux_dir/kyty_emulator"
+            "$linux_dir/kyty_emulator" \
+            "$linux_dir/kyty_updater"
           tar -C "$linux_dir" -czf \
             "$GITHUB_WORKSPACE/$RELEASE_NAME-Linux-x86_64.tar.gz" .
 
