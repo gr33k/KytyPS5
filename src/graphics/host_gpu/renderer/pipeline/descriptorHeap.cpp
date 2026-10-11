@@ -74,7 +74,14 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		CreateDescriptorPool();
 		m_sets.clear();
 		auto& retry_batch = m_sets[layout];
-		EXIT_IF(!Allocate(layout, retry_batch));
+		const bool retry_ok = Allocate(layout, retry_batch);
+		if (!retry_ok) {
+			std::printf("DescriptorHeap: FATAL layout=%p pending_pools=%zu batch_alloc=%u\n",
+			            static_cast<void*>(layout),
+			            m_pending_pools.size() + 1, batch.allocation);
+			std::fflush(stdout);
+		}
+		EXIT_IF(!retry_ok);
 		return retry_batch.sets[--retry_batch.size];
 	}
 	return fresh_batch.sets[--fresh_batch.size];
