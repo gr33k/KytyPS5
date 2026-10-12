@@ -7,6 +7,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "libs/controller.h"
+#include "kernel/memory.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -228,6 +229,131 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+namespace {
+// RE Engine Maiden rescue: kernel 0xdd7d9b716cfe5aba is a straight-line
+// streaming memcpy (verified in disassembly: two bounds-checked dword copies
+// per thread, no loops) that hangs some GPUs on specific post-start inputs.
+// Emulate it on the CPU so the game receives its data without executing it.
+// Matches the disassembly exactly: index = workgroup.x * 512 + lane, second
+// copy at +256, byte offsets from push dword 0 bits [0:8]/[8:16], OOB reads
+// yield 0, OOB writes are dropped. Returns false when the invocation does
+// not match the known shape (caller falls back to skipping).
+bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInfo& input_info,
+                             const ShaderRecompiler::IR::CompiledShaderInfo& program,
+                             PreparedBindings& bindings, uint32_t gx, uint32_t gy, uint32_t gz) {
+	if (program.info.buffers.size() != 2 || gy != 1 || gz != 1) {
+		return false;
+	}
+	if (input_info.threads_num[0] != 256 || input_info.threads_num[1] != 1 ||
+	    input_info.threads_num[2] != 1) {
+		return false;
+	}
+	int src_i = -1, dst_i = -1;
+	for (uint32_t i = 0; i < 2; i++) {
+		if (program.info.buffers[i].written) {
+			if (dst_i >= 0) {
+				return false;
+			}
+			dst_i = static_cast<int>(i);
+		} else {
+			if (src_i >= 0) {
+				return false;
+			}
+			src_i = static_cast<int>(i);
+		}
+	}
+	if (src_i < 0 || dst_i < 0) {
+		return false;
+	}
+	const auto& src_info = program.info.buffers[src_i];
+	const auto& dst_info = program.info.buffers[dst_i];
+	if (src_info.descriptor_index == UINT32_MAX || dst_info.descriptor_index == UINT32_MAX ||
+	    src_info.descriptor_index >= bindings.buffer_sources.size() ||
+	    dst_info.descriptor_index >= bindings.buffer_sources.size()) {
+		return false;
+	}
+	const auto& resources = *input_info.stage.resources;
+	const auto  src_desc =
+	    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[src_i]);
+	const auto dst_desc =
+	    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[dst_i]);
+	if (src_desc.Stride() != 4 || dst_desc.Stride() != 4) {
+		return false;
+	}
+	if (program.bindings.push_data_start_dword ==
+	        ShaderRecompiler::IR::PushData::NoStart ||
+	    program.bindings.push_data_start_dword >= bindings.shader_data.size()) {
+		return false;
+	}
+	const uint32_t push_dword = bindings.shader_data[program.bindings.push_data_start_dword];
+	const uint32_t off0       = push_dword & 0xFFu;
+	const uint32_t off1       = (push_dword >> 8) & 0xFFu;
+	const auto&    src_range  = bindings.buffer_sources[src_info.descriptor_index];
+	const auto&    dst_range  = bindings.buffer_sources[dst_info.descriptor_index];
+	if (src_range.address == 0 || dst_range.address == 0) {
+		return false;
+	}
+	const uint64_t src_dwords = src_range.size / 4;
+	const uint64_t dst_dwords = dst_range.size / 4;
+	if (dst_dwords == 0) {
+		return true;
+	}
+	uint64_t total = static_cast<uint64_t>(gx) * 512 + 256;
+	if (total > dst_dwords) {
+		total = dst_dwords;
+	}
+	if (total == 0 || total > (64ull << 20)) {
+		return total == 0;
+	}
+	// Read the source range once; holes mean the data is not resident.
+	std::vector<uint8_t> src_bytes;
+	uint64_t             src_avail_dwords = 0;
+	if (src_dwords > 0) {
+		src_bytes.resize(static_cast<size_t>(src_range.size));
+		if (!Libs::LibKernel::Memory::TryReadBufferBacking(src_range.address, src_bytes.data(),
+		                                                    src_range.size)) {
+			return false;
+		}
+		src_avail_dwords = src_dwords;
+	}
+	const auto*         src_words = reinterpret_cast<const uint32_t*>(src_bytes.data());
+	std::vector<uint32_t> out(static_cast<size_t>(total));
+	for (uint64_t k = 0; k < total; k++) {
+		const uint64_t read_byte = k * 4 + off0;
+		uint32_t       v         = 0;
+		// Overflow guard mirrors the shader: (byte32 < off) yields an
+		// index of 0xFFFFFFFF, which always fails the bounds check.
+		if (read_byte <= 0xFFFFFFFFull) {
+			const uint32_t b32 = static_cast<uint32_t>(read_byte);
+			if (b32 >= off0) {
+				const uint32_t w = b32 >> 2;
+				if (w < src_avail_dwords) {
+					v = src_words[w];
+				}
+			}
+		}
+		const uint64_t write_byte = k * 4 + off1;
+		if (write_byte > 0xFFFFFFFFull) {
+			continue;
+		}
+		const uint32_t d32 = static_cast<uint32_t>(write_byte);
+		if (d32 < off1) {
+			continue;
+		}
+		const uint32_t dw = d32 >> 2;
+		if (dw < dst_dwords && dw < total) {
+			out[dw] = v;
+		}
+	}
+	if (!Libs::LibKernel::Memory::TryWriteBacking(dst_range.address, out.data(),
+	                                                total * sizeof(uint32_t))) {
+		return false;
+	}
+	context.InvalidateMemory(dst_range.address, total * sizeof(uint32_t));
+	return true;
+}
+} // namespace
+
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
@@ -391,19 +517,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			return;
 		}
 	}
-	// RE Engine Maiden: this kernel renders menus fine but hangs the GPU in
-	// the post-start streaming scene (data-dependent). Run it until the user
-	// presses Cross, then skip it so the game continues (dark but alive).
-	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
-	    Libs::Controller::GameStartPressed()) {
-		static std::atomic_uint start_skip_logged {0};
-		if (start_skip_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
-			std::printf("DispatchDirect: post-start skipping 0xdd7d9b716cfe5aba\n");
-			std::fflush(stdout);
-		}
-		ResetBindings();
-		return;
-	}
 	for (const auto hung : extra_hashes) {
 		if (program.shader_hash == hung) {
 			ResetBindings();
@@ -513,6 +626,25 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
+	// RE Engine Maiden: kernel 0xdd7d9b716cfe5aba renders menus fine but hangs
+	// the GPU in the post-start streaming scene. Once the user pressed Cross,
+	// emulate it on the CPU (exact memcpy semantics) instead of executing it;
+	// if the shape is unexpected, skip it as before.
+	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
+	    Libs::Controller::GameStartPressed()) {
+		static std::atomic_uint emu_logged {0};
+		const bool             emulated = CpuEmulateStreamingCopy(
+                m_context, input_info, program, bindings, thread_group_x, thread_group_y,
+                thread_group_z);
+		if (emu_logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+			std::printf("DispatchDirect: post-start dd7d %s (groups=%ux%ux%u)\n",
+			            emulated ? "cpu-emulated" : "skipped",
+			            thread_group_x, thread_group_y, thread_group_z);
+			std::fflush(stdout);
+		}
+		ResetBindings();
+		return;
+	}
 	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	                      std::span {&descriptor_stage, 1u})) {
 		ResetBindings();
@@ -691,6 +823,11 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	RebindBuffers(bindings);
+	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
+	    Libs::Controller::GameStartPressed()) {
+		ResetBindings();
+		return;
+	}
 	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	                      std::span {&descriptor_stage, 1u})) {
 		ResetBindings();
