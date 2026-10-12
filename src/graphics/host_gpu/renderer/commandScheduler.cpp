@@ -29,38 +29,39 @@ void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint3
 	std::fflush(stdout);
 	// Post-mortem device fault report: identifies the faulting addresses
 	// when the driver supports VK_EXT_device_fault.
-	if (result == vk::Result::eErrorDeviceLost && device != nullptr) {
-		vk::DeviceFaultCountsEXT counts {};
-		if (device.getDeviceFaultInfoEXT(&counts, nullptr) == vk::Result::eSuccess) {
-			std::printf("DeviceFault: addr=%u vendor=%u desc=%u\n", counts.addressInfoCount,
-			            counts.vendorInfoCount, counts.descriptionCount);
-			std::vector<vk::DeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
-			std::vector<vk::DeviceFaultVendorInfoEXT>  vendors(counts.vendorInfoCount);
-			std::vector<char> descs(counts.descriptionCount);
-			vk::DeviceFaultInfoEXT info {};
-			info.pAddressInfos   = addrs.data();
-			info.pVendorInfos    = vendors.data();
-			info.pDescription    = descs.data();
-			if (device.getDeviceFaultInfoEXT(&counts, &info) == vk::Result::eSuccess) {
-				for (const auto& a: addrs) {
-					std::printf("DeviceFault addr: type=%u format=0x%x addr=0x%016llx\n",
-					            static_cast<uint32_t>(a.addressType),
-					            static_cast<uint32_t>(a.reportedAddressPrecision),
-					            static_cast<unsigned long long>(a.reportedAddress));
+		if (result == vk::Result::eErrorDeviceLost && device != nullptr) {
+		if (auto func = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
+		    func != nullptr) {
+			VkDeviceFaultCountsEXT counts {};
+			if (func(static_cast<VkDevice>(device), &counts, nullptr) == VK_SUCCESS) {
+				std::printf("DeviceFault: addr=%u vendor=%u binary=%llu\n", counts.addressInfoCount,
+				            counts.vendorInfoCount,
+				            static_cast<unsigned long long>(counts.vendorBinarySize));
+				std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+				std::vector<VkDeviceFaultVendorInfoEXT>  vendors(counts.vendorInfoCount);
+				std::vector<uint8_t>                    binary(counts.vendorBinarySize);
+				VkDeviceFaultInfoEXT info {};
+				info.sType            = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+				info.pAddressInfos    = addrs.data();
+				info.pVendorInfos     = vendors.data();
+				info.pVendorBinaryData = binary.data();
+				if (func(static_cast<VkDevice>(device), &counts, &info) == VK_SUCCESS) {
+					for (const auto& a: addrs) {
+						std::printf("DeviceFault addr: type=%d addr=0x%016llx precision=%llu\n",
+						            static_cast<int>(a.addressType),
+						            static_cast<unsigned long long>(a.reportedAddress),
+						            static_cast<unsigned long long>(a.addressPrecision));
+					}
+					for (const auto& v: vendors) {
+						std::printf("DeviceFault vendor: %s code=0x%x data=0x%016llx\n", v.description,
+						            v.vendorFaultCode,
+						            static_cast<unsigned long long>(v.vendorFaultData));
+					}
 				}
-				for (const auto& v: vendors) {
-					std::printf("DeviceFault vendor: code=0x%x data=0x%016llx desc=%s\n", v.vendorFaultCode,
-					            static_cast<unsigned long long>(v.vendorFaultData),
-					            v.description);
-				}
-				if (!descs.empty()) {
-					std::printf("DeviceFault desc: %s\n", descs.data());
-				}
+				std::fflush(stdout);
 			}
-			std::fflush(stdout);
 		}
 	}
-}
 
 } // namespace
 
