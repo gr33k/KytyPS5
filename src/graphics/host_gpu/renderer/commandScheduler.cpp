@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <optional>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -16,7 +17,7 @@ namespace {
 
 void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint32_t debug_op,
                        uint64_t debug_submit, uint32_t arg0, uint32_t arg1, uint32_t arg2,
-                       uint32_t arg3, uint64_t arg4) {
+                       uint32_t arg3, uint64_t arg4, vk::Device device = nullptr) {
 	LOGF("%s failed: %s (%d), tick=%" PRIu64 " debug_op=%u debug_submit=%" PRIu64
 	     " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
 	     what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
@@ -26,6 +27,39 @@ void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint3
 	            what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
 	            debug_submit, arg0, arg1, arg2, arg3, arg4);
 	std::fflush(stdout);
+	// Post-mortem device fault report: identifies the faulting addresses
+	// when the driver supports VK_EXT_device_fault.
+	if (result == vk::Result::eErrorDeviceLost && device != nullptr) {
+		vk::DeviceFaultCountsEXT counts {};
+		if (device.getDeviceFaultInfoEXT(&counts, nullptr) == vk::Result::eSuccess) {
+			std::printf("DeviceFault: addr=%u vendor=%u desc=%u\n", counts.addressInfoCount,
+			            counts.vendorInfoCount, counts.descriptionCount);
+			std::vector<vk::DeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+			std::vector<vk::DeviceFaultVendorInfoEXT>  vendors(counts.vendorInfoCount);
+			std::vector<char> descs(counts.descriptionCount);
+			vk::DeviceFaultInfoEXT info {};
+			info.pAddressInfos   = addrs.data();
+			info.pVendorInfos    = vendors.data();
+			info.pDescription    = descs.data();
+			if (device.getDeviceFaultInfoEXT(&counts, &info) == vk::Result::eSuccess) {
+				for (const auto& a: addrs) {
+					std::printf("DeviceFault addr: type=%u format=0x%x addr=0x%016llx\n",
+					            static_cast<uint32_t>(a.addressType),
+					            static_cast<uint32_t>(a.reportedAddressPrecision),
+					            static_cast<unsigned long long>(a.reportedAddress));
+				}
+				for (const auto& v: vendors) {
+					std::printf("DeviceFault vendor: code=0x%x data=0x%016llx desc=%s\n", v.vendorFaultCode,
+					            static_cast<unsigned long long>(v.vendorFaultData),
+					            v.description);
+				}
+				if (!descs.empty()) {
+					std::printf("DeviceFault desc: %s\n", descs.data());
+				}
+			}
+			std::fflush(stdout);
+		}
+	}
 }
 
 } // namespace
@@ -386,7 +420,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		ReportVulkanFatal("vkQueueSubmit", result, tick, m_command.m_debug_op,
 		                  m_command.m_debug_submit_id, m_command.m_debug_arg0,
 		                  m_command.m_debug_arg1, m_command.m_debug_arg2, m_command.m_debug_arg3,
-		                  m_command.m_debug_arg4);
+		                  m_command.m_debug_arg4, graphics.device);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
