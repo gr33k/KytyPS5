@@ -263,7 +263,7 @@ public:
 	void                 Create();
 	void                 Recreate(bool surface_lost = false);
 	[[nodiscard]] bool   NeedsResize() const;
-	[[nodiscard]] Status AcquireNextImage();
+	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler);
 	[[nodiscard]] bool   PrepareSystemOverlay();
 	void     RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
 	                               const Presenter::Layer& overlay, bool draw_system_overlay);
@@ -296,6 +296,9 @@ private:
 	vk::Sampler                    m_overlay_sampler     = nullptr;
 	uint32_t                       m_image_index         = static_cast<uint32_t>(-1);
 	uint32_t                       m_frame_index         = 0;
+	// Present-submit tick that last waited on each acquire semaphore slot.
+	// A slot may only be re-acquired once its semaphore has no pending ops.
+	std::vector<uint64_t>          m_acquire_tick;
 };
 
 struct Presenter::Impl {
@@ -465,6 +468,7 @@ void Swapchain::Create() {
 	semaphore_info.sType = vk::StructureType::eSemaphoreCreateInfo;
 	m_image_acquired.resize(m_images.size());
 	m_render_complete.resize(m_images.size());
+	m_acquire_tick.assign(m_images.size(), 0);
 	for (size_t i = 0; i < m_images.size(); i++) {
 		RequireVulkanSuccess(
 		    graphics.device.createSemaphore(&semaphore_info, nullptr, &m_image_acquired[i]),
@@ -533,6 +537,7 @@ void Swapchain::Destroy() {
 	m_image_views.clear();
 	m_image_acquired.clear();
 	m_render_complete.clear();
+	m_acquire_tick.clear();
 }
 
 void Swapchain::Recreate(bool surface_lost) {
@@ -557,8 +562,15 @@ bool Swapchain::NeedsResize() const {
 	       m_window_extent.height != m_window.graphic_ctx.screen_height;
 }
 
-Swapchain::Status Swapchain::AcquireNextImage() {
+Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
+	// Reusing an acquire semaphore with pending signal ops is illegal
+	// (VUID-vkAcquireNextImageKHR-semaphore-01779) and wedges presentation
+	// once the GPU falls behind. Backpressure here also bounds the queue.
+	const uint64_t last_tick = m_acquire_tick[m_frame_index];
+	if (last_tick != 0) {
+		scheduler.GetMasterSemaphore().Wait(last_tick);
+	}
 	m_image_index     = static_cast<uint32_t>(-1);
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
 	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
@@ -828,7 +840,9 @@ uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
 	SubmitInfo submit;
 	submit.AddWait(m_image_acquired[m_frame_index], 1, vk::PipelineStageFlagBits::eTransfer);
 	submit.AddSignal(m_render_complete[m_image_index]);
-	return scheduler.Submit(submit);
+	const uint64_t tick = scheduler.Submit(submit);
+	m_acquire_tick[m_frame_index] = tick;
+	return tick;
 }
 
 Swapchain::Status Swapchain::Present() {
@@ -972,7 +986,7 @@ void Presenter::Impl::Present() {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
-		auto status = swapchain.AcquireNextImage();
+		auto status = swapchain.AcquireNextImage(present_scheduler);
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			continue;
