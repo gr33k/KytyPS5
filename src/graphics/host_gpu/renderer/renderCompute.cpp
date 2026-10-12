@@ -608,17 +608,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 void RenderExecutor::SplitOversizedSubmit() {
 	// Batches of hundreds of dispatches in one vkQueueSubmit hang some drivers;
 	// normal phases record an order of magnitude fewer (verified on RE Engine).
-	// Once the user has started the game, fully drain instead of just
-	// splitting: if the hang is backlog-driven (not an infinite loop), never
-	// letting the queue build up avoids the TDR. TEMP-EXPERIMENT for Maiden.
 	static constexpr uint32_t kMaxDispatchesPerSubmit = 64;
 	if (++m_dispatches_since_submit >= kMaxDispatchesPerSubmit) {
 		m_dispatches_since_submit = 0;
-		if (Libs::Controller::GameStartPressed()) {
-			m_context.GetCommandScheduler().FlushAndWait();
-		} else {
-			m_context.GetCommandScheduler().Flush();
-		}
+		m_context.GetCommandScheduler().Flush();
 	}
 }
 
