@@ -288,6 +288,19 @@ bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInf
 	const uint32_t push_dword = bindings.shader_data[program.bindings.push_data_start_dword];
 	const uint32_t off0       = push_dword & 0xFFu;
 	const uint32_t off1       = (push_dword >> 8) & 0xFFu;
+	{
+		static std::atomic_uint shape_logged {0};
+		if (shape_logged.fetch_add(1, std::memory_order_relaxed) < 2) {
+			std::printf("Dd7dShape: bufs=%zu src_di=%u dst_di=%u nsrc=%zu push_start=%u ndw=%zu "
+			            "gx=%u threads=%ux%ux%u\n",
+			            program.info.buffers.size(), src_info.descriptor_index,
+			            dst_info.descriptor_index, bindings.buffer_sources.size(),
+			            program.bindings.push_data_start_dword, bindings.shader_data.size(),
+			            gx, input_info.threads_num[0], input_info.threads_num[1],
+			            input_info.threads_num[2]);
+			std::fflush(stdout);
+		}
+	}
 	const auto&    src_range  = bindings.buffer_sources[src_info.descriptor_index];
 	const auto&    dst_range  = bindings.buffer_sources[dst_info.descriptor_index];
 	if (src_range.address == 0 || dst_range.address == 0) {
