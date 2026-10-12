@@ -650,22 +650,20 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// emulate it on the CPU (exact memcpy semantics) instead of executing it;
 	// if the shape is unexpected, skip it as before.
 	// TEMP-DIAG: emulate every dd7d (logs shape) but only divert post-start.
-	if (program.shader_hash == 0xdd7d9b716cfe5abaull) {
+	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
+	    Libs::Controller::GameStartPressed()) {
 		static std::atomic_uint emu_logged {0};
 		const bool             emulated = CpuEmulateStreamingCopy(
                 m_context, input_info, program, bindings, thread_group_x, thread_group_y,
                 thread_group_z);
 		if (emu_logged.fetch_add(1, std::memory_order_relaxed) < 4) {
-			std::printf("DispatchDirect: dd7d %s (groups=%ux%ux%u started=%d)\n",
-			            emulated ? "cpu-emulated" : "skip-refused",
-			            thread_group_x, thread_group_y, thread_group_z,
-			            Libs::Controller::GameStartPressed() ? 1 : 0);
+			std::printf("DispatchDirect: dd7d %s (groups=%ux%ux%u)\n",
+			            emulated ? "cpu-emulated" : "skipped",
+			            thread_group_x, thread_group_y, thread_group_z);
 			std::fflush(stdout);
 		}
-		if (Libs::Controller::GameStartPressed()) {
-			ResetBindings();
-			return;
-		}
+		ResetBindings();
+		return;
 	}
 	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	                      std::span {&descriptor_stage, 1u})) {
