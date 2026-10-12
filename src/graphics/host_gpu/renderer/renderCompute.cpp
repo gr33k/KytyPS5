@@ -394,7 +394,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// RE Engine Maiden: this kernel renders menus fine but hangs the GPU in
 	// the post-start streaming scene (data-dependent). Run it until the user
 	// presses Cross, then skip it so the game continues (dark but alive).
-	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
+	// TEMP-EXPERIMENT (throttle test): gate disabled so dd7d runs post-start
+	// under full-drain throttling. Re-enable if the hang is a true loop.
+	if (false && program.shader_hash == 0xdd7d9b716cfe5abaull &&
 	    Libs::Controller::GameStartPressed()) {
 		static std::atomic_uint start_skip_logged {0};
 		if (start_skip_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
@@ -606,10 +608,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 void RenderExecutor::SplitOversizedSubmit() {
 	// Batches of hundreds of dispatches in one vkQueueSubmit hang some drivers;
 	// normal phases record an order of magnitude fewer (verified on RE Engine).
+	// Once the user has started the game, fully drain instead of just
+	// splitting: if the hang is backlog-driven (not an infinite loop), never
+	// letting the queue build up avoids the TDR. TEMP-EXPERIMENT for Maiden.
 	static constexpr uint32_t kMaxDispatchesPerSubmit = 64;
 	if (++m_dispatches_since_submit >= kMaxDispatchesPerSubmit) {
 		m_dispatches_since_submit = 0;
-		m_context.GetCommandScheduler().Flush();
+		if (Libs::Controller::GameStartPressed()) {
+			m_context.GetCommandScheduler().FlushAndWait();
+		} else {
+			m_context.GetCommandScheduler().Flush();
+		}
 	}
 }
 
