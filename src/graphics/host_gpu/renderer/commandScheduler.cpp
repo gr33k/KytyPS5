@@ -62,7 +62,7 @@ void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint3
 			}
 		}
 	}
-
+}
 } // namespace
 
 CommandScheduler::CommandPool::CommandPool(GraphicContext& graphics, MasterSemaphore& master)
