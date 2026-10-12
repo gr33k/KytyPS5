@@ -1070,6 +1070,19 @@ void WindowContext::CreateVulkan() {
 	}
 
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);
+	// TEMP-DIAG (device fault): confirm fault extension + entry point.
+	{
+		bool have_fault_ext = false;
+		for (const auto* e: device_extensions) {
+			if (std::string(e) == VK_EXT_DEVICE_FAULT_EXTENSION_NAME) {
+				have_fault_ext = true;
+				break;
+			}
+		}
+		std::printf("DeviceFaultSetup: ext=%d func=%d\n", have_fault_ext ? 1 : 0,
+		            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT != nullptr ? 1 : 0);
+		std::fflush(stdout);
+	}
 	if (graphic_ctx.device == nullptr) {
 		EXIT("Could not create device");
 	}
