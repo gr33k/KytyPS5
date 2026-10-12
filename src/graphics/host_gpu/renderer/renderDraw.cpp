@@ -1454,6 +1454,19 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		g_census_empty.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
+	// An indexed draw fetching from address 0 reads unmapped memory; the
+	// indices come from streaming data that is not resident yet. Skipping
+	// faults the GPU (device loss) on strict drivers instead of drawing.
+	if (args.index_addr == 0) {
+		static std::atomic_uint null_index_logged {0};
+		if (null_index_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+			std::printf("DrawIndex: skipping null index buffer (submit=%llu count=%u)\n",
+			            static_cast<unsigned long long>(submit_id), args.index_count);
+			std::fflush(stdout);
+		}
+		g_census_empty.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
