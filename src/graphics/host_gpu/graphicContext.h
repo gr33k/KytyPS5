@@ -33,6 +33,7 @@ struct GraphicContext {
 	// bool fp64_denorm_preserve = false; // Temporarily disabled.
 	bool                               attachment_feedback_loop_enabled      = false;
 	bool                               provoking_vertex_last_enabled         = false;
+	bool                               depth_color_copy_enabled               = false;
 	bool                               supports_block_texel_view              = false;
 	bool                               topology_list_restart_enabled          = false;
 	bool                                      mesh_shader_enabled                   = false;
