@@ -658,9 +658,24 @@ void BufferCache::RunGarbageCollector() {
 	}
 
 	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
+	// Buffers referenced by in-flight GPU work must never be freed, even
+	// under critical pressure: the GPU can lag many submits behind recording
+	// (streaming spikes), so "untouched for N submits" does not mean idle.
+	// Exempt the observed backlog window (plus margin). vk ticks advance at
+	// least as fast as GC ticks, so this errs toward keeping (safe).
+	uint64_t backlog = 0;
+	{
+		const uint64_t submitted = m_scheduler.CurrentTick();
+		const uint64_t completed =
+		    m_scheduler.GetMasterSemaphore().KnownGpuTick();
+		backlog = submitted > completed ? submitted - completed : 0;
+	}
+	const uint64_t keep = backlog + 64;
 	// Under critical pressure the working set itself must shrink: young
-	// buffers are NOT exempt (the spike is made of young allocations).
-	const uint64_t age = aggressive ? 0 : std::min<uint64_t>(160, tick);
+	// buffers are NOT exempt beyond the backlog window (the spike is made of
+	// young allocations, but in-flight ones must survive).
+	const uint64_t age =
+	    aggressive ? keep : std::max<uint64_t>(keep, std::min<uint64_t>(160, tick));
 	// Under critical pressure a fixed handful of deletions cannot absorb a
 	// streaming spike; allow a large pass instead.
 	const size_t   limit = aggressive ? 512 : 32;
