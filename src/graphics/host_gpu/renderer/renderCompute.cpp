@@ -649,7 +649,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// the GPU in the post-start streaming scene. Once the user pressed Cross,
 	// emulate it on the CPU (exact memcpy semantics) instead of executing it;
 	// if the shape is unexpected, skip it as before.
-	// TEMP-DIAG: emulate every dd7d (logs shape) but only divert post-start.
 	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
 	    Libs::Controller::GameStartPressed()) {
 		static std::atomic_uint emu_logged {0};
