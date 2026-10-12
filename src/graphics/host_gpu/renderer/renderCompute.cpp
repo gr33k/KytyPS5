@@ -315,6 +315,12 @@ bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInf
 	if (total > dst_dwords) {
 		total = dst_dwords;
 	}
+	// Throughput guard: huge streaming copies cost tens of milliseconds on
+	// the CPU; emulate only up to 256K dwords and let larger ones skip (the
+	// game polls small control ranges, bulk data follows later).
+	if (total > (256ull << 10)) {
+		return false;
+	}
 	if (total == 0 || total > (64ull << 20)) {
 		return total == 0;
 	}
