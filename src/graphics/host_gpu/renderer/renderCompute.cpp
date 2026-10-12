@@ -394,9 +394,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// RE Engine Maiden: this kernel renders menus fine but hangs the GPU in
 	// the post-start streaming scene (data-dependent). Run it until the user
 	// presses Cross, then skip it so the game continues (dark but alive).
-	// TEMP-EXPERIMENT (throttle test): gate disabled so dd7d runs post-start
-	// under full-drain throttling. Re-enable if the hang is a true loop.
-	if (false && program.shader_hash == 0xdd7d9b716cfe5abaull &&
+	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
 	    Libs::Controller::GameStartPressed()) {
 		static std::atomic_uint start_skip_logged {0};
 		if (start_skip_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
