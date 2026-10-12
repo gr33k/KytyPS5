@@ -65,7 +65,6 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		EXIT_IF(m_graphics.device.resetDescriptorPool(m_current_pool, {}) != vk::Result::eSuccess);
 	}
 
-	const uint32_t failed_alloc = batch.allocation;
 	m_sets.clear();
 	auto& fresh_batch = m_sets[layout];
 	if (!Allocate(layout, fresh_batch)) {

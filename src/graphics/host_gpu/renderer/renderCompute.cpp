@@ -467,82 +467,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	if (suspect_sample) {
 		suspect_log_count.fetch_add(1, std::memory_order_relaxed);
 	}
-	// TEMP-DIAG (maiden TDR): hash leading buffer contents for the suspect
-	// kernel: hash/groups/push are all identical across healthy and death
-	// batches, so the trigger must be in buffer contents (streaming data).
-	// ObtainBuffer runs before PrepareBindings (safe order: prepare
-	// re-resolves afterward). Remove once the poison input is identified.
-	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
-	    program.info.buffers.size() >= 1) {
-		uint64_t bh[2] = {0, 0};
-		for (uint32_t bi = 0; bi < 2 && bi < program.info.buffers.size(); bi++) {
-			const auto r =
-			    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[bi]);
-			const uint64_t sz = r.GetSize();
-			if (r.Base48() == 0 || sz == 0) {
-				continue;
-			}
-			const auto [cbuf, coff] = m_context.GetBufferCache().ObtainBuffer(
-			    r.Base48(), static_cast<uint32_t>(sz > 256 ? 256 : sz), false);
-			if (cbuf == nullptr) {
-				continue;
-			}
-			const auto mapped = cbuf->Mapped();
-			if (coff >= mapped.size()) {
-				continue;
-			}
-			const auto* dwords = reinterpret_cast<const uint32_t*>(mapped.data() + coff);
-			const size_t n =
-			    (mapped.size() - coff) / sizeof(uint32_t) > 64
-			        ? 64
-			        : (mapped.size() - coff) / sizeof(uint32_t);
-			uint64_t h = 1469598103934665603ull;
-			for (size_t k = 0; k < n; k++) {
-				h ^= dwords[k];
-				h *= 1099511628211ull;
-			}
-			bh[bi] = h;
-		}
-		std::printf("BUFHASH: submit=%llu groups=%ux%ux%u bh0=0x%016llx bh1=0x%016llx\n",
-		            static_cast<unsigned long long>(submit_id), thread_group_x,
-		            thread_group_y, thread_group_z,
-		            static_cast<unsigned long long>(bh[0]),
-		            static_cast<unsigned long long>(bh[1]));
-		std::fflush(stdout);
-	}
-	// TEMP-DIAG (maiden TDR): one-line binding signature for every suspect
-	// dispatch, so the death batch can be compared against healthy batches.
-	// Flushed every line because aborts lose buffered output. Remove once
-	// the poison binding combo is identified.
-	if (tdr_suspect) {
-		uint64_t sig = 1469598103934665603ull;
-		const auto mix = [&](uint64_t v) {
-			sig ^= v;
-			sig *= 1099511628211ull;
-		};
-		mix(program.shader_hash);
-		mix(thread_group_x);
-		mix(thread_group_y);
-		mix(thread_group_z);
-		for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
-			const auto r = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-			mix(r.Base48());
-			mix((static_cast<uint64_t>(r.NumRecords()) << 32) | r.Stride());
-		}
-		for (uint32_t i = 0; i < program.info.images.size(); i++) {
-			const auto r = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[i]);
-			mix(r.Base40());
-			mix((static_cast<uint64_t>(r.Format()) << 32) |
-			    (static_cast<uint64_t>(r.Width5()) << 16) | r.Height5());
-		}
-		std::printf("SUSPECTSIG: submit=%llu hash=0x%016llx groups=%ux%ux%u "
-		            "nb=%zu ni=%zu sig=0x%016llx\n",
-		            static_cast<unsigned long long>(submit_id),
-		            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
-		            thread_group_y, thread_group_z, program.info.buffers.size(),
-		            program.info.images.size(), static_cast<unsigned long long>(sig));
-		std::fflush(stdout);
-	}
 	const bool detail_log_sample =
 	    ((large_workgroup || has_sampler) &&
 	     dispatch_log_count.fetch_add(1, std::memory_order_relaxed) < 512) ||
@@ -593,25 +517,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	                      std::span {&descriptor_stage, 1u})) {
 		ResetBindings();
 		return;
-	}
-	// TEMP-DIAG (maiden TDR): dd7d hangs on some inputs but not others; hash
-	// the final push dwords per dispatch so the death batch can be compared
-	// against healthy batches. Remove once the poison input is identified.
-	if (program.shader_hash == 0xdd7d9b716cfe5abaull && !bindings.shader_data.empty()) {
-		uint64_t h = 1469598103934665603ull;
-		for (const auto dw: bindings.shader_data) {
-			h ^= dw;
-			h *= 1099511628211ull;
-		}
-		std::printf("PUSHHASH: submit=%llu groups=%ux%ux%u ndw=%zu push=0x%016llx "
-		            "dw0=%u dw1=%u dw2=%u dw3=%u\n",
-		            static_cast<unsigned long long>(submit_id), thread_group_x,
-		            thread_group_y, thread_group_z, bindings.shader_data.size(),
-		            static_cast<unsigned long long>(h), bindings.shader_data[0],
-		            bindings.shader_data.size() > 1 ? bindings.shader_data[1] : 0u,
-		            bindings.shader_data.size() > 2 ? bindings.shader_data[2] : 0u,
-		            bindings.shader_data.size() > 3 ? bindings.shader_data[3] : 0u);
-		std::fflush(stdout);
 	}
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);

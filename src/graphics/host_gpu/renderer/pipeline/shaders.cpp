@@ -183,33 +183,12 @@ static vk::BlendOp GetBlendOp(uint32_t op) {
 static void AddLayoutBindings(std::vector<vk::DescriptorSetLayoutBinding>& descriptor_bindings,
                               const ShaderRecompiler::IR::CompiledShaderInfo& program,
                               vk::ShaderStageFlagBits              stage) {
-	static std::atomic_uint layout_log_count {0};
-	const bool              log_layout =
-	    layout_log_count.fetch_add(1, std::memory_order_relaxed) < 128;
 	for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
 		const auto index = std::countr_zero(mask);
 		const auto kind = static_cast<ShaderRecompiler::IR::DescriptorBindingKind>(index);
 		descriptor_bindings.push_back(
 		    {ShaderRecompiler::IR::NativeBinding(program.stage, kind), NativeDescriptorType(kind),
 		     program.bindings.descriptor_counts[index], stage, nullptr});
-		// Pool-busting counts are always worth one line: a single binding over
-		// 1024 descriptors cannot fit the sampler/storage-image pools.
-		if (program.bindings.descriptor_counts[index] > 1024) {
-			std::printf("LayoutBinding HUGE: stage=0x%x hash=0x%016llx kind=%u count=%u\n",
-			            static_cast<uint32_t>(stage),
-			            static_cast<unsigned long long>(program.shader_hash),
-			            static_cast<uint32_t>(index), program.bindings.descriptor_counts[index]);
-			std::fflush(stdout);
-		}
-		if (log_layout) {
-			std::printf("LayoutBinding: stage=0x%x hash=0x%016llx kind=%u count=%u\n",
-			            static_cast<uint32_t>(stage),
-			            static_cast<unsigned long long>(program.shader_hash),
-			            static_cast<uint32_t>(index), program.bindings.descriptor_counts[index]);
-		}
-	}
-	if (log_layout) {
-		std::fflush(stdout);
 	}
 }
 
@@ -229,25 +208,6 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 	create.pBindings    = bindings.data();
 	EXIT_IF(graphics.device.createDescriptorSetLayout(
 	            &create, nullptr, &pipeline.descriptor_set_layout) != vk::Result::eSuccess);
-	// TEMP-DIAG (maiden descriptor fatal): one line per layout with summed
-	// per-type totals, so a pool-exhaustion death can be matched to the
-	// layout that busts the pool. Remove once the oversized layout is found.
-	{
-		uint32_t n_buf = 0, n_simg = 0, n_simg_st = 0, n_smp = 0;
-		for (const auto& binding: bindings) {
-			switch (binding.descriptorType) {
-			case vk::DescriptorType::eStorageBuffer: n_buf += binding.descriptorCount; break;
-			case vk::DescriptorType::eSampledImage: n_simg += binding.descriptorCount; break;
-			case vk::DescriptorType::eStorageImage: n_simg_st += binding.descriptorCount; break;
-			case vk::DescriptorType::eSampler: n_smp += binding.descriptorCount; break;
-			default: break;
-			}
-		}
-		std::printf("LayoutTotals: layout=%p push=%d nbuf=%u nimg=%u nstoreimg=%u nsmp=%u\n",
-		            static_cast<void*>(pipeline.descriptor_set_layout),
-		            pipeline.uses_push_descriptors ? 1 : 0, n_buf, n_simg, n_simg_st, n_smp);
-		std::fflush(stdout);
-	}
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
