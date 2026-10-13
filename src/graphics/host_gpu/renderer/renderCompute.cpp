@@ -250,7 +250,6 @@ static bool EmuFail(uint32_t why, uint64_t hash, uint32_t gx, uint32_t gy, uint3
 	}
 	return false;
 }
-}
 
 bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInfo& input_info,
                              const ShaderRecompiler::IR::CompiledShaderInfo& program,
