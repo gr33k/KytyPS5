@@ -37,6 +37,7 @@ struct GraphicContext {
 	bool                               supports_block_texel_view              = false;
 	bool                               topology_list_restart_enabled          = false;
 	bool                                      mesh_shader_enabled                   = false;
+	bool                                      fragment_barycentric_enabled          = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;
 	uint32_t                           min_subgroup_size                     = 0;

@@ -264,10 +264,6 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 #if !defined(__APPLE__)
 		check_feature(device_features2.features.depthClamp, "depthClamp");
 #endif
-		if (fragment_barycentric.fragmentShaderBarycentric != VK_TRUE) {
-			LOGF("fragmentShaderBarycentric is not supported; barycentric draws will be skipped\n");
-		}
-
 		check_feature(features12.samplerMirrorClampToEdge, "samplerMirrorClampToEdge",
 		              required_features12.samplerMirrorClampToEdge);
 		check_feature(features11.storageBuffer16BitAccess, "storageBuffer16BitAccess",
@@ -505,8 +501,20 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		image_atomic_int64.pNext = supported_features2.pNext;
 		supported_features2.pNext = &image_atomic_int64;
 	}
+	const bool barycentric_extension =
+	    HasExtension(device_extensions, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+	vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR supported_barycentric {};
+	if (barycentric_extension) {
+		supported_barycentric.pNext = supported_features2.pNext;
+		supported_features2.pNext     = &supported_barycentric;
+	}
 	physical_device.getFeatures2(&supported_features2);
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
+	graphics.fragment_barycentric_enabled =
+	    barycentric_extension && supported_barycentric.fragmentShaderBarycentric == VK_TRUE;
+	if (!graphics.fragment_barycentric_enabled) {
+		LOGF("fragmentShaderBarycentric is not supported; barycentric draws will be skipped\n");
+	}
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported_features12.shaderSharedInt64Atomics;

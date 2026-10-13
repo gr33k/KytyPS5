@@ -321,15 +321,44 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 
+		// Hosts without VK_KHR_fragment_shader_barycentric (e.g. Maxwell) reject
+		// modules declaring the capability, and some drivers crash consuming
+		// them. Detect the requirement in SPIR-V and leave the module null so
+		// the draw/dispatch is skipped downstream, as with mesh shaders.
+		bool requires_barycentric = false;
+		if (!graphics.fragment_barycentric_enabled) {
+			static constexpr char kBaryExt[] = "SPV_KHR_fragment_shader_barycentric";
+			const auto* bytes = reinterpret_cast<const char*>(result.spirv.data());
+			const size_t byte_len = result.spirv.size() * sizeof(uint32_t);
+			constexpr size_t kExtLen = sizeof(kBaryExt) - 1;
+			for (size_t i = 0; i + kExtLen <= byte_len; i++) {
+				if (std::memcmp(bytes + i, kBaryExt, kExtLen) == 0) {
+					requires_barycentric = true;
+					break;
+				}
+			}
+			if (requires_barycentric) {
+				static std::atomic_bool logged = false;
+				if (!logged.exchange(true, std::memory_order_relaxed)) {
+					LOGF("Barycentric SPIR-V without host support (hash=0x%016llx); "
+					     "draws with it will be skipped\n",
+					     static_cast<unsigned long long>(options.shader_hash));
+				}
+			}
+		}
 		vk::ShaderModuleCreateInfo module_info {};
 		module_info.codeSize = result.spirv.size() * sizeof(uint32_t);
 		module_info.pCode    = result.spirv.data();
 		vk::ShaderModule module = nullptr;
-		const auto module_result = graphics.device.createShaderModule(&module_info, nullptr, &module);
+		const auto module_result =
+		    requires_barycentric
+		        ? vk::Result::eErrorFeatureNotPresent
+		        : graphics.device.createShaderModule(&module_info, nullptr, &module);
 		if (module_result != vk::Result::eSuccess) {
-			// Mesh shaders fail here without host mesh support; leave the module
+			// Mesh shaders fail here without host mesh support, and barycentric
+			// shaders fail without host barycentric support; leave the module
 			// null so the draw is skipped downstream. Anything else is fatal.
-			if (options.stage != ShaderType::Mesh) {
+			if (options.stage != ShaderType::Mesh && !requires_barycentric) {
 				RequireVulkanSuccess(module_result, "create SPIR-V shader module");
 			}
 			static std::atomic_bool logged = false;
@@ -338,7 +367,7 @@ struct PipelineCache::ProgramCache {
 				     vk::to_string(module_result).c_str());
 			}
 		}
-		EXIT_IF(module == nullptr && options.stage != ShaderType::Mesh);
+		EXIT_IF(module == nullptr && options.stage != ShaderType::Mesh && !requires_barycentric);
 
 		if (options.dump_ir) {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
