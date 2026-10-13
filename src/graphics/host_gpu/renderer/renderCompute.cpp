@@ -824,6 +824,29 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		std::fflush(stdout);
 		// CPU-visible garbage counts hang the GPU (TDR) with no other trace;
 		// skip instead of hanging. Legit dispatches stay far below this.
+		if (mapped.size() == 0 || args_offset + sizeof(indirect_xyz) > mapped.size()) {
+			// Device-local args are unreadable from the CPU and have hung the GPU
+			// with garbage counts. Drain so prior work completes, re-read, then
+			// apply the same bound; skip when still unreadable or insane.
+			m_context.GetCommandScheduler().FlushAndWait();
+			const auto fresh = args_buffer->Mapped();
+			uint32_t   xyz[3] = {};
+			bool       args_ok = false;
+			if (args_offset + sizeof(xyz) <= fresh.size()) {
+				std::memcpy(xyz, fresh.data() + args_offset, sizeof(xyz));
+				args_ok = true;
+			}
+			const uint64_t drained_total = static_cast<uint64_t>(xyz[0]) * xyz[1] * xyz[2];
+			std::printf("DispatchIndirect: drained submit=%llu shader_hash=0x%016llx xyz=%ux%ux%u ok=%d\n",
+			            static_cast<unsigned long long>(submit_id),
+			            static_cast<unsigned long long>(program.shader_hash),
+			            xyz[0], xyz[1], xyz[2], args_ok ? 1 : 0);
+			std::fflush(stdout);
+			if (!args_ok || drained_total == 0 || drained_total > (1ull << 24)) {
+				ResetBindings();
+				return;
+			}
+		}
 		if (mapped.size() > 0) {
 			const uint64_t total = static_cast<uint64_t>(indirect_xyz[0]) * indirect_xyz[1] *
 			                       indirect_xyz[2];
