@@ -984,6 +984,86 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
 		}
 	}
 
+	// Neutralize calls into abort stubs (`call stub; ud2`) and conditional
+	// jumps to them. Stack-canary checks compare against a fake FS, so their
+	// mismatches are spurious; reaching INT 0x45 traps the host instead of
+	// aborting. Nopping the 7/2/6 bytes resumes on the check-passed path.
+	// An abort stub here is a function whose first 48 bytes hold a stack-canary
+	// store (intact or nopped to 12 NOPs) followed by an INT 0x45 + UD2 trap.
+	{
+		auto* start_ptr = reinterpret_cast<uint8_t*>(address);
+		auto* end_ptr   = start_ptr + size;
+		auto  is_abort_stub = [&](uint8_t* target) {
+			if (target < start_ptr || target + 48 > end_ptr) {
+				return false;
+			}
+			for (int base = 0; base < 32; base++) {
+				uint8_t* p = target + base;
+				if (p + 17 > end_ptr) {
+					break;
+				}
+				bool store = (p[0] == 0x64 && p[1] == 0xc7 && p[2] == 0x04 && p[3] == 0x25 &&
+				                p[4] == 0x28 && p[5] == 0 && p[6] == 0 && p[7] == 0);
+				bool nops = true;
+				for (int k = 0; k < 12; k++) {
+					if (p[k] != 0x90) {
+						nops = false;
+						break;
+					}
+				}
+				if (!store && !nops) {
+					continue;
+				}
+				const uint8_t* t = p + 12;
+				if ((t[0] == 0xcd && t[1] == 0x45 && t[2] == 0x0f && t[3] == 0x0b) ||
+				    (t[0] == 0xcd && t[1] == 0x45 && t[2] == 0x90 && t[3] == 0x0f &&
+				     t[4] == 0x0b)) {
+					return true;
+				}
+			}
+			return false;
+		};
+		for (auto* ptr = start_ptr; ptr + 7 <= end_ptr; ptr++) {
+			// e8 <rel32> 0f 0b : call that never returns.
+			if (ptr[0] == 0xe8 && ptr + 7 <= end_ptr && ptr[5] == 0x0f && ptr[6] == 0x0b) {
+				int32_t  rel    = static_cast<int32_t>(ptr[1] | (ptr[2] << 8) | (ptr[3] << 16) |
+                                                            (ptr[4] << 24));
+				uint8_t* target = ptr + 5 + rel;
+				if (is_abort_stub(target)) {
+					LOGF("Patch abort call at addr: [%016" PRIx64 "]\n",
+					     reinterpret_cast<uint64_t>(ptr));
+					std::memset(ptr, 0x90, 7);
+					ptr += 6;
+					continue;
+				}
+			}
+			// 70-7F <rel8> : short conditional jump.
+			if ((ptr[0] & 0xf0) == 0x70 && ptr + 2 <= end_ptr) {
+				int8_t   rel    = static_cast<int8_t>(ptr[1]);
+				uint8_t* target = ptr + 2 + rel;
+				if (is_abort_stub(target)) {
+					LOGF("Patch abort jump at addr: [%016" PRIx64 "]\n",
+					     reinterpret_cast<uint64_t>(ptr));
+					std::memset(ptr, 0x90, 2);
+					ptr += 1;
+					continue;
+				}
+			}
+			// 0F 80-8F <rel32> : near conditional jump.
+			if (ptr[0] == 0x0f && (ptr[1] & 0xf0) == 0x80 && ptr + 6 <= end_ptr) {
+				int32_t rel =
+				    static_cast<int32_t>(ptr[2] | (ptr[3] << 8) | (ptr[4] << 16) | (ptr[5] << 24));
+				uint8_t* target = ptr + 6 + rel;
+				if (is_abort_stub(target)) {
+					LOGF("Patch abort jump at addr: [%016" PRIx64 "]\n",
+					     reinterpret_cast<uint64_t>(ptr));
+					std::memset(ptr, 0x90, 6);
+					ptr += 5;
+				}
+			}
+		}
+	}
+
 	if (!program->elf->IsShared() && program->tls.handler_vaddr != 0 &&
 	    size >= Jit::Call9::GetSize()) {
 		// Replace:
