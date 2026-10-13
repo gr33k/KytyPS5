@@ -640,15 +640,29 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// the GPU in the post-start streaming scene. Once the user pressed Cross,
 	// emulate it on the CPU (exact memcpy semantics) instead of executing it;
 	// if the shape is unexpected, skip it as before.
-	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
-	    Libs::Controller::GameStartPressed()) {
+	// Emulate-or-skip set: straight-line streaming memcpy kernels that hang
+	// some GPUs on post-start inputs. gameStart-gated (menus stay on GPU).
+	static constexpr uint64_t kEmulateHashes[] = {
+	    0xdd7d9b716cfe5abaull, 0x784423232e8b0f83ull, 0x64642df12ff6a9c1ull,
+	    0xc279fd90007129d8ull, 0x4bc2626d395df924ull, 0xcc29312c5a7270c0ull,
+	    0x7df6760d57a05338ull, 0xff1f82d8c6a56610ull,
+	};
+	bool emulate_kernel = false;
+	for (const auto h: kEmulateHashes) {
+		if (program.shader_hash == h) {
+			emulate_kernel = true;
+			break;
+		}
+	}
+	if (emulate_kernel && Libs::Controller::GameStartPressed()) {
 		static std::atomic_uint emu_logged {0};
 		const bool             emulated = CpuEmulateStreamingCopy(
                 m_context, input_info, program, bindings, thread_group_x, thread_group_y,
                 thread_group_z);
 		if (emu_logged.fetch_add(1, std::memory_order_relaxed) < 4) {
-			std::printf("DispatchDirect: dd7d %s (groups=%ux%ux%u)\n",
+			std::printf("DispatchDirect: emu %s hash=0x%016llx (groups=%ux%ux%u)\n",
 			            emulated ? "cpu-emulated" : "skipped",
+			            static_cast<unsigned long long>(program.shader_hash),
 			            thread_group_x, thread_group_y, thread_group_z);
 			std::fflush(stdout);
 		}
