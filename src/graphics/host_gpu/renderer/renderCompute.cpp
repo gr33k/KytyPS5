@@ -238,49 +238,53 @@ namespace {
 // copy at +256, byte offsets from push dword 0 bits [0:8]/[8:16], OOB reads
 // yield 0, OOB writes are dropped. Returns false when the invocation does
 // not match the known shape (caller falls back to skipping).
-static bool EmuFail(uint32_t why, uint64_t hash, uint32_t gx, uint32_t gy, uint32_t gz) {
+static bool EmuFail(uint32_t why, uint64_t hash, uint32_t gx, uint32_t gy, uint32_t gz,
+                    uint32_t nbufs, uint32_t nimages, uint32_t lx, uint32_t ly, uint32_t lz) {
 	static std::atomic_uint refuse_logged {0};
 	if (refuse_logged.fetch_add(1, std::memory_order_relaxed) < 40) {
-		std::printf("DispatchDirect: emu-refuse hash=0x%016llx groups=%ux%ux%u why=%u\n",
-		            static_cast<unsigned long long>(hash), gx, gy, gz, why);
+		std::printf("DispatchDirect: emu-refuse hash=0x%016llx groups=%ux%ux%u why=%u "
+		            "nb=%u ni=%u local=%ux%ux%u\n",
+		            static_cast<unsigned long long>(hash), gx, gy, gz, why, nbufs, nimages,
+		            lx, ly, lz);
 		std::fflush(stdout);
 	}
 	return false;
+}
 }
 
 bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInfo& input_info,
                              const ShaderRecompiler::IR::CompiledShaderInfo& program,
                              PreparedBindings& bindings, uint32_t gx, uint32_t gy, uint32_t gz) {
 	if (program.info.buffers.size() != 2 || gy != 1 || gz != 1) {
-		return EmuFail(1, program.shader_hash, gx, gy, gz);
+		return EmuFail(1, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	if (input_info.threads_num[0] != 256 || input_info.threads_num[1] != 1 ||
 	    input_info.threads_num[2] != 1) {
-		return EmuFail(2, program.shader_hash, gx, gy, gz);
+		return EmuFail(2, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	int src_i = -1, dst_i = -1;
 	for (uint32_t i = 0; i < 2; i++) {
 		if (program.info.buffers[i].written) {
 			if (dst_i >= 0) {
-				return EmuFail(3, program.shader_hash, gx, gy, gz);
+				return EmuFail(3, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 			}
 			dst_i = static_cast<int>(i);
 		} else {
 			if (src_i >= 0) {
-				return EmuFail(4, program.shader_hash, gx, gy, gz);
+				return EmuFail(4, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 			}
 			src_i = static_cast<int>(i);
 		}
 	}
 	if (src_i < 0 || dst_i < 0) {
-		return EmuFail(5, program.shader_hash, gx, gy, gz);
+		return EmuFail(5, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	const auto& src_info = program.info.buffers[src_i];
 	const auto& dst_info = program.info.buffers[dst_i];
 	if (src_info.descriptor_index == UINT32_MAX || dst_info.descriptor_index == UINT32_MAX ||
 	    src_info.descriptor_index >= bindings.buffer_sources.size() ||
 	    dst_info.descriptor_index >= bindings.buffer_sources.size()) {
-		return EmuFail(6, program.shader_hash, gx, gy, gz);
+		return EmuFail(6, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	const auto& resources = *input_info.stage.resources;
 	const auto  src_desc =
@@ -288,12 +292,12 @@ bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInf
 	const auto dst_desc =
 	    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[dst_i]);
 	if (src_desc.Stride() != 4 || dst_desc.Stride() != 4) {
-		return EmuFail(7, program.shader_hash, gx, gy, gz);
+		return EmuFail(7, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	if (program.bindings.push_data_start_dword ==
 	        ShaderRecompiler::IR::PushData::NoStart ||
 	    program.bindings.push_data_start_dword >= bindings.shader_data.size()) {
-		return EmuFail(8, program.shader_hash, gx, gy, gz);
+		return EmuFail(8, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	const uint32_t push_dword = bindings.shader_data[program.bindings.push_data_start_dword];
 	const uint32_t off0       = push_dword & 0xFFu;
@@ -314,7 +318,7 @@ bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInf
 	const auto&    src_range  = bindings.buffer_sources[src_info.descriptor_index];
 	const auto&    dst_range  = bindings.buffer_sources[dst_info.descriptor_index];
 	if (src_range.address == 0 || dst_range.address == 0) {
-		return EmuFail(9, program.shader_hash, gx, gy, gz);
+		return EmuFail(9, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	const uint64_t src_dwords = src_range.size / 4;
 	const uint64_t dst_dwords = dst_range.size / 4;
@@ -327,7 +331,7 @@ bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInf
 	}
 	// Upper sanity bound only; bulk copies emulate at tens of ms each.
 	if (total > (64ull << 20)) {
-		return EmuFail(10, program.shader_hash, gx, gy, gz);
+		return EmuFail(10, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	if (total == 0 || total > (64ull << 20)) {
 		return total == 0;
@@ -339,7 +343,7 @@ bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInf
 		src_bytes.resize(static_cast<size_t>(src_range.size));
 		if (!Libs::LibKernel::Memory::TryReadBufferBacking(src_range.address, src_bytes.data(),
 		                                                    src_range.size)) {
-			return EmuFail(11, program.shader_hash, gx, gy, gz);
+			return EmuFail(11, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 		}
 		src_avail_dwords = src_dwords;
 	}
@@ -374,7 +378,7 @@ bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInf
 	}
 	if (!Libs::LibKernel::Memory::TryWriteBacking(dst_range.address, out.data(),
 	                                                total * sizeof(uint32_t))) {
-		return EmuFail(12, program.shader_hash, gx, gy, gz);
+		return EmuFail(12, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
 	}
 	context.InvalidateMemory(dst_range.address, total * sizeof(uint32_t));
 	return true;
