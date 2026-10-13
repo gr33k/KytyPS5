@@ -813,6 +813,14 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		if (args_offset + sizeof(indirect_xyz) <= mapped.size()) {
 			std::memcpy(indirect_xyz, mapped.data() + args_offset, sizeof(indirect_xyz));
 		}
+			std::printf("DispatchIndirect: submit=%llu shader_hash=0x%016llx args_addr=0x%llx "
+			            "xyz=%ux%ux%u mode=0x%x buf=0x%llx+%llx mapped=%zu\n",
+			            static_cast<unsigned long long>(submit_id),
+			            static_cast<unsigned long long>(program.shader_hash),
+			            static_cast<unsigned long long>(args_addr), indirect_xyz[0], indirect_xyz[1],
+			            indirect_xyz[2], mode,
+			            static_cast<unsigned long long>(args_buffer->CpuAddress()),
+			            static_cast<unsigned long long>(args_buffer->Size()), mapped.size());
 		std::fflush(stdout);
 		// CPU-visible garbage counts hang the GPU (TDR) with no other trace;
 		// skip instead of hanging. Legit dispatches stay far below this.
@@ -837,14 +845,6 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		ResetBindings();
 		return;
 	}
-		std::printf("DispatchIndirect: submit=%llu shader_hash=0x%016llx args_addr=0x%llx "
-		            "xyz=%ux%ux%u mode=0x%x buf=0x%llx+%llx mapped=%zu\n",
-		            static_cast<unsigned long long>(submit_id),
-		            static_cast<unsigned long long>(program.shader_hash),
-		            static_cast<unsigned long long>(args_addr), indirect_xyz[0], indirect_xyz[1],
-		            indirect_xyz[2], mode,
-		            static_cast<unsigned long long>(args_buffer->CpuAddress()),
-		            static_cast<unsigned long long>(args_buffer->Size()), mapped.size());
 	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	                      std::span {&descriptor_stage, 1u})) {
 		ResetBindings();
