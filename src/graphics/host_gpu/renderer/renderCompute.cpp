@@ -659,7 +659,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		const bool             emulated = CpuEmulateStreamingCopy(
                 m_context, input_info, program, bindings, thread_group_x, thread_group_y,
                 thread_group_z);
-		if (emu_logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+		const uint64_t n = emu_logged.fetch_add(1, std::memory_order_relaxed);
+		if (n < 8 || !emulated || (n % 20000) == 0) {
 			std::printf("DispatchDirect: emu %s hash=0x%016llx (groups=%ux%ux%u)\n",
 			            emulated ? "cpu-emulated" : "skipped",
 			            static_cast<unsigned long long>(program.shader_hash),
