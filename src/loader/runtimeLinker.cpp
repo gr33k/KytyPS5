@@ -977,6 +977,13 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
 					ptr[0] = 0x5d; // pop rbp
 					ptr[1] = 0xc3; // ret
 					std::memset(ptr + 2, 0x90, 15);
+				} else if (ptr + 15 < start_ptr + size && ptr[12] == 0xcd &&
+				           ptr[13] == 0x45 && ptr[14] == 0x0f && ptr[15] == 0x0b) {
+					LOGF("Patch abort stub (4-byte trap) at addr: [%016" PRIx64 "]\n",
+					     reinterpret_cast<uint64_t>(ptr));
+					ptr[0] = 0x5d; // pop rbp
+					ptr[1] = 0xc3; // ret
+					std::memset(ptr + 2, 0x90, 14);
 				} else {
 					std::memset(ptr, 0x90, 12);
 				}
