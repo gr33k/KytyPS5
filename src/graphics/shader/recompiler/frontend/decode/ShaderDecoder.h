@@ -625,6 +625,8 @@ enum class Opcode {
 	DS_MIN_RTN_U32,
 	DS_MAX_U32,
 	DS_MAX_RTN_U32,
+	DS_MAX_RTN_U64,
+	DS_CMPST_RTN_B64,
 	DS_AND_B32,
 	DS_AND_RTN_B32,
 	DS_OR_B32,
@@ -763,6 +765,7 @@ enum ImageSampleFlag : uint32_t {
 	ImageSampleFlagCd               = 1u << 8u,
 	ImageSampleFlagGatherHorizontal = 1u << 9u,
 	ImageSampleFlagAdjust           = 1u << 10u,
+	ImageSampleFlagUnnormalized     = 1u << 11u,
 };
 
 enum class ImageDimension : uint32_t {
