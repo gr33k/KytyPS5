@@ -787,12 +787,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 }
 
 void RenderExecutor::SplitOversizedSubmit() {
-	// Batches of hundreds of dispatches in one vkQueueSubmit hang some drivers;
-	// normal phases record an order of magnitude fewer (verified on RE Engine).
-	static constexpr uint32_t kMaxDispatchesPerSubmit = 64;
+	// Batches of dozens of dispatches in one vkQueueSubmit hang some drivers
+	// (KoF XV and RE Engine fight/streaming loads TDR with only ~30 in flight);
+	// normal phases record far fewer per submit. Drain fully so the driver
+	// never holds a large batch of small dispatches.
+	static constexpr uint32_t kMaxDispatchesPerSubmit = 16;
 	if (++m_dispatches_since_submit >= kMaxDispatchesPerSubmit) {
 		m_dispatches_since_submit = 0;
-		m_context.GetCommandScheduler().Flush();
+		m_context.GetCommandScheduler().FlushAndWait();
 	}
 }
 
