@@ -715,7 +715,14 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		            info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi, info->rbp,
 		            info->rsp, info->r8, info->r9, info->r10, info->r11, info->r12, info->r13,
 		            info->r14, info->r15);
-		if (IsReadableRange(info->exception_address - 48, 96)) {
+		if (IsReadableRange(info->exception_address - 256, 320)) {
+			const auto* code = reinterpret_cast<const uint8_t*>(info->exception_address - 256);
+			std::printf("code (pc-256 .. pc+64, fault at byte 256):");
+			for (int i = 0; i < 320; i++) {
+				std::printf("%s%02x", (i % 16 == 0) ? "\n " : " ", code[i]);
+			}
+			std::printf("\n");
+		} else if (IsReadableRange(info->exception_address - 48, 96)) {
 			const auto* code = reinterpret_cast<const uint8_t*>(info->exception_address - 48);
 			std::printf("code (pc-48 .. pc+48, fault at byte 48):");
 			for (int i = 0; i < 96; i++) {
@@ -765,6 +772,18 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 					std::printf("%s%02x", (b % 16 == 0) ? "\n " : " ", cbytes[b]);
 				}
 				std::printf("\n");
+				// Resolve the call itself: target = ret + rel32 at ret-4.
+				int32_t rel = 0;
+				std::memcpy(&rel, reinterpret_cast<const uint8_t*>(ret) - 4, sizeof(rel));
+				const uint64_t target = ret + static_cast<int64_t>(rel);
+				if (IsReadableRange(target, 128)) {
+					const auto* tbytes = reinterpret_cast<const uint8_t*>(target);
+					std::printf("call-target=0x%016" PRIx64 " (target .. target+128):", target);
+					for (int b = 0; b < 128; b++) {
+						std::printf("%s%02x", (b % 16 == 0) ? "\n " : " ", tbytes[b]);
+					}
+					std::printf("\n");
+				}
 			}
 		}
 		std::fflush(stdout);
