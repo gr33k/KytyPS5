@@ -730,6 +730,23 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				std::printf("%s %016" PRIx64, (i % 4 == 0) ? "\n " : "", stack[i]);
 			}
 			std::printf("\n");
+			// Guest return addresses point at game code (0x90.. range): dump a
+			// few bytes around each so the caller can be identified.
+			for (int i = 0; i < 32; i++) {
+				const uint64_t ret = stack[i];
+				if (ret < 0x900000000ull || ret >= 0x920000000ull) {
+					continue;
+				}
+				if (!IsReadableRange(ret - 32, 48)) {
+					continue;
+				}
+				const auto* cbytes = reinterpret_cast<const uint8_t*>(ret - 32);
+				std::printf("ret[%d]=0x%016" PRIx64 " (ret-32 .. ret+16):", i, ret);
+				for (int b = 0; b < 48; b++) {
+					std::printf("%s%02x", (b % 16 == 0) ? "\n " : " ", cbytes[b]);
+				}
+				std::printf("\n");
+			}
 		}
 		std::fflush(stdout);
 	}
