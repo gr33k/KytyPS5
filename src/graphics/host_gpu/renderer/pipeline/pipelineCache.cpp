@@ -312,8 +312,25 @@ struct PipelineCache::ProgramCache {
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
 	                               uint32_t push_data_start_dword,
 	                               std::span<const uint32_t> function_code) {
-		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
-		                                               specialization, push_data_start_dword);
+		ShaderRecompiler::CompileResult result;
+		try {
+			result = ShaderRecompiler::CompileProgram(std::move(translated), options, specialization,
+			                                          push_data_start_dword);
+		} catch (const std::runtime_error&) {
+			// SPIR-V emission failed (e.g. feature the host lacks): leave the
+			// module null so draws/dispatches with this shader are skipped.
+			static std::atomic_uint skipped_emit_count = 0;
+			if (skipped_emit_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+				LOGF("SPIR-V emission threw: hash=0x%016llx; skipping draws/dispatches\n",
+				     static_cast<unsigned long long>(options.shader_hash));
+			}
+			return {
+			    .function_code  = {function_code.begin(), function_code.end()},
+			    .specialization = std::move(specialization),
+			    .program        = {},
+			    .handle         = {.id = ++next_shader_id, .module = nullptr},
+			};
+		}
 		if (!ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv,
 		                         options.maintenance8_enabled)) {
 			DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);

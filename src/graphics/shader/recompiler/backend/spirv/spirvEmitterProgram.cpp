@@ -1,6 +1,9 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
+
+#include <stdexcept>
 
 #include <algorithm>
 #include <bit>
@@ -576,16 +579,16 @@ const IR::ExportInfo& ValueEmitContext::Export(const IR::Inst& inst) const {
 }
 
 [[noreturn]] void ValueEmitContext::Fail(const char* reason) const {
-	EXIT("SPIR-V emission failed: hash=0x%016" PRIx64 " stage=%u reason=%s\n",
+	LOGF("SPIR-V emission failed: hash=0x%016" PRIx64 " stage=%u reason=%s\n",
 	     state.program.shader_hash, static_cast<unsigned>(state.program.stage), reason);
-	std::abort();
+	throw std::runtime_error("SPIR-V emission failed");
 }
 
 [[noreturn]] void ValueEmitContext::Fail(const IR::Inst& inst, const char* reason) const {
-	EXIT("SPIR-V emission failed: hash=0x%016" PRIx64 " stage=%u opcode=%s reason=%s\n",
+	LOGF("SPIR-V emission failed: hash=0x%016" PRIx64 " stage=%u opcode=%s reason=%s\n",
 	     state.program.shader_hash, static_cast<unsigned>(state.program.stage),
 	     IR::ValueOpcodeName(inst.GetOpcode()), reason);
-	std::abort();
+	throw std::runtime_error("SPIR-V emission failed");
 }
 
 void EmitProgram(EmitterState& state) {
