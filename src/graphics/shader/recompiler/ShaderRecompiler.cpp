@@ -486,7 +486,11 @@ void PrepareCallTarget(ShaderSource& source, const CompileOptions& options) {
 	using namespace IR;
 	for (uint32_t i = 0; i < source.decoded.instructions.size(); ++i) {
 		if (source.decoded.instructions[i].opcode != Decoder::Opcode::S_SWAPPC_B64) continue;
-		EXIT_NOT_IMPLEMENTED(source.call.has_value() || options.stage != ShaderType::Compute);
+		if (source.call.has_value() || options.stage != ShaderType::Compute) {
+			// Multiple dynamic call sites (or a non-compute call): abandon the
+			// shader. Callers catch this and skip draws/dispatches with it.
+			throw std::runtime_error("shader has an unsupported dynamic call shape");
+		}
 		source.call = ShaderSource::Call {.instruction = i};
 	}
 	EXIT_IF(options.input_info.compute == nullptr);

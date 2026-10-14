@@ -29,6 +29,7 @@
 #include <fmt/format.h>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
 #include <utility>
@@ -483,19 +484,25 @@ struct PipelineCache::ProgramCache {
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
 
 		ShaderRecompiler::ShaderSource source;
-		if (entry == programs.end()) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
-		auto* current = entry == programs.end() ? &source : entry->second.call_source.get();
 		ShaderRecompiler::TranslateResult translated;
-		if (current != nullptr) {
-			if (current->call) {
-				if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
-				translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
-				translated.program.source_reads = current->reads;
+		try {
+			if (entry == programs.end()) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+			auto* current = entry == programs.end() ? &source : entry->second.call_source.get();
+			if (current != nullptr) {
+				if (current->call) {
+					if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
+					translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
+					translated.program.source_reads = current->reads;
+				} else {
+					translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
+				}
 			} else {
-				translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
+				translated = ShaderRecompiler::TranslateProgram(params.code, options);
 			}
-		} else {
-			translated = ShaderRecompiler::TranslateProgram(params.code, options);
+		} catch (const std::runtime_error&) {
+			// Unsupported shader shape (e.g. dynamic call sites): fall through
+			// with tracked=false so the shader is skipped instead of aborting.
+			translated.tracked = false;
 		}
 		if (!translated.tracked) {
 			// Unrepresentable resource shape: skip draws/dispatches with this
