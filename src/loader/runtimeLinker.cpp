@@ -746,8 +746,14 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			for (int i = 0; i < 32; i++) {
 				const uint64_t ret = stack[i];
+				// A return address points just past a call: require the 0xe8
+				// call opcode 5 bytes back to reject data false positives.
 				if (ret < 0x10000000ull || (ret >= 0x800000000ull && ret < 0x900000000ull) ||
-				    ret >= 0x3000000000ull) {
+				    ret >= 0x3000000000ull || !IsReadableRange(ret - 32, 48)) {
+					continue;
+				}
+				const auto* pre = reinterpret_cast<const uint8_t*>(ret - 5);
+				if (pre[0] != 0xe8) {
 					continue;
 				}
 				if (!IsReadableRange(ret - 32, 48)) {
