@@ -670,16 +670,24 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		const bool             emulated = CpuEmulateStreamingCopy(
                 m_context, input_info, program, bindings, thread_group_x, thread_group_y,
                 thread_group_z);
+		// Triage escape hatch (env KYTY_EXEC_FALLBACK=1): when emulation refuses a
+		// kernel, execute it on the GPU instead of skipping so the game receives
+		// its outputs. Robust drivers tolerate kernels that hang weaker GPUs.
+		static const bool exec_fallback = std::getenv("KYTY_EXEC_FALLBACK") != nullptr;
 		const uint64_t n = emu_logged.fetch_add(1, std::memory_order_relaxed);
 		if (n < 8 || !emulated || (n % 20000) == 0) {
-			std::printf("DispatchDirect: emu %s hash=0x%016llx (groups=%ux%ux%u)\n",
-			            emulated ? "cpu-emulated" : "skipped",
+			std::printf("DispatchDirect: emu %s hash=0x%016llx (groups=%ux%ux%u)%s\n",
+			            emulated ? "cpu-emulated" : (exec_fallback ? "exec-fallback" : "skipped"),
 			            static_cast<unsigned long long>(program.shader_hash),
-			            thread_group_x, thread_group_y, thread_group_z);
+			            thread_group_x, thread_group_y, thread_group_z,
+			            (!emulated && exec_fallback) ? " [fallback]" : "");
 			std::fflush(stdout);
 		}
-		ResetBindings();
-		return;
+		if (emulated || !exec_fallback) {
+			ResetBindings();
+			return;
+		}
+		// Fall through: execute the refused kernel on the GPU.
 	}
 	// One line per dispatch (printf so it lands in the run log): submit ids
 	// in submit-failure reports map back to the exact shader hash here.
