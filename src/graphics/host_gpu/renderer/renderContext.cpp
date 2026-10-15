@@ -8,7 +8,53 @@
 
 #include <algorithm>
 
+#include <cstdio>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#undef min
+#undef max
+#endif
+
 namespace Libs::Graphics {
+
+namespace {
+void LogContextLifetime(const char* what, const void* self) {
+#if defined(_WIN32)
+	void* frames[16] = {};
+	const auto depth = RtlCaptureStackBackTrace(0, 16, frames, nullptr);
+	const auto exe_base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+	std::printf("%s %p (exe base 0x%016llx):", what, self, exe_base);
+	for (DWORD i = 0; i < depth; i++) {
+		const auto addr = reinterpret_cast<uint64_t>(frames[i]);
+		HMODULE      module = nullptr;
+		wchar_t      module_name[MAX_PATH] = {};
+		const wchar_t* short_name          = nullptr;
+		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                       reinterpret_cast<LPCWSTR>(addr), &module) != 0 &&
+		    GetModuleFileNameW(module, module_name, MAX_PATH) != 0) {
+			short_name = wcsrchr(module_name, L'\\');
+			short_name = short_name != nullptr ? short_name + 1 : module_name;
+		}
+		if (short_name != nullptr) {
+			std::printf("%s%ls+0x%llx", (i % 2 == 0) ? "\n " : " ", short_name,
+			            addr - reinterpret_cast<uint64_t>(module));
+		} else {
+			std::printf("%s0x%llx", (i % 2 == 0) ? "\n " : " ", addr);
+		}
+	}
+	std::printf("\n");
+	std::fflush(stdout);
+#else
+	(void)what;
+	(void)self;
+#endif
+}
+} // namespace
 
 RenderContext::RenderContext(GraphicContext& graphics)
     : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics),
@@ -17,9 +63,11 @@ RenderContext::RenderContext(GraphicContext& graphics)
       m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
       m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	LogContextLifetime("RenderContext create", this);
 }
 
 RenderContext::~RenderContext() {
+	LogContextLifetime("RenderContext destroy", this);
 	ShutdownGpu();
 	m_command_scheduler.Shutdown();
 }
