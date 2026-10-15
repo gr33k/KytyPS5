@@ -1126,6 +1126,29 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
 		}
 	}
 
+	// UE4 LowLevelFatal guard bypass (triage): `call [rax+0x28]; cmp byte,1;
+	// jnz +7; call abort; ud2` skips a fatal-error abort when a global flag is
+	// set. Flipping the conditional jump to unconditional lets the game
+	// continue past non-fatal startup checks (GTA DE Start abort). The 4
+	// rel32 bytes of the cmp are position-dependent and always accepted.
+	{
+		auto* start_ptr = reinterpret_cast<uint8_t*>(address);
+		auto* end_ptr   = start_ptr + size;
+		// ff 50 28 | 80 3d ?? ?? ?? ?? 01 | 75 07 | e8
+		static constexpr uint8_t prefix[] = {0xff, 0x50, 0x28, 0x80, 0x3d};
+		for (auto* ptr = start_ptr; ptr + 16 <= end_ptr; ptr++) {
+			if (std::memcmp(ptr, prefix, sizeof(prefix)) != 0) {
+				continue;
+			}
+			if (ptr[10] != 0x01 || ptr[11] != 0x75 || ptr[12] != 0x07 || ptr[13] != 0xe8) {
+				continue;
+			}
+			LOGF("Patch UE4 fatal guard at addr: [%016" PRIx64 "]\n",
+			     reinterpret_cast<uint64_t>(ptr));
+			ptr[11] = 0xeb;
+		}
+	}
+
 	if (!program->elf->IsShared() && program->tls.handler_vaddr != 0 &&
 	    size >= Jit::Call9::GetSize()) {
 		// Replace:
