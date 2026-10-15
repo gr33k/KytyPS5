@@ -368,9 +368,9 @@ void CommandScheduler::WatchdogThread(std::stop_token stop) {
 		if (counter_ok) {
 			last_completed = counter;
 		}
-		std::printf("GpuWatchdog: submitted=%llu completed=%llu%s pending=%zu priority=%zu "
-		            "active=%d tick=%llu stuck_min=%llu\n",
-		            static_cast<unsigned long long>(submitted),
+		std::printf("GpuWatchdog: sched=%p submitted=%llu completed=%llu%s pending=%zu priority=%zu "
+			            "active=%d tick=%llu stuck_min=%llu\n",
+			            static_cast<const void*>(this), static_cast<unsigned long long>(submitted),
 		            static_cast<unsigned long long>(counter_ok ? counter : 0),
 		            counter_ok ? "" : "(query-failed)",
 		            pending, priority, active ? 1 : 0,
