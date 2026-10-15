@@ -251,6 +251,10 @@ static void PrintAbortPointerArrayCandidate(const char* name, uint64_t addr) {
 		}
 	}
 	// Dump the aborting call site: the check above it names the failing condition.
+	// Prefer the recorded return address (stack slots may only hold data).
+	if (abort_caller == 0 && ret != 0) {
+		abort_caller = ret;
+	}
 	if (abort_caller != 0 && Graphics::HostMemoryIsReadable(abort_caller - 64) &&
 	    Graphics::HostMemoryIsReadable(abort_caller + 16)) {
 		const auto* code = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(abort_caller - 64));
