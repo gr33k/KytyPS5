@@ -791,6 +791,11 @@ void RenderExecutor::SplitOversizedSubmit() {
 	// (KoF XV and RE Engine fight/streaming loads TDR with only ~30 in flight);
 	// normal phases record far fewer per submit. Drain fully so the driver
 	// never holds a large batch of small dispatches.
+	// Triage knob (env KYTY_NO_SPLIT=1): skip splitting entirely.
+	static const bool no_split = std::getenv("KYTY_NO_SPLIT") != nullptr;
+	if (no_split) {
+		return;
+	}
 	static constexpr uint32_t kMaxDispatchesPerSubmit = 16;
 	if (++m_dispatches_since_submit >= kMaxDispatchesPerSubmit) {
 		m_dispatches_since_submit = 0;
