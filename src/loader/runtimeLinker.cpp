@@ -1140,12 +1140,12 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
 			if (std::memcmp(ptr, prefix, sizeof(prefix)) != 0) {
 				continue;
 			}
-			if (ptr[10] != 0x01 || ptr[11] != 0x75 || ptr[12] != 0x07 || ptr[13] != 0xe8) {
+			if (ptr[9] != 0x01 || ptr[10] != 0x75 || ptr[11] != 0x07 || ptr[12] != 0xe8) {
 				continue;
 			}
 			LOGF("Patch UE4 fatal guard at addr: [%016" PRIx64 "]\n",
 			     reinterpret_cast<uint64_t>(ptr));
-			ptr[11] = 0xeb;
+			ptr[10] = 0xeb;
 		}
 	}
 
