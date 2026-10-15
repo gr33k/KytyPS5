@@ -84,6 +84,7 @@ private:
 
 	void BeginNext();
 	void PriorityOperationsThread(std::stop_token stop);
+	void WatchdogThread(std::stop_token stop);
 	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
 
@@ -98,6 +99,7 @@ private:
 	std::mutex                   m_operation_mutex;
 	std::condition_variable      m_operation_available;
 	std::jthread                 m_priority_thread;
+	std::jthread                 m_watchdog_thread;
 	bool                         m_priority_active      = false;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;
