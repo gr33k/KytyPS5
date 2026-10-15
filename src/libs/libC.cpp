@@ -225,6 +225,7 @@ static void PrintAbortPointerArrayCandidate(const char* name, uint64_t addr) {
 		Common::Singleton<Loader::RuntimeLinker>::Instance()->StackTrace(rbp, rsp);
 	}
 
+	uint64_t abort_caller = 0;
 	if (rsp != 0) {
 		LOGF("Guest abort stack words:\n");
 		auto* linker = Common::Singleton<Loader::RuntimeLinker>::Instance();
@@ -239,12 +240,25 @@ static void PrintAbortPointerArrayCandidate(const char* name, uint64_t addr) {
 				auto module_name = Common::PathToString(program->file_name.filename());
 				LOGF("\t [%02d] 0x%016" PRIx64 " %s+0x%016" PRIx64 "\n", i, value,
 				     module_name.c_str(), value - program->base_vaddr);
+				if (abort_caller == 0) {
+					abort_caller = value;
+				}
 			} else {
 				LOGF("\t [%02d] 0x%016" PRIx64 "\n", i, value);
 			}
 			PrintAbortPointerCandidate(fmt::format("stack[{:02d}]", i).c_str(), value);
 			PrintAbortPointerArrayCandidate(fmt::format("stack[{:02d}]", i).c_str(), value);
 		}
+	}
+	// Dump the aborting call site: the check above it names the failing condition.
+	if (abort_caller != 0 && Graphics::HostMemoryIsReadable(abort_caller - 64) &&
+	    Graphics::HostMemoryIsReadable(abort_caller + 16)) {
+		const auto* code = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(abort_caller - 64));
+		LOGF("Guest abort caller 0x%016" PRIx64 " (-64 .. +16):", abort_caller);
+		for (int i = 0; i < 80; i++) {
+			LOGF("%s%02x", (i % 16 == 0) ? "\n " : " ", code[i]);
+		}
+		LOGF("\n");
 	}
 
 	EXIT("Guest abort()\n");
