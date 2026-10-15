@@ -134,7 +134,10 @@ CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graph
     : m_master(graphics), m_context(context), m_graphics(graphics),
       m_command_pool(graphics, m_master), m_command(*this),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }),
-      m_watchdog_thread([this](std::stop_token stop) { WatchdogThread(stop); }) {}
+      m_watchdog_thread([this](std::stop_token stop) { WatchdogThread(stop); }) {
+	std::printf("CommandScheduler create %p\n", static_cast<const void*>(this));
+	std::fflush(stdout);
+}
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();
