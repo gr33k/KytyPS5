@@ -2,6 +2,8 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "common/threads.h"
+#include "kernel/pthread.h"
 
 #include <chrono>
 #include <cstdio>
@@ -63,9 +65,19 @@ void MasterSemaphore::Wait(uint64_t tick) {
 			break;
 		}
 		if (result == vk::Result::eTimeout && (++slices % 5) == 0) {
-			std::printf("GpuFenceWait: still waiting tick=%llu (%llus)\n",
+			char thread_name[64] = "?";
+			if (auto self = Libs::LibKernel::PthreadSelfOrNull(); self != nullptr) {
+				if (Libs::LibKernel::PthreadGetname(self, thread_name) != 0) {
+					std::snprintf(thread_name, sizeof(thread_name), "guest-%d",
+					            Common::Thread::GetThreadIdUnique());
+				}
+			} else {
+				std::snprintf(thread_name, sizeof(thread_name), "host-%d",
+				            Common::Thread::GetThreadIdUnique());
+			}
+			std::printf("GpuFenceWait: still waiting tick=%llu (%llus) thread=%s\n",
 			            static_cast<unsigned long long>(tick),
-			            static_cast<unsigned long long>(slices));
+			            static_cast<unsigned long long>(slices), thread_name);
 			std::fflush(stdout);
 		}
 	}
