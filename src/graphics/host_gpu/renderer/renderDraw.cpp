@@ -37,6 +37,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -203,12 +204,15 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	}
 
 	auto log_id = g_draw_state_log_count.fetch_add(1);
-	// Log the first draws (boot) plus periodic samples so later phases are
-	// covered too: the first 192 only ever show loading/menu draws, never the
-	// 3D scene, so a black world cannot be diagnosed from them.
-	const bool early   = log_id < 192u;
-	const bool sampled = (log_id % 20000u) == 0u && log_id < 192u + 20000u * 128u;
-	if (!early && !sampled) {
+	// Log the first draws (boot) under the full debug dump, or periodic samples
+	// when only the lightweight sample switch is on: the first 192 only ever
+	// show loading/menu draws, never the 3D scene, so a black world cannot be
+	// diagnosed from them.
+	if (graphics_debug_dump_enabled()) {
+		if (log_id >= 192u) {
+			return;
+		}
+	} else if (!((log_id % 20000u) == 0u && log_id < 20000u * 200u)) {
 		return;
 	}
 
@@ -1024,7 +1028,11 @@ static void CommitIndexBuffer(vk::CommandBuffer vk_buffer, const PreparedIndexBu
 static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo& draw,
 	                             const DrawRenderState& state, uint32_t index_type_and_size,
                                  const void* index_addr) {
-	if (!graphics_debug_dump_enabled()) {
+	// The full debug dump is extremely heavy (it also logs every CP packet), so
+	// the draw-state line has its own switch: env KYTY_DRAW_STATE_SAMPLE=1 logs
+	// one sampled line throughout the run without the rest of the dump.
+	static const bool sample_enabled = std::getenv("KYTY_DRAW_STATE_SAMPLE") != nullptr;
+	if (!graphics_debug_dump_enabled() && !sample_enabled) {
 		return;
 	}
 
