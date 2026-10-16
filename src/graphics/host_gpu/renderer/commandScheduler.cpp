@@ -485,6 +485,13 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
+	// Per-submit record: maps watchdog stuck ticks back to the exact queued
+	// work (debug op/id) and its semaphore waits. No flush (volume); the
+	// wedge under investigation does not crash, so nothing is lost.
+	std::printf("Submit: tick=%llu op=%u submit=%llu waits=%u signals=%u\n",
+	            static_cast<unsigned long long>(tick), m_command.m_debug_op,
+	            static_cast<unsigned long long>(m_command.m_debug_submit_id),
+	            submit.num_wait_semaphores, submit.num_signal_semaphores);
 	m_command.m_buffer = nullptr;
 	return tick;
 }
