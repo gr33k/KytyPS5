@@ -802,6 +802,13 @@ void RenderExecutor::SplitOversizedSubmit() {
 	if (++m_dispatches_since_submit >= kMaxDispatchesPerSubmit) {
 		m_dispatches_since_submit = 0;
 		m_context.GetCommandScheduler().FlushAndWait();
+		// Streaming loads have no frame boundaries (where GC normally runs):
+		// collect periodically so retired cache entries don't accumulate
+		// until VRAM exhausts.
+		static thread_local uint32_t gc_counter = 0;
+		if ((gc_counter++ & 15u) == 0) {
+			m_context.RunGarbageCollector();
+		}
 	}
 }
 
