@@ -203,7 +203,12 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	}
 
 	auto log_id = g_draw_state_log_count.fetch_add(1);
-	if (log_id >= 192) {
+	// Log the first draws (boot) plus periodic samples so later phases are
+	// covered too: the first 192 only ever show loading/menu draws, never the
+	// 3D scene, so a black world cannot be diagnosed from them.
+	const bool early   = log_id < 192u;
+	const bool sampled = (log_id % 20000u) == 0u && log_id < 192u + 20000u * 128u;
+	if (!early && !sampled) {
 		return;
 	}
 
@@ -226,7 +231,8 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	    " extent=%ux%u prim=%u index_count=%u flags=0x%08" PRIx32 " color_mask=0x%08" PRIx32
 	    " cc_mode=%u cc_op=0x%02x"
 	    " blend=%s src=%u dst=%u comb=%u ps_tex=%d sampled=%d storage=%d ps_kill=%s target_mode0=%u"
-	    " depth_test=%s depth_write=%s depth_func=%u depth_clear=%s viewport=(%.1f,%.1f %.1fx%.1f) "
+	    " depth_test=%s depth_write=%s depth_func=%u depth_clear=%s depth_bound=%s"
+	    " depth_cmp=%u depth_clear_val=%.2f viewport=(%.1f,%.1f %.1fx%.1f) "
 	    "scissor=(%d,%d)-(%d,%d)\n",
 	    log_id, buffer.GetContext().GetGpu().GetFrameNum(), draw_name, RenderColorTypeName(color),
 	    color.desc.info.data.address, extent.width, extent.height,
@@ -237,7 +243,9 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	    static_cast<int>(ps_resources.images.size() - sampled_images),
 	    ps_input_info.ps_pixel_kill_enable ? "true" : "false", ps_input_info.target_output_mode[0],
 	    dc.z_enable ? "true" : "false", dc.z_write_enable ? "true" : "false", dc.zfunc,
-	    depth.depth_clear_enable ? "true" : "false", vp0.xoffset - vp0.xscale,
+	    depth.depth_clear_enable ? "true" : "false", depth.image_id ? "true" : "false",
+	    static_cast<uint32_t>(depth.depth_compare_op),
+	    static_cast<double>(depth.depth_clear_value), vp0.xoffset - vp0.xscale,
 	    vp0.yoffset - vp0.yscale, vp0.xscale * 2.0f, vp0.yscale * 2.0f, sc.left, sc.top, sc.right,
 	    sc.bottom);
 
