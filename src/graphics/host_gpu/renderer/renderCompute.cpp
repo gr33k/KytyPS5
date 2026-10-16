@@ -882,26 +882,30 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		// CPU-visible garbage counts hang the GPU (TDR) with no other trace;
 		// skip instead of hanging. Legit dispatches stay far below this.
 		if (mapped.size() == 0 || args_offset + sizeof(indirect_xyz) > mapped.size()) {
-			// Device-local args are unreadable from the CPU and have hung the GPU
-			// with garbage counts. Drain so prior work completes, re-read, then
-			// apply the same bound; skip when still unreadable or insane.
-			m_context.GetCommandScheduler().FlushAndWait();
-			const auto fresh = args_buffer->Mapped();
-			uint32_t   xyz[3] = {};
-			bool       args_ok = false;
-			if (args_offset + sizeof(xyz) <= fresh.size()) {
-				std::memcpy(xyz, fresh.data() + args_offset, sizeof(xyz));
-				args_ok = true;
-			}
-			const uint64_t drained_total = static_cast<uint64_t>(xyz[0]) * xyz[1] * xyz[2];
-			std::printf("DispatchIndirect: drained submit=%llu shader_hash=0x%016llx xyz=%ux%ux%u ok=%d\n",
-			            static_cast<unsigned long long>(submit_id),
-			            static_cast<unsigned long long>(program.shader_hash),
-			            xyz[0], xyz[1], xyz[2], args_ok ? 1 : 0);
-			std::fflush(stdout);
-			if (!args_ok || drained_total == 0 || drained_total > (1ull << 24)) {
+			// Device-local arguments cannot be read by the CPU, but the GPU reads
+			// them itself when the dispatch is submitted indirectly, and they are
+			// the game's own counts, so there is nothing here for us to bound.
+			// Skipping them (as an earlier drain-and-validate did) removed every
+			// GPU-driven dispatch: the scene-building pipeline runs through
+			// exactly these kernels, so the world stayed black. Dispatch indirect
+			// and log, bounded, that this path is taken.
+			//
+			// Triage knob (env KYTY_SKIP_DEVICE_LOCAL_INDIRECT=1): restore the
+			// old skip if dispatching these ever hangs the GPU again.
+			static const bool skip_device_local =
+			    std::getenv("KYTY_SKIP_DEVICE_LOCAL_INDIRECT") != nullptr;
+			if (skip_device_local) {
 				ResetBindings();
 				return;
+			}
+			static std::atomic_uint device_local_log_count {0};
+			if (device_local_log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+				std::printf("DispatchIndirect: device-local args, dispatch indirect "
+				            "submit=%llu shader_hash=0x%016llx args_addr=0x%llx\n",
+				            static_cast<unsigned long long>(submit_id),
+				            static_cast<unsigned long long>(program.shader_hash),
+				            static_cast<unsigned long long>(args_addr));
+				std::fflush(stdout);
 			}
 		}
 		if (mapped.size() > 0) {
