@@ -54,15 +54,21 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 	m_pending_pools.emplace_back(m_current_pool, m_master_semaphore.CurrentTick());
 	{
 		auto& [pool, tick] = m_pending_pools.front();
-		// Prefer reusing a rested pool over creating a new one: pools created
+		// Reuse a rested pool when the GPU is done with it; otherwise create
+		// a fresh pool instead of waiting. Waiting here hangs forever when
+		// the game idles afterwards (no further submit ever signals the
+		// tick), parking the render thread with the heap mutex held. Retired
+		// pools are reclaimed on later rotations once free. Pools created
 		// while the GPU is backed up can report fragmented on first use
-		// (observed on amdvlk). A short hitch beats a wedged pool.
-		if (!m_master_semaphore.IsFree(tick)) {
-			m_master_semaphore.Wait(tick, "desc-reuse");
+		// (observed on amdvlk); the fresh-pool path below retries and,
+		// as a last resort, drains and rebuilds.
+		if (m_master_semaphore.IsFree(tick)) {
+			m_current_pool = pool;
+			m_pending_pools.pop_front();
+			EXIT_IF(m_graphics.device.resetDescriptorPool(m_current_pool, {}) != vk::Result::eSuccess);
+		} else {
+			CreateDescriptorPool();
 		}
-		m_current_pool = pool;
-		m_pending_pools.pop_front();
-		EXIT_IF(m_graphics.device.resetDescriptorPool(m_current_pool, {}) != vk::Result::eSuccess);
 	}
 
 	m_sets.clear();
