@@ -611,11 +611,11 @@ bool GuestGpu::Process(Submission& submission) {
 			// Age caches at the frame boundary, not once per command list.
 			m_renderer.RunGarbageCollector();
 			cp.EmitGlobalBarrier();
-			m_renderer.GetCommandScheduler().DeferPriorityOperation(
-			    [ready = m_suspend_point_ready] { ready->release(); });
 			if (m_renderer.GetCommandScheduler().Active()) {
 				m_renderer.GetCommandScheduler().Flush();
 			}
+			m_renderer.GetCommandScheduler().DeferPriorityOperation(
+			    [ready = m_suspend_point_ready] { ready->release(); });
 			cp.BufferFlush();
 			cp.Reset();
 			break;
@@ -1245,16 +1245,16 @@ void CommandProcessor::EmitGlobalBarrier() {
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {
 	(void)CurrentBuffer().Handle();
+	// Flush recorded work first so the stamped tick below is already submitted:
+	// a completion stamped on a future tick hangs forever when the game idles
+	// afterwards waiting on that very completion.
+	if (GetScheduler().Active()) {
+		GetScheduler().Flush();
+	}
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, event_id = m_interrupt_event_id, interrupt_context_id] {
 		    renderer.TriggerInterrupt(event_id, interrupt_context_id);
 	    });
-	// The deferred interrupt waits on the tick stamped above; flush so that
-	// tick is actually submitted even if the game idles afterwards (an EOP
-	// with no following submit would otherwise never fire).
-	if (GetScheduler().Active()) {
-		GetScheduler().Flush();
-	}
 }
 
 void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
@@ -1345,9 +1345,9 @@ void CommandProcessor::Flip() {
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	(void)command.Handle();
+	GetScheduler().Flush();
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
-	GetScheduler().Flush();
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
@@ -1365,9 +1365,9 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	(void)command.Handle();
+	GetScheduler().Flush();
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
-	GetScheduler().Flush();
 }
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action,
@@ -1391,12 +1391,12 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	(void)command.Handle();
+	GetScheduler().Flush();
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, event_id = m_interrupt_event_id, request] {
 		    renderer.GetVideoOut().CompleteFlip(request);
 		    renderer.TriggerInterrupt(event_id, 0);
 	    });
-	GetScheduler().Flush();
 }
 
 void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
@@ -1411,9 +1411,9 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 	ProcessorScope processor_scope(*this);
 
 	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
+	GetScheduler().Flush();
 	GetScheduler().DeferPriorityOperation(
 	    [this, request_id] { m_renderer.GetVideoOut().CompleteFlip(request_id); });
-	GetScheduler().Flush();
 }
 
 void CommandProcessor::SynchronizeGpu() {

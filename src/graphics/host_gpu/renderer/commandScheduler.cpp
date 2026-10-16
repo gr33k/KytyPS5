@@ -284,7 +284,10 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 	std::unique_lock lock(m_operation_mutex);
 	if (m_operation_state == OperationState::Open) {
 		auto& queue = priority ? m_priority_operations : m_pending_operations;
-		queue.push({std::move(operation), CurrentTick()});
+		// Priority completions wait on the last submitted tick: stamping the
+		// next tick hangs forever when no further submit follows (idle game
+		// waiting on that very completion). Callers flush recorded work first.
+		queue.push({std::move(operation), priority ? CurrentTick() - 1 : CurrentTick()});
 		lock.unlock();
 		if (priority) {
 			m_operation_available.notify_one();
