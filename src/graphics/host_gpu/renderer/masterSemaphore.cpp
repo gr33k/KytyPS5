@@ -3,6 +3,9 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
 
+#include <chrono>
+#include <cstdio>
+
 namespace Libs::Graphics {
 
 MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics) {
@@ -44,12 +47,28 @@ void MasterSemaphore::Wait(uint64_t tick) {
 		return;
 	}
 
+	// Long waits are the signature of a wedged GPU or an unsubmitted tick.
+	// Wait in 1s slices so a stuck tick is logged (every 5s) instead of going
+	// silent; semantics stay an indefinite wait.
 	vk::SemaphoreWaitInfo wait_info {};
 	wait_info.semaphoreCount = 1;
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	vk::Result result = vk::Result::eTimeout;
+	uint64_t slices = 0;
+	while (result == vk::Result::eTimeout) {
+		result = m_graphics.device.waitSemaphores(&wait_info, 1000000000ull);
+		if (result != vk::Result::eSuccess && result != vk::Result::eTimeout) {
+			break;
+		}
+		if (result == vk::Result::eTimeout && (++slices % 5) == 0) {
+			std::printf("GpuFenceWait: still waiting tick=%llu (%llus)\n",
+			            static_cast<unsigned long long>(tick),
+			            static_cast<unsigned long long>(slices));
+			std::fflush(stdout);
+		}
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
 }
