@@ -3000,6 +3000,16 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbs(PthreadCond* cond, PthreadMutex* mutex
 
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
 	PRINT_NAME();
+	{
+		// Sampled wait identity (thread/condvar) for parking diagnosis.
+		// Unsampled logging would flood; every 4096th wait names the parties.
+		static std::atomic_uint wait_sample {0};
+		if (wait_sample.fetch_add(1, std::memory_order_relaxed) % 4096 == 0) {
+			const char* thread_name = (g_pthread_self != nullptr) ? g_pthread_self->name.c_str() : "?";
+			LOGF("\tPthreadCondWait sample: thread=%s cond=%p mutex=%p\n", thread_name,
+			     static_cast<const void*>(cond), static_cast<const void*>(mutex));
+		}
+	}
 
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
 
