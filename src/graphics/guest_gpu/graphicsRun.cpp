@@ -613,6 +613,9 @@ bool GuestGpu::Process(Submission& submission) {
 			cp.EmitGlobalBarrier();
 			m_renderer.GetCommandScheduler().DeferPriorityOperation(
 			    [ready = m_suspend_point_ready] { ready->release(); });
+			if (m_renderer.GetCommandScheduler().Active()) {
+				m_renderer.GetCommandScheduler().Flush();
+			}
 			cp.BufferFlush();
 			cp.Reset();
 			break;
@@ -1246,6 +1249,12 @@ void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id)
 	    [&renderer = m_renderer, event_id = m_interrupt_event_id, interrupt_context_id] {
 		    renderer.TriggerInterrupt(event_id, interrupt_context_id);
 	    });
+	// The deferred interrupt waits on the tick stamped above; flush so that
+	// tick is actually submitted even if the game idles afterwards (an EOP
+	// with no following submit would otherwise never fire).
+	if (GetScheduler().Active()) {
+		GetScheduler().Flush();
+	}
 }
 
 void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,

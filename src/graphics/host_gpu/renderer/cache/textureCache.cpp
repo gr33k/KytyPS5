@@ -1800,6 +1800,9 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 		download.Invalidate(offset, range.size);
 		LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
 	});
+	if (m_scheduler.Active()) {
+		m_scheduler.Flush();
+	}
 	return true;
 }
 
