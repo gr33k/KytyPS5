@@ -33,7 +33,7 @@ DescriptorHeap::DescriptorHeap(GraphicContext& graphics, MasterSemaphore& master
 DescriptorHeap::~DescriptorHeap() {
 	m_graphics.device.destroyDescriptorPool(m_current_pool, nullptr);
 	for (const auto& [pool, tick]: m_pending_pools) {
-		m_master_semaphore.Wait(tick);
+		m_master_semaphore.Wait(tick, "desc-dtor");
 		m_graphics.device.destroyDescriptorPool(pool, nullptr);
 	}
 }
@@ -58,7 +58,7 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 		// while the GPU is backed up can report fragmented on first use
 		// (observed on amdvlk). A short hitch beats a wedged pool.
 		if (!m_master_semaphore.IsFree(tick)) {
-			m_master_semaphore.Wait(tick);
+			m_master_semaphore.Wait(tick, "desc-reuse");
 		}
 		m_current_pool = pool;
 		m_pending_pools.pop_front();
@@ -90,7 +90,7 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 			std::fflush(stdout);
 			const uint64_t last_tick = m_master_semaphore.CurrentTick();
 			if (last_tick > 0) {
-				m_master_semaphore.Wait(last_tick - 1);
+				m_master_semaphore.Wait(last_tick - 1, "desc-rebuild");
 			}
 			for (const auto& [pool, tick]: m_pending_pools) {
 				m_graphics.device.destroyDescriptorPool(pool, nullptr);

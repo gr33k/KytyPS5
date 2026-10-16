@@ -29,7 +29,7 @@ public:
 	[[nodiscard]] vk::Semaphore Handle() const noexcept { return m_semaphore; }
 
 	void Refresh();
-	void Wait(uint64_t tick);
+	void Wait(uint64_t tick, const char* why = "");
 
 private:
 	GraphicContext&       m_graphics;

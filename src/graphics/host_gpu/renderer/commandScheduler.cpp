@@ -222,7 +222,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 
 void CommandScheduler::FlushAndWait() {
 	const auto tick = Submit();
-	m_master.Wait(tick);
+	m_master.Wait(tick, "flush-and-wait");
 	BeginNext();
 }
 
@@ -231,12 +231,12 @@ void CommandScheduler::Finish() {
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
-	m_master.Wait(CurrentTick() - 1);
+	m_master.Wait(CurrentTick() - 1, "finish");
 	BeginNext();
 	PopPendingOperations();
 }
 
-void CommandScheduler::Wait(uint64_t tick) {
+void CommandScheduler::Wait(uint64_t tick, const char* why) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		CheckActive();
@@ -245,10 +245,10 @@ void CommandScheduler::Wait(uint64_t tick) {
 		// resources are released only at the next GPU operation boundary.
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
-		m_master.Wait(tick);
+		m_master.Wait(tick, why);
 		BeginNext();
 	} else {
-		m_master.Wait(tick);
+		m_master.Wait(tick, why);
 	}
 }
 
@@ -323,7 +323,7 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_active      = true;
 			m_priority_active_tick = operation.tick;
 		}
-		m_master.Wait(operation.tick);
+		m_master.Wait(operation.tick, "priority-op");
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
 		}

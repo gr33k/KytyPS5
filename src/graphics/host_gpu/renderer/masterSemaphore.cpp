@@ -40,7 +40,7 @@ void MasterSemaphore::Refresh() {
 	}
 }
 
-void MasterSemaphore::Wait(uint64_t tick) {
+void MasterSemaphore::Wait(uint64_t tick, const char* why) {
 	if (IsFree(tick)) {
 		return;
 	}
@@ -75,9 +75,9 @@ void MasterSemaphore::Wait(uint64_t tick) {
 				std::snprintf(thread_name, sizeof(thread_name), "host-%d",
 				            Common::Thread::GetThreadIdUnique());
 			}
-			std::printf("GpuFenceWait: still waiting tick=%llu (%llus) thread=%s\n",
+			std::printf("GpuFenceWait: still waiting tick=%llu (%llus) thread=%s why=%s\n",
 			            static_cast<unsigned long long>(tick),
-			            static_cast<unsigned long long>(slices), thread_name);
+			            static_cast<unsigned long long>(slices), thread_name, why);
 			std::fflush(stdout);
 		}
 	}
