@@ -7,6 +7,8 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <numeric>
@@ -71,27 +73,83 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	const bool with_bda = bool(flags & vk::BufferUsageFlagBits::eShaderDeviceAddress);
 	const VmaAllocationCreateFlags bda_flag =
 	    with_bda ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0;
-	VmaAllocationCreateInfo allocation_info {};
-	allocation_info.flags =
+	const VmaAllocationCreateFlags base_flags =
 	    VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | bda_flag | AllocationFlags(usage);
-	allocation_info.usage = AllocationUsage(usage);
-	allocation_info.preferredFlags = usage == MemoryUsage::DeviceLocal
-	                                     ? VkMemoryPropertyFlags {}
-	                                     : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	const VkMemoryPropertyFlags preferred =
+	    usage == MemoryUsage::DeviceLocal ? VkMemoryPropertyFlags {}
+	                                      : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+	// Attempt ladder. Suballocation comes first: dedicated device-local
+	// allocations each issue their own vkAllocateMemory, cannot reuse a block's
+	// free space, and round every tiny buffer up to the driver's allocation
+	// granularity, so they waste memory and fail first once the device-local
+	// portion of the heap is exhausted (observed: every world-load OOM was a
+	// small dedicated BDA buffer). A suballocated buffer fits into an existing
+	// block instead. VMA is created with
+	// VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT, which marks every block it
+	// creates with the device-address flag, so a suballocated buffer keeps a
+	// valid address for the BDA paths. The remaining attempts relax the budget
+	// guard (a client-side check that refuses over an advised budget even when
+	// the driver could still serve the request), fall back to the dedicated
+	// allocation, and finally drop the memory-type preference.
+	struct Attempt {
+		VmaAllocationCreateFlags flags;
+		VkMemoryPropertyFlags    preferred;
+	};
+	constexpr VmaAllocationCreateFlags kSuballocMask = static_cast<VmaAllocationCreateFlags>(
+	    VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT);
+	// Primary: keep the budget guard, drop only the dedicated requirement so
+	// the buffer can share a block. For a non-BDA buffer the dedicated bit was
+	// already clear, so this is exactly the previous request.
+	const VmaAllocationCreateFlags suballoc_budget =
+	    base_flags & ~static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT);
+	const VmaAllocationCreateFlags suballoc =
+	    base_flags & ~kSuballocMask;
+	const std::array<Attempt, 4>   attempts {{
+	    {suballoc_budget, preferred},
+	    {suballoc, preferred},
+	    {base_flags, preferred},
+	    {suballoc, VkMemoryPropertyFlags {}},
+	}};
 
 	VmaAllocationInfo allocation_result {};
 	VkBuffer          native_buffer = VK_NULL_HANDLE;
-	const auto        result        = static_cast<vk::Result>(vmaCreateBuffer(
-	    graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info), &allocation_info,
-	    &native_buffer, &m_allocation, &allocation_result));
-	if (result != vk::Result::eSuccess) {
+	VkResult          result        = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+	for (size_t i = 0; i < attempts.size(); i++) {
+		const auto& attempt = attempts[i];
+
+		VmaAllocationCreateInfo allocation_info {};
+		allocation_info.flags          = attempt.flags;
+		allocation_info.usage          = AllocationUsage(usage);
+		allocation_info.preferredFlags = attempt.preferred;
+
+		m_allocation  = nullptr;
+		native_buffer = VK_NULL_HANDLE;
+		result        = vmaCreateBuffer(
+		    graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info), &allocation_info,
+		    &native_buffer, &m_allocation, &allocation_result);
+		if (result == VK_SUCCESS) {
+			if (i != 0) {
+				// Visible once, and counted, so the fallback path can be
+				// measured without flooding the log.
+				static std::atomic_uint fallback_log_count {0};
+				if (fallback_log_count.fetch_add(1, std::memory_order_relaxed) < 32) {
+					LOGF("Buffer: allocation fell back to attempt %zu (size=0x%llx)\n", i,
+					     static_cast<unsigned long long>(size));
+					std::fflush(stdout);
+				}
+			}
+			break;
+		}
+	}
+	if (result != VK_SUCCESS) {
 		graphics.LogMemoryBudget();
 		LOGF("Buffer: vmaCreateBuffer failed: size=0x%llx usage=0x%x result=%s\n",
 		     static_cast<unsigned long long>(size), static_cast<uint32_t>(flags),
-		     vk::to_string(result).c_str());
+		     vk::to_string(static_cast<vk::Result>(result)).c_str());
 		std::fflush(stdout);
 	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 
 	m_buffer = native_buffer;
 	if (with_bda) {
