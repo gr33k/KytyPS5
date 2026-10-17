@@ -1339,7 +1339,8 @@ static uint64_t CompositeOverrideAddress() {
 	}
 	// Fall back to the scene target with the most color-target writes so the
 	// override works without a per-run guest-address file.
-	return BestSceneTarget();
+	uint64_t best = BestSceneTarget();
+	return best;
 }
 
 static void ApplyCompositeOverride(CommandBuffer& buffer,
@@ -1351,7 +1352,7 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 		return;
 	}
 	// Only composite draws target the video-out buffer (guest addr 0x8fc...).
-	if ((state.color_info[0].desc.info.data.address >> 32) != 0x8fc) {
+	if ((state.color_info[0].desc.info.data.address & 0xFFF0000000ull) != 0x8FC0000000ull) {
 		return;
 	}
 	auto& cache = buffer.GetContext().GetTextureCache();
