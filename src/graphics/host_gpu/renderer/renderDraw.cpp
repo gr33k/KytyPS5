@@ -80,6 +80,37 @@ std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 }
 
 static std::atomic<uint32_t> g_draw_state_log_count   = 0;
+// Scene-target tracking for the composite override: count writes to each guest
+// color render target so the composite pass can auto-detect the full scene
+// target (the one with the most draws) regardless of per-run guest addresses.
+static std::mutex                              g_scene_target_mutex {};
+static std::unordered_map<uint64_t, uint32_t>  g_scene_target_draws {};
+static uint64_t                                g_best_scene_target   = 0;
+static uint32_t                                g_best_scene_target_draws = 0;
+
+[[nodiscard]] static uint64_t BestSceneTarget() {
+	std::lock_guard<std::mutex> lock {g_scene_target_mutex};
+	return g_best_scene_target;
+}
+
+[[nodiscard]] static void NoteSceneTargetWrite(uint64_t address,
+                                               const vk::Extent2D& extent) {
+	// Only large color render targets qualify as scene targets; skip the
+	// video-out buffer itself (guest addr 0x8fc...) and tiny UI/offscreen RTs.
+	if (address == 0 || (address >> 32) == 0x8fc || extent.width < 1280 ||
+	    extent.height < 720) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock {g_scene_target_mutex};
+	auto&                        count = g_scene_target_draws[address];
+	++count;
+	if (count > g_best_scene_target_draws) {
+		g_best_scene_target_draws   = count;
+		g_best_scene_target         = address;
+	}
+}
+
+
 static std::atomic<uint32_t> g_draw_input_log_count   = 0;
 static std::atomic<uint32_t> g_mrt_state_log_count    = 0;
 
@@ -528,6 +559,8 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		const auto extent       = target.Extent();
 		state.width             = std::min(state.width, extent.width);
 		state.height            = std::min(state.height, extent.height);
+		// Remember this color target for scene-target auto-detection.
+		NoteSceneTargetWrite(target.desc.info.data.address, extent);
 		state.num_layers        = std::min(state.num_layers, view.layer_count);
 		state.num_color_attachments = std::max(state.num_color_attachments, target.target_slot + 1);
 		auto& attachment            = state.color_attachments[target.target_slot];
@@ -1279,6 +1312,75 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	return true;
 }
 
+// Composite override: force the full-scene color target as texture[0] for draws
+// into the video-out buffer so the rendered 3D world reaches the screen instead
+// of a partial/wrong texture. The scene target address is taken from env
+// KYTY_COMPOSITE_OVERRIDE_FILE (default composite_override.txt), or auto-detected
+// as the large color render target with the most writes. Called after
+// PrepareGraphicsBindings resolved the guest bindings but before CommitBindings,
+// so the override survives to the draw.
+static uint64_t CompositeOverrideAddress() {
+	const char* path = std::getenv("KYTY_COMPOSITE_OVERRIDE_FILE");
+	if (path == nullptr || path[0] == ' ') {
+		path = "composite_override.txt";
+	}
+	uint64_t file_addr = 0ull;
+	if (FILE* file = std::fopen(path, "rb"); file != nullptr) {
+		char buf[64] = {};
+		if (std::fread(buf, 1, sizeof(buf) - 1, file) > 0) {
+			std::fclose(file);
+			file_addr = std::strtoull(buf, nullptr, 16);
+		} else {
+			std::fclose(file);
+		}
+	}
+	if (file_addr != 0) {
+		return file_addr;
+	}
+	// Fall back to the scene target with the most color-target writes so the
+	// override works without a per-run guest-address file.
+	return BestSceneTarget();
+}
+
+static void ApplyCompositeOverride(CommandBuffer& buffer,
+                                   const DrawRenderState& state,
+                                   PreparedBindings* pixel_bindings) {
+	const uint64_t ov_addr = CompositeOverrideAddress();
+	if (ov_addr == 0 || state.color_count == 0 || !state.color_info[0].image_id ||
+	    pixel_bindings == nullptr || pixel_bindings->images.empty()) {
+		return;
+	}
+	// Only composite draws target the video-out buffer (guest addr 0x8fc...).
+	if ((state.color_info[0].desc.info.data.address >> 32) != 0x8fc) {
+		return;
+	}
+	auto& cache = buffer.GetContext().GetTextureCache();
+	const auto id = cache.FindImageFromRange(ov_addr, 4, false);
+	if (!id) {
+		return;
+	}
+	auto& image = cache.GetImage(id);
+	TextureCache::ImageDesc scene_desc {};
+	scene_desc.info = image.info;
+	scene_desc.view_info.format = image.info.pixel_format;
+	scene_desc.view_info.type = vk::ImageViewType::e2D;
+	scene_desc.view_info.aspect = vk::ImageAspectFlagBits::eColor;
+	scene_desc.view_info.base_level = 0;
+	scene_desc.view_info.level_count = 1;
+	scene_desc.view_info.base_layer = 0;
+	scene_desc.view_info.layer_count = 1;
+	scene_desc.view_info.usage = vk::ImageUsageFlagBits::eSampled;
+	scene_desc.type = TextureCache::BindingType::Texture;
+	auto& tb = pixel_bindings->images[0];
+	tb.image_id = id;
+	tb.image_view = cache.FindTexture(id, scene_desc);
+	tb.desc = scene_desc;
+	static std::atomic_uint logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+		LOGF("CompositeOverride: tex0 -> 0x%010" PRIx64 "\n", ov_addr);
+	}
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -1354,6 +1456,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	// Composite override: present the rendered 3D world instead of a wrong/black
+	// texture bound by the guest for the video-out composite pass.
+	ApplyCompositeOverride(buffer, state,
+	                       m_graphics_bindings.pixel ? &*m_graphics_bindings.pixel : nullptr);
 	// AMD Windows drivers reject valid barycentric fragment pipelines with triangle
 	// strips; the same shaders work as lists. Expand the draw on AMD hardware.
 	bool                        strip_converted      = false;
