@@ -203,16 +203,19 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 		return;
 	}
 
+	// Always log draws into the screen/video-out region so the final composite
+	// (scene -> present buffer) can be diagnosed regardless of sample rate.
+	const bool screen_target = (color.desc.info.data.address >> 32) == 0x8fc;
 	auto log_id = g_draw_state_log_count.fetch_add(1);
 	// Log the first draws (boot) under the full debug dump, or periodic samples
 	// when only the lightweight sample switch is on: the first 192 only ever
 	// show loading/menu draws, never the 3D scene, so a black world cannot be
 	// diagnosed from them.
 	if (graphics_debug_dump_enabled()) {
-		if (log_id >= 192u) {
+		if (log_id >= 192u && !screen_target) {
 			return;
 		}
-	} else if (!((log_id % 20000u) == 0u && log_id < 20000u * 200u)) {
+	} else if (!screen_target && !((log_id % 20000u) == 0u && log_id < 20000u * 200u)) {
 		return;
 	}
 

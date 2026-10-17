@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -915,20 +917,76 @@ Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(windo
 
 Presenter::~Presenter() = default;
 
+// Diagnostic: present an arbitrary guest render target in place of the video-out buffer so a
+// scene target can be inspected on screen. The guest address can be fixed (env
+// KYTY_PRESENT_RT_ADDR) or read live from a file (env KYTY_PRESENT_RT_FILE), which allows the
+// target to be chosen after the run has started since guest addresses vary per run. Zero keeps
+// the normal video-out path.
+static uint64_t PresentTargetOverrideAddress() {
+	if (const char* path = std::getenv("KYTY_PRESENT_RT_FILE"); path != nullptr) {
+		if (FILE* file = std::fopen(path, "rb"); file != nullptr) {
+			char         buffer[64] = {};
+			const size_t read       = std::fread(buffer, 1, sizeof(buffer) - 1, file);
+			std::fclose(file);
+			if (read > 0) {
+				return std::strtoull(buffer, nullptr, 16);
+			}
+		}
+	}
+	static const uint64_t address = [] {
+		const char* value = std::getenv("KYTY_PRESENT_RT_ADDR");
+		return value == nullptr ? 0ull : std::strtoull(value, nullptr, 16);
+	}();
+	return address;
+}
+
 Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer.IsInvalid());
-	auto frame_format = info.pixel_format;
+	Image*  override_image = nullptr;
+	ImageId override_id {};
+	if (const uint64_t address = PresentTargetOverrideAddress(); address != 0) {
+		auto&      cache = m_impl->renderer.GetTextureCache();
+		override_id      = cache.FindImageFromRange(address, 4, false);
+		if (override_id) {
+			override_image = &cache.GetImage(override_id);
+			static std::atomic_uint override_logged {0};
+			if (override_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+				LOGF("PresentTargetOverride: addr=0x%010" PRIx64 " -> 0x%010" PRIx64
+				     " %ux%u fmt=%s tile=%u\n",
+				     address, override_image->info.data.address, override_image->info.extent.width,
+				     override_image->info.extent.height,
+				     vk::to_string(override_image->info.pixel_format).c_str(),
+				     static_cast<uint32_t>(override_image->info.tile_mode));
+			}
+			if (override_image->info.pixel_format == vk::Format::eUndefined ||
+			    override_image->info.extent.width == 0 || override_image->info.extent.height == 0) {
+				override_image = nullptr;
+			}
+		}
+	}
+	auto frame_format =
+	    override_image != nullptr ? override_image->info.pixel_format : info.pixel_format;
 	switch (frame_format) {
 		case vk::Format::eR8G8B8A8Srgb: frame_format = vk::Format::eR8G8B8A8Unorm; break;
 		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
 		default: break;
 	}
-	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
+	const auto extent = override_image != nullptr
+	                        ? vk::Extent2D {override_image->info.extent.width,
+	                                        override_image->info.extent.height}
+	                        : vk::Extent2D {info.extent.width, info.extent.height};
+	auto* frame = m_impl->frames.Acquire(extent, frame_format);
 	frame->hdr   = hdr;
 	frame->blank = false;
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
-	auto&             image = m_impl->ResolveSurface(info);
+	Image*            override_ready = nullptr;
+	if (override_image != nullptr) {
+		override_image->usage.video_out = true;
+		m_impl->renderer.GetTextureCache().UpdateImage(override_id);
+		override_ready = override_image;
+	}
+	auto& image = override_ready != nullptr ? *override_ready : m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
 	}
