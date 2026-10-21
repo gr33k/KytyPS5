@@ -31,12 +31,21 @@ layout(location = 0) in vec2 uv;
 layout(binding = 0) uniform sampler2D source;
 layout(push_constant) uniform AlphaControl {
 	uint flags; // bit 0: premultiplied, bit 1: HDR target, bit 2: PQ source, bit 3: linear source
+	float gamma;    // bit 4: display encode gamma
+	float exposure; // bit 4: linear exposure applied before the encode
 };
 
 void main() {
 	const uint HDR_TARGET = 2u;
 	const uint PQ_SOURCE = 4u;
 	vec4 sampled = texture(source, uv);
+	if ((flags & 16u) != 0u) {
+		// The title's tone-mapping pass produced nothing, so the world arrives
+		// as raw linear HDR. Apply an exposure and encode to display sRGB.
+		vec3 c = max(sampled.rgb, vec3(0.0)) * exposure;
+		sampled.rgb = pow(c, vec3(1.0 / max(gamma, 0.1)));
+		sampled.a   = 1.0;
+	}
 	bool premultiplied = (flags & 1u) != 0u;
 	bool convert_to_hdr = (flags & (HDR_TARGET | PQ_SOURCE)) == HDR_TARGET;
 	if (convert_to_hdr && premultiplied) {

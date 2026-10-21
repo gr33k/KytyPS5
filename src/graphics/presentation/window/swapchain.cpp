@@ -290,6 +290,8 @@ private:
 	vk::SurfaceFormatKHR SelectFormat();
 	void Destroy();
 	void DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer);
+	void EnsureOverlayPipeline();
+	void DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* source);
 
 	WindowContext&   m_window;
 	vk::SwapchainKHR m_handle = nullptr;
@@ -635,7 +637,7 @@ bool Swapchain::PrepareSystemOverlay() {
 	return m_system_overlay->PrepareFrame(m_extent, m_format, ImageCount());
 }
 
-void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer) {
+void Swapchain::EnsureOverlayPipeline() {
 	auto device = m_window.graphic_ctx.device;
 	if (m_overlay_pipeline == nullptr) {
 		vk::SamplerCreateInfo sampler {};
@@ -655,7 +657,8 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 		RequireVulkanSuccess(
 		    device.createDescriptorSetLayout(&descriptors, nullptr, &m_overlay_descriptors),
 		    "create video-out overlay descriptor layout");
-		const vk::PushConstantRange alpha {vk::ShaderStageFlagBits::eFragment, 0, sizeof(uint32_t)};
+		const vk::PushConstantRange alpha {vk::ShaderStageFlagBits::eFragment, 0,
+		                                  3 * sizeof(uint32_t)};
 		vk::PipelineLayoutCreateInfo layout {};
 		layout.setLayoutCount         = 1;
 		layout.pSetLayouts            = &m_overlay_descriptors;
@@ -719,6 +722,11 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 		device.destroyShaderModule(fragment, nullptr);
 		device.destroyShaderModule(vertex, nullptr);
 	}
+	}
+
+void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer) {
+	auto device = m_window.graphic_ctx.device;
+	EnsureOverlayPipeline();
 	auto& frame = *layer.frame;
 	if (frame.view == nullptr) {
 		vk::ImageViewCreateInfo view {};
@@ -764,19 +772,113 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 	command.endRendering();
 }
 
+void Swapchain::DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* source) {
+	EXIT_IF(source == nullptr || source->image.image == nullptr);
+	EnsureOverlayPipeline();
+	auto device = m_window.graphic_ctx.device;
+	if (source->view == nullptr) {
+		vk::ImageViewCreateInfo view {};
+		view.image            = source->image.image;
+		view.viewType         = vk::ImageViewType::e2D;
+		view.format           = source->image.format;
+		view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		RequireVulkanSuccess(device.createImageView(&view, nullptr, &source->view),
+		                     "create present source image view");
+	}
+	const vk::DescriptorImageInfo image {m_overlay_sampler, source->view,
+	                                     vk::ImageLayout::eShaderReadOnlyOptimal};
+	vk::WriteDescriptorSet        write {};
+	write.dstBinding      = 0;
+	write.descriptorCount = 1;
+	write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+	write.pImageInfo      = &image;
+	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
+	// The world reaches the video-out as linear HDR: expose it and encode to sRGB.
+	const auto env_float = [](const char* name, float fallback) {
+		const char* value = std::getenv(name);
+		return value != nullptr ? static_cast<float>(std::atof(value)) : fallback;
+	};
+	float exposure = env_float("KYTY_PRESENT_EXPOSURE", 1.0f);
+	// Live tuning: re-read the exposure from a file every frame while the game runs.
+	if (const char* path = std::getenv("KYTY_PRESENT_EXPOSURE_FILE")) {
+		if (std::FILE* file = std::fopen(path, "r")) {
+			float value = 0.0f;
+			if (std::fscanf(file, "%f", &value) == 1 && value > 0.0f) {
+				exposure = value;
+			}
+			std::fclose(file);
+		}
+	}
+	struct PresentPush {
+		uint32_t flags;
+		float    gamma;
+		float    exposure;
+	} push {16u, env_float("KYTY_PRESENT_GAMMA", 2.2f), exposure};
+	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
+	                      sizeof(push), &push);
+	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
+	vk::RenderingAttachmentInfo attachment {};
+	attachment.imageView   = m_image_views[m_image_index];
+	attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+	attachment.loadOp      = vk::AttachmentLoadOp::eClear;
+	attachment.storeOp     = vk::AttachmentStoreOp::eStore;
+	vk::ClearValue clear {};
+	clear.color.float32[3] = 1.0f;
+	attachment.clearValue  = clear;
+	vk::RenderingInfo rendering {};
+	rendering.renderArea.extent    = m_extent;
+	rendering.layerCount           = 1;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments    = &attachment;
+	command.beginRendering(&rendering);
+	const vk::Viewport viewport {
+	    0.0f, 0.0f, static_cast<float>(m_extent.width), static_cast<float>(m_extent.height),
+	    0.0f, 1.0f};
+	const vk::Rect2D scissor {{0, 0}, m_extent};
+	command.setViewport(0, 1, &viewport);
+	command.setScissor(0, 1, &scissor);
+	command.draw(3, 1, 0, 0);
+	command.endRendering();
+}
+
 void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
                                       const Presenter::Layer& overlay, bool draw_system_overlay) {
 	EXIT_IF(m_image_index >= m_images.size());
 	auto       vk_command      = command.Handle();
 	const bool draw_overlay    = overlay.frame != nullptr;
 	const bool draw_attachment = draw_overlay || draw_system_overlay;
+	static const bool gamma_requested = std::getenv("KYTY_PRESENT_GAMMA") != nullptr;
+	const bool        gamma           = gamma_requested && source != nullptr;
 	if (source != nullptr) {
-		source->Transit(vk_command, vk::ImageLayout::eTransferSrcOptimal,
-		                vk::AccessFlagBits2::eTransferRead);
+		source->Transit(vk_command,
+		                gamma ? vk::ImageLayout::eShaderReadOnlyOptimal
+		                      : vk::ImageLayout::eTransferSrcOptimal,
+		                gamma ? vk::AccessFlagBits2::eShaderRead
+		                      : vk::AccessFlagBits2::eTransferRead);
 	}
 	if (draw_overlay) {
 		overlay.frame->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal,
 		                       vk::AccessFlagBits2::eShaderRead);
+	}
+
+	if (gamma) {
+		vk::ImageMemoryBarrier to_color {};
+		to_color.sType                           = vk::StructureType::eImageMemoryBarrier;
+		to_color.dstAccessMask                   = vk::AccessFlagBits::eColorAttachmentWrite;
+		to_color.oldLayout                       = vk::ImageLayout::eUndefined;
+		to_color.newLayout                       = vk::ImageLayout::eColorAttachmentOptimal;
+		to_color.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+		to_color.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+		to_color.image                           = m_images[m_image_index];
+		to_color.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
+		to_color.subresourceRange.baseMipLevel   = 0;
+		to_color.subresourceRange.levelCount     = 1;
+		to_color.subresourceRange.baseArrayLayer = 0;
+		to_color.subresourceRange.layerCount     = 1;
+		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
+		                           vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1, &to_color);
+		DrawPresentSource(vk_command, source);
 	}
 
 	vk::ImageMemoryBarrier to_transfer {};
@@ -793,42 +895,47 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	to_transfer.subresourceRange.baseArrayLayer = 0;
 	to_transfer.subresourceRange.layerCount     = 1;
 	// Match the acquire wait stage so the layout transition cannot precede acquisition.
-	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-	                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {}, 0,
-	                           nullptr, 0, nullptr, 1, &to_transfer);
+	if (!gamma) {
+		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {},
+		                           0, nullptr, 0, nullptr, 1, &to_transfer);
 
-	if (source != nullptr) {
-		vk::ImageBlit region {};
-		region.srcSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
-		region.srcSubresource.mipLevel       = 0;
-		region.srcSubresource.baseArrayLayer = 0;
-		region.srcSubresource.layerCount     = 1;
-		region.srcOffsets[1].x               = static_cast<int>(source->image.extent.width);
-		region.srcOffsets[1].y               = static_cast<int>(source->image.extent.height);
-		region.srcOffsets[1].z               = 1;
-		region.dstSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
-		region.dstSubresource.mipLevel       = 0;
-		region.dstSubresource.baseArrayLayer = 0;
-		region.dstSubresource.layerCount     = 1;
-		region.dstOffsets[1].x               = static_cast<int>(m_extent.width);
-		region.dstOffsets[1].y               = static_cast<int>(m_extent.height);
-		region.dstOffsets[1].z               = 1;
-		vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal,
-		                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
-		                     &region, vk::Filter::eLinear);
-	} else {
-		const vk::ClearColorValue black {};
-		vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal,
-		                           &black, 1, &to_transfer.subresourceRange);
+		if (source != nullptr) {
+			vk::ImageBlit region {};
+			region.srcSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+			region.srcSubresource.mipLevel       = 0;
+			region.srcSubresource.baseArrayLayer = 0;
+			region.srcSubresource.layerCount     = 1;
+			region.srcOffsets[1].x               = static_cast<int>(source->image.extent.width);
+			region.srcOffsets[1].y               = static_cast<int>(source->image.extent.height);
+			region.srcOffsets[1].z               = 1;
+			region.dstSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+			region.dstSubresource.mipLevel       = 0;
+			region.dstSubresource.baseArrayLayer = 0;
+			region.dstSubresource.layerCount     = 1;
+			region.dstOffsets[1].x               = static_cast<int>(m_extent.width);
+			region.dstOffsets[1].y               = static_cast<int>(m_extent.height);
+			region.dstOffsets[1].z               = 1;
+			vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal,
+			                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
+			                     &region, vk::Filter::eLinear);
+		} else {
+			const vk::ClearColorValue black {};
+			vk_command.clearColorImage(m_images[m_image_index],
+			                           vk::ImageLayout::eTransferDstOptimal, &black, 1,
+			                           &to_transfer.subresourceRange);
+		}
 	}
 
 	vk::ImageMemoryBarrier to_present {};
 	to_present.sType               = vk::StructureType::eImageMemoryBarrier;
-	to_present.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+	to_present.srcAccessMask       = gamma ? vk::AccessFlagBits::eColorAttachmentWrite
+	                                       : vk::AccessFlagBits::eTransferWrite;
 	to_present.dstAccessMask       = draw_attachment ? vk::AccessFlagBits::eColorAttachmentRead |
 	                                                       vk::AccessFlagBits::eColorAttachmentWrite
 	                                                 : vk::AccessFlagBits::eMemoryRead;
-	to_present.oldLayout           = vk::ImageLayout::eTransferDstOptimal;
+	to_present.oldLayout           = gamma ? vk::ImageLayout::eColorAttachmentOptimal
+	                                       : vk::ImageLayout::eTransferDstOptimal;
 	to_present.newLayout           = draw_attachment ? vk::ImageLayout::eColorAttachmentOptimal
 	                                                 : vk::ImageLayout::ePresentSrcKHR;
 	to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -839,11 +946,12 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	to_present.subresourceRange.levelCount     = 1;
 	to_present.subresourceRange.baseArrayLayer = 0;
 	to_present.subresourceRange.layerCount     = 1;
-	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-	                           draw_attachment ? vk::PipelineStageFlagBits::eColorAttachmentOutput
-	                                           : vk::PipelineStageFlagBits::eAllCommands,
-	                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
-	                           &to_present);
+	vk_command.pipelineBarrier(
+	    gamma ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+	          : vk::PipelineStageFlagBits::eTransfer,
+	    draw_attachment ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+	                    : vk::PipelineStageFlagBits::eAllCommands,
+	    vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1, &to_present);
 	if (draw_attachment) {
 		if (draw_overlay) {
 			DrawOverlay(vk_command, overlay);
