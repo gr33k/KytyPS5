@@ -43,6 +43,12 @@
 #include <vector>
 
 namespace Libs::Graphics {
+// Shared with renderDraw.cpp: tonemap input addresses learned from the draw.
+namespace KytySceneDiag {
+extern std::atomic<uint64_t> exposure_addr;
+extern std::atomic<uint64_t> lut_addr;
+} // namespace KytySceneDiag
+
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -646,6 +652,35 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindImages(bindings);
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
+
+	// Which compute kernel (if any) writes the tonemap's exposure/LUT inputs,
+	// or writes any small image (those are the likely producers)?
+	{
+		const uint64_t exposure_addr = KytySceneDiag::exposure_addr.load(std::memory_order_relaxed);
+		const uint64_t lut_addr      = KytySceneDiag::lut_addr.load(std::memory_order_relaxed);
+		for (size_t slot = 0; slot < bindings.images.size(); slot++) {
+			const auto& b = bindings.images[slot];
+			const auto  a = b.desc.info.data.address;
+			bool        written = false;
+			if (slot < program.info.images.size()) {
+				written = program.info.images[slot].written;
+			}
+			const bool small_target = b.desc.info.extent.width <= 64 && b.desc.info.extent.height <= 64;
+			const bool match = (exposure_addr != 0 && a == exposure_addr) ||
+			                   (lut_addr != 0 && a == lut_addr);
+			if (!match && !(small_target && written)) {
+				continue;
+			}
+			static std::atomic_uint logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 120) {
+				LOGF("SmallImgDispatch: hash=0x%016" PRIx64 " slot=%zu addr=0x%010" PRIx64
+				     " ext=%ux%u written=%d groups=%ux%ux%u\n",
+				     program.shader_hash, slot, a, b.desc.info.extent.width,
+				     b.desc.info.extent.height, written ? 1 : 0, thread_group_x,
+				     thread_group_y, thread_group_z);
+			}
+		}
+	}
 
 	auto              vk_buffer        = buffer.Handle();
 	// RE Engine Maiden: kernel 0xdd7d9b716cfe5aba renders menus fine but hangs

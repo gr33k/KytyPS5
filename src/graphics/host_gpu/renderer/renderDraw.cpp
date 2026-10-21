@@ -80,33 +80,133 @@ std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 }
 
 static std::atomic<uint32_t> g_draw_state_log_count   = 0;
-// Scene-target tracking for the composite override: count writes to each guest
-// color render target so the composite pass can auto-detect the full scene
-// target (the one with the most draws) regardless of per-run guest addresses.
-static std::mutex                              g_scene_target_mutex {};
-static std::unordered_map<uint64_t, uint32_t>  g_scene_target_draws {};
-static uint64_t                                g_best_scene_target   = 0;
-static uint32_t                                g_best_scene_target_draws = 0;
 
-[[nodiscard]] static uint64_t BestSceneTarget() {
-	std::lock_guard<std::mutex> lock {g_scene_target_mutex};
-	return g_best_scene_target;
+// Guest video-out / scanout buffers live at 0x8fc.... in the 40-bit guest
+// address space. The top twelve bits identify them; shifting by 32 is wrong
+// because that yields 0x8f for 0x8fc0000000, so the buffer used to slip
+// through every "skip the video-out target" check.
+static constexpr uint64_t kVideoOutAddressMask = 0xFFF0000000ull;
+static constexpr uint64_t kVideoOutAddressBase = 0x8FC0000000ull;
+
+[[nodiscard]] static bool IsVideoOutAddress(uint64_t address) {
+	return (address & kVideoOutAddressMask) == kVideoOutAddressBase;
 }
 
-[[nodiscard]] static void NoteSceneTargetWrite(uint64_t address,
-                                               const vk::Extent2D& extent) {
-	// Only large color render targets qualify as scene targets; skip the
-	// video-out buffer itself (guest addr 0x8fc...) and tiny UI/offscreen RTs.
-	if (address == 0 || (address >> 32) == 0x8fc || extent.width < 1280 ||
-	    extent.height < 720) {
+// Scene-target tracking for the composite override: remember every display-
+// shaped guest colour target that was actually written, together with its
+// format and backing image. The composite then prefers the freshest HDR scene
+// target over the LDR composite-source target (which is often never filled).
+static std::mutex g_scene_target_mutex {};
+struct SceneTargetStats {
+	uint32_t   draws    = 0;
+	uint32_t   width    = 0;
+	uint32_t   height   = 0;
+	uint64_t   last_seq = 0;
+	ImageId    image_id {};
+	vk::Format format = vk::Format::eUndefined;
+};
+static std::unordered_map<uint64_t, SceneTargetStats> g_scene_target_draws {};
+static uint64_t                                       g_scene_target_seq = 0;
+// Guest address of the composite's scene source, learned from the composite
+// draw. Diagnostics watch draws into this address to find the tonemap pass.
+static std::atomic<uint64_t> g_composite_source_addr {0};
+
+// Tonemap input images learned from the tonemap draw, shared with the compute
+// path so we can find which dispatches (if any) write them.
+namespace KytySceneDiag {
+std::atomic<uint64_t> exposure_addr {0};
+std::atomic<uint64_t> lut_addr {0};
+} // namespace KytySceneDiag
+
+[[nodiscard]] static bool IsHdrSceneFormat(vk::Format format) {
+	switch (format) {
+		case vk::Format::eR16G16B16A16Sfloat:
+		case vk::Format::eR32G32B32A32Sfloat:
+		case vk::Format::eR16G16B16Sfloat:
+		case vk::Format::eR32G32B32Sfloat:
+		case vk::Format::eB10G11R11UfloatPack32:
+		case vk::Format::eE5B9G9R9UfloatPack32: return true;
+		default: return false;
+	}
+}
+
+struct SceneTargetPick {
+	uint64_t   address  = 0;
+	uint32_t   width    = 0;
+	uint32_t   height   = 0;
+	ImageId    image_id {};
+	vk::Format format = vk::Format::eUndefined;
+	uint32_t   draws    = 0;
+	uint64_t   last_seq = 0;
+};
+
+[[nodiscard]] static SceneTargetPick PickSceneTarget(uint64_t            exclude_address,
+                                                     const vk::Extent2D& want_extent) {
+	std::lock_guard<std::mutex> lock {g_scene_target_mutex};
+	SceneTargetPick             best {};
+	// The game switches scene colour targets over its lifetime, so recency
+	// decides. Rank 3 is an HDR target at the composite's own resolution (the
+	// scene colour buffer), rank 2 any other HDR target, rank 1 an LDR target.
+	int      best_rank = 0;
+	uint64_t best_seq  = 0;
+	for (const auto& [address, stats]: g_scene_target_draws) {
+		if (address == exclude_address) {
+			continue;
+		}
+		int rank = 1;
+		if (IsHdrSceneFormat(stats.format)) {
+			rank = (want_extent.width != 0 && stats.width == want_extent.width &&
+			        stats.height == want_extent.height)
+			           ? 3
+			           : 2;
+		}
+		if (rank > best_rank || (rank == best_rank && stats.last_seq > best_seq)) {
+			best_rank     = rank;
+			best_seq      = stats.last_seq;
+			best.address  = address;
+			best.width    = stats.width;
+			best.height   = stats.height;
+			best.image_id = stats.image_id;
+			best.format   = stats.format;
+			best.draws    = stats.draws;
+			best.last_seq = stats.last_seq;
+		}
+	}
+	return best;
+}
+
+[[nodiscard]] static SceneTargetStats SceneTargetStatsFor(uint64_t address) {
+	std::lock_guard<std::mutex> lock {g_scene_target_mutex};
+	const auto                  it = g_scene_target_draws.find(address);
+	return it == g_scene_target_draws.end() ? SceneTargetStats {} : it->second;
+}
+
+static void NoteSceneTargetWrite(uint64_t address, const vk::Extent2D& extent,
+                                 ImageId image_id, vk::Format format) {
+	// Only large, display-shaped colour targets qualify as scene targets. Skip
+	// the video-out/scanout buffers themselves, tiny UI targets and square
+	// shadow targets (they used to win the "most writes" contest).
+	if (address == 0 || IsVideoOutAddress(address) || extent.width < 1280 ||
+	    extent.height < 720 ||
+	    static_cast<uint64_t>(extent.width) * 10ull <
+	        static_cast<uint64_t>(extent.height) * 16ull ||
+	    static_cast<uint64_t>(extent.width) * 10ull >
+	        static_cast<uint64_t>(extent.height) * 20ull) {
 		return;
 	}
 	std::lock_guard<std::mutex> lock {g_scene_target_mutex};
-	auto&                        count = g_scene_target_draws[address];
-	++count;
-	if (count > g_best_scene_target_draws) {
-		g_best_scene_target_draws   = count;
-		g_best_scene_target         = address;
+	auto&                       stats = g_scene_target_draws[address];
+	++stats.draws;
+	stats.width    = extent.width;
+	stats.height   = extent.height;
+	stats.image_id = image_id;
+	stats.format   = format;
+	stats.last_seq = ++g_scene_target_seq;
+	static std::atomic_uint new_logged {0};
+	if (stats.draws == 1 && new_logged.fetch_add(1, std::memory_order_relaxed) < 100) {
+		LOGF("SceneTargetNew: addr=0x%010" PRIx64 " ext=%ux%u fmt=%s id=%u/%u\n", address,
+		     extent.width, extent.height, vk::to_string(format).c_str(),
+		     image_id.index, image_id.generation);
 	}
 }
 
@@ -236,7 +336,7 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 
 	// Always log draws into the screen/video-out region so the final composite
 	// (scene -> present buffer) can be diagnosed regardless of sample rate.
-	const bool screen_target = (color.desc.info.data.address >> 32) == 0x8fc;
+	const bool screen_target = IsVideoOutAddress(color.desc.info.data.address);
 	auto log_id = g_draw_state_log_count.fetch_add(1);
 	// Log the first draws (boot) under the full debug dump, or periodic samples
 	// when only the lightweight sample switch is on: the first 192 only ever
@@ -560,7 +660,8 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		state.width             = std::min(state.width, extent.width);
 		state.height            = std::min(state.height, extent.height);
 		// Remember this color target for scene-target auto-detection.
-		NoteSceneTargetWrite(target.desc.info.data.address, extent);
+		NoteSceneTargetWrite(target.desc.info.data.address, extent, target.image_id,
+		                     target.desc.info.pixel_format);
 		state.num_layers        = std::min(state.num_layers, view.layer_count);
 		state.num_color_attachments = std::max(state.num_color_attachments, target.target_slot + 1);
 		auto& attachment            = state.color_attachments[target.target_slot];
@@ -1072,6 +1173,38 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 		return;
 	}
 
+	// Watch draws into the composite's scene source. This finds the tonemap
+	// pass (which should fill it) and shows what it samples.
+	const uint64_t watch_addr = g_composite_source_addr.load(std::memory_order_relaxed);
+	if (watch_addr != 0 && state.color_count > 0 &&
+	    state.color_info[0].desc.info.data.address == watch_addr) {
+		static std::atomic_uint watch_logged {0};
+		if (watch_logged.fetch_add(1, std::memory_order_relaxed) < 160) {
+			LOGF("WatchDraw: frame=%d %s idx=%u indexed=%d ps=%d colors=%u depth=%d fmt=%s\n",
+			     buffer.GetContext().GetGpu().GetFrameNum(), draw.Name(), draw.index_count,
+			     draw.IsIndexed() ? 1 : 0, state.ps_active ? 1 : 0, state.color_count,
+			     state.depth_info.image_id ? 1 : 0,
+			     vk::to_string(state.color_info[0].desc.info.pixel_format).c_str());
+		}
+	}
+
+	// Watch draws into the tonemap's exposure/LUT inputs (any extent).
+	if (state.color_count > 0) {
+		const uint64_t aux_addr = state.color_info[0].desc.info.data.address;
+		const uint64_t ex_addr  = KytySceneDiag::exposure_addr.load(std::memory_order_relaxed);
+		const uint64_t lu_addr  = KytySceneDiag::lut_addr.load(std::memory_order_relaxed);
+		if (aux_addr != 0 && (aux_addr == ex_addr || aux_addr == lu_addr)) {
+			static std::atomic_uint aux_logged {0};
+			if (aux_logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+				LOGF("AuxDraw: frame=%d %s idx=%u ps=%d addr=0x%010" PRIx64 " ext=%ux%u\n",
+				     buffer.GetContext().GetGpu().GetFrameNum(), draw.Name(),
+				     draw.index_count, state.ps_active ? 1 : 0, aux_addr,
+				     state.color_info[0].desc.info.extent.width,
+				     state.color_info[0].desc.info.extent.height);
+			}
+		}
+	}
+
 	if (!draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
 		return;
 	}
@@ -1319,9 +1452,10 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 // as the large color render target with the most writes. Called after
 // PrepareGraphicsBindings resolved the guest bindings but before CommitBindings,
 // so the override survives to the draw.
-static uint64_t CompositeOverrideAddress() {
+static uint64_t CompositeOverrideAddress(uint64_t            exclude_address,
+                                         const vk::Extent2D& want_extent) {
 	const char* path = std::getenv("KYTY_COMPOSITE_OVERRIDE_FILE");
-	if (path == nullptr || path[0] == ' ') {
+	if (path == nullptr || path[0] == '\0') {
 		path = "composite_override.txt";
 	}
 	uint64_t file_addr = 0ull;
@@ -1337,26 +1471,105 @@ static uint64_t CompositeOverrideAddress() {
 	if (file_addr != 0) {
 		return file_addr;
 	}
-	// Fall back to the scene target with the most color-target writes so the
-	// override works without a per-run guest-address file.
-	uint64_t best = BestSceneTarget();
-	return best;
+	// Fall back to the freshest large scene target, preferring an HDR colour
+	// buffer that matches the composite source's resolution. The composite's
+	// own (often unwritten) LDR source is excluded.
+	return PickSceneTarget(exclude_address, want_extent).address;
 }
 
 static void ApplyCompositeOverride(CommandBuffer& buffer,
                                    const DrawRenderState& state,
+                                   const DrawCallInfo& draw,
                                    PreparedBindings* pixel_bindings) {
-	const uint64_t ov_addr = CompositeOverrideAddress();
-	if (ov_addr == 0 || state.color_count == 0 || !state.color_info[0].image_id ||
+	if (state.color_count == 0 || !state.color_info[0].image_id ||
 	    pixel_bindings == nullptr || pixel_bindings->images.empty()) {
 		return;
 	}
+	const uint64_t target_addr = state.color_info[0].desc.info.data.address;
 	// Only composite draws target the video-out buffer (guest addr 0x8fc...).
-	if ((state.color_info[0].desc.info.data.address & 0xFFF0000000ull) != 0x8FC0000000ull) {
+	if (!IsVideoOutAddress(target_addr)) {
+		return;
+	}
+	auto&          tb        = pixel_bindings->images[0];
+	const uint64_t bound_addr = tb.desc.info.data.address;
+	const uint32_t bound_w    = tb.desc.info.extent.width;
+	const uint32_t bound_h    = tb.desc.info.extent.height;
+	const auto     bound_extent = vk::Extent2D {bound_w, bound_h};
+	const uint64_t ov_addr    = CompositeOverrideAddress(bound_addr, bound_extent);
+
+	// The world composite samples an LDR scene-sized source (3360x1892 here);
+	// the HUD/UI composite is also a fullscreen quad into the same buffer but
+	// samples a 1792x1080 UI texture, and HUD elements are smaller still.
+	// Requiring a scene-sized source keeps the UI composite on its own texture.
+	const bool scene_sized = bound_w >= 2560u && bound_h >= 1400u;
+	if (scene_sized && draw.index_count <= 6u) {
+		// Remember the scene source for the draw-watch diagnostic. The world
+		// composite runs after the tonemap pass, so this value is available
+		// when the next frame's tonemap draw executes.
+		g_composite_source_addr.store(bound_addr, std::memory_order_relaxed);
+	}
+
+	// Diagnosis: log fullscreen quads and what they sample.
+	static std::atomic_uint vo_logged {0};
+	if ((draw.index_count <= 6u || scene_sized) &&
+	    vo_logged.fetch_add(1, std::memory_order_relaxed) < 400) {
+		LOGF("VoFullscreen: frame=%d target=0x%010" PRIx64 " indices=%u tex0=0x%010" PRIx64
+		     " tex0_ext=%ux%u tex0_fmt=%u scene=%d ov=0x%010" PRIx64 "\n",
+		     buffer.GetContext().GetGpu().GetFrameNum(), target_addr, draw.index_count,
+		     bound_addr, bound_w, bound_h,
+		     static_cast<uint32_t>(tb.desc.info.pixel_format), scene_sized ? 1 : 0, ov_addr);
+	}
+
+	if (draw.index_count > 6u || !scene_sized || IsVideoOutAddress(bound_addr)) {
 		return;
 	}
 	auto& cache = buffer.GetContext().GetTextureCache();
-	const auto id = cache.FindImageFromRange(ov_addr, 4, false);
+
+	// Does the composite source address itself have a render-target image with
+	// a different id? That would mean the sampled texture is a stale alias and
+	// the correctly tonemapped LDR image exists separately.
+	const auto ldr_stats = SceneTargetStatsFor(bound_addr);
+	const auto pick      = PickSceneTarget(bound_addr, bound_extent);
+	const auto guest_mapping = tb.desc.view_info.mapping;
+	static std::atomic_uint pick_logged {0};
+	const unsigned          pick_n = pick_logged.fetch_add(1, std::memory_order_relaxed);
+	if (pick_n < 8 || (pick_n % 500u) == 0) {
+		LOGF("VoPick: frame=%d bound=0x%010" PRIx64 " id=%u/%u tracked_id=%u/%u"
+		     " tracked_fmt=%s tracked_draws=%u pick=0x%010" PRIx64 " pick_id=%u/%u"
+		     " pick_fmt=%s pick_seq=%" PRIu64 " map=%d,%d,%d,%d images=%zu\n",
+		     buffer.GetContext().GetGpu().GetFrameNum(), bound_addr, tb.image_id.index,
+		     tb.image_id.generation,
+		     ldr_stats.draws != 0 ? ldr_stats.image_id.index : 0u,
+		     ldr_stats.draws != 0 ? ldr_stats.image_id.generation : 0u,
+		     vk::to_string(ldr_stats.format).c_str(), ldr_stats.draws, pick.address,
+		     pick.image_id.index, pick.image_id.generation,
+		     vk::to_string(pick.format).c_str(), pick.last_seq,
+		     static_cast<int>(guest_mapping.r), static_cast<int>(guest_mapping.g),
+		     static_cast<int>(guest_mapping.b), static_cast<int>(guest_mapping.a),
+		     pixel_bindings->images.size());
+		for (size_t slot = 0; slot < pixel_bindings->images.size() && slot < 8; slot++) {
+			const auto& b = pixel_bindings->images[slot];
+			LOGF("VoPickImg[%zu]: addr=0x%010" PRIx64 " id=%u/%u ext=%ux%u fmt=%s\n", slot,
+			     b.desc.info.data.address, b.image_id.index, b.image_id.generation,
+			     b.desc.info.extent.width, b.desc.info.extent.height,
+			     vk::to_string(b.desc.info.pixel_format).c_str());
+		}
+	}
+
+	uint64_t use_addr = ov_addr;
+	if (use_addr == bound_addr) {
+		// Never sample the composite's own (usually empty) source back into it.
+		use_addr = pick.address;
+	}
+	ImageId id {};
+	if (std::getenv("KYTY_USE_LDR_TARGET") != nullptr && ldr_stats.image_id &&
+	    ldr_stats.image_id != tb.image_id) {
+		// Experiment: the tracked render-target image may hold the real
+		// tonemapped LDR frame while the sampled alias is empty.
+		id = ldr_stats.image_id;
+	} else if (use_addr != 0) {
+		id = cache.FindImageFromRange(use_addr, 4, false);
+	}
 	if (!id) {
 		return;
 	}
@@ -1371,14 +1584,20 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 	scene_desc.view_info.base_layer = 0;
 	scene_desc.view_info.layer_count = 1;
 	scene_desc.view_info.usage = vk::ImageUsageFlagBits::eSampled;
+	// Scene targets are rendered by the guest's own shaders: their channel
+	// order is already the logical RGB the composite expects, so an identity
+	// view is correct here. The old texture's swizzle describes its storage,
+	// not the scene buffer's.
 	scene_desc.type = TextureCache::BindingType::Texture;
-	auto& tb = pixel_bindings->images[0];
 	tb.image_id = id;
 	tb.image_view = cache.FindTexture(id, scene_desc);
 	tb.desc = scene_desc;
 	static std::atomic_uint logged {0};
-	if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
-		LOGF("CompositeOverride: tex0 -> 0x%010" PRIx64 "\n", ov_addr);
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+		LOGF("CompositeOverride: tex0 -> 0x%010" PRIx64 " id=%u/%u ext=%ux%u fmt=%s frame=%d\n",
+		     image.info.data.address, id.index, id.generation, image.info.extent.width,
+		     image.info.extent.height, vk::to_string(image.info.pixel_format).c_str(),
+		     buffer.GetContext().GetGpu().GetFrameNum());
 	}
 }
 
@@ -1459,8 +1678,42 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
 	// Composite override: present the rendered 3D world instead of a wrong/black
 	// texture bound by the guest for the video-out composite pass.
-	ApplyCompositeOverride(buffer, state,
+	ApplyCompositeOverride(buffer, state, draw,
 	                       m_graphics_bindings.pixel ? &*m_graphics_bindings.pixel : nullptr);
+
+	// Diagnose the pass that fills the composite's scene source (the tonemap
+	// draw). Its output is currently black; this shows which textures it reads.
+	if (m_graphics_bindings.pixel && state.color_count > 0) {
+		const uint64_t watch = g_composite_source_addr.load(std::memory_order_relaxed);
+		if (watch != 0 && state.color_info[0].desc.info.data.address == watch) {
+			static std::atomic_uint watch_bind_logged {0};
+			if (watch_bind_logged.fetch_add(1, std::memory_order_relaxed) < 80) {
+				const auto& pimages = m_graphics_bindings.pixel->images;
+				LOGF("WatchBind: frame=%d %s idx=%u ps=%d fmt=%s images=%zu\n",
+				     buffer.GetContext().GetGpu().GetFrameNum(), draw.Name(), draw.index_count,
+				     state.ps_active ? 1 : 0,
+				     vk::to_string(state.color_info[0].desc.info.pixel_format).c_str(),
+				     pimages.size());
+				for (size_t slot = 0; slot < pimages.size() && slot < 6; slot++) {
+					const auto& b = pimages[slot];
+					LOGF("WatchBindImg[%zu]: addr=0x%010" PRIx64 " id=%u/%u ext=%ux%u"
+					     " fmt=%s\n",
+					     slot, b.desc.info.data.address, b.image_id.index,
+					     b.image_id.generation, b.desc.info.extent.width,
+					     b.desc.info.extent.height,
+					     vk::to_string(b.desc.info.pixel_format).c_str());
+					if (b.desc.info.extent.width == 1 && b.desc.info.extent.height == 1) {
+						KytySceneDiag::exposure_addr.store(b.desc.info.data.address,
+						                                   std::memory_order_relaxed);
+					}
+					if (b.desc.info.extent.width == 32 && b.desc.info.extent.height == 32) {
+						KytySceneDiag::lut_addr.store(b.desc.info.data.address,
+						                              std::memory_order_relaxed);
+					}
+				}
+			}
+		}
+	}
 	// AMD Windows drivers reject valid barycentric fragment pipelines with triangle
 	// strips; the same shaders work as lists. Expand the draw on AMD hardware.
 	bool                        strip_converted      = false;
