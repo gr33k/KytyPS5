@@ -820,7 +820,7 @@ void Swapchain::DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* s
 		const char* value = std::getenv(name);
 		return value != nullptr ? static_cast<float>(std::atof(value)) : fallback;
 	};
-	float exposure = env_float("KYTY_PRESENT_EXPOSURE", 1.0f);
+	float exposure = env_float("KYTY_PRESENT_EXPOSURE", 3.0f);
 	// Live tuning: re-read the exposure from a file every frame while the game runs.
 	if (const char* path = std::getenv("KYTY_PRESENT_EXPOSURE_FILE")) {
 		if (std::FILE* file = std::fopen(path, "r")) {

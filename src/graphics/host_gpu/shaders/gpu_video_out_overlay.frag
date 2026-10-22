@@ -41,8 +41,10 @@ void main() {
 	vec4 sampled = texture(source, uv);
 	if ((flags & 16u) != 0u) {
 		// The title's tone-mapping pass produced nothing, so the world arrives
-		// as raw linear HDR. Apply an exposure and encode to display sRGB.
+		// as raw linear HDR. Apply an exposure, roll the highlights off so a
+		// brighter exposure does not clip, and encode to display sRGB.
 		vec3 c = max(sampled.rgb, vec3(0.0)) * exposure;
+		c = c / (vec3(1.0) + c);
 		sampled.rgb = pow(c, vec3(1.0 / max(gamma, 0.1)));
 		sampled.a   = 1.0;
 	}
