@@ -14,10 +14,12 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "loader/systemContent.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -29,6 +31,23 @@
 
 namespace Libs::Graphics {
 
+// Titles whose video-out composite samples the raw linear scene target (see
+// RenderExecutor's composite override) instead of a display-encoded guest buffer.
+// Their frames carry no sRGB encode at all, so the presenter has to add one.
+// Keep this list narrow: any other title keeps its own brightness and colour.
+[[nodiscard]] static bool PresentEncodeWantedByTitle() {
+	static const bool wanted = [] {
+		char title_id[12] = {};
+		if (!Loader::SystemContentParamSfoGetString("TITLE_ID", title_id, sizeof(title_id))) {
+			return false;
+		}
+		const std::string id {title_id};
+		// Grand Theft Auto III - The Definitive Edition.
+		return id == "PPSA03527";
+	}();
+	return wanted;
+}
+
 struct Presenter::Frame {
 	VulkanImage   image;
 	vk::ImageView view         = nullptr;
@@ -36,6 +55,8 @@ struct Presenter::Frame {
 	bool          busy         = false;
 	bool          hdr          = false;
 	bool          blank        = false;
+	// Composited from the linear HDR scene target, so its values are not display-encoded.
+	bool          linear_source = false;
 
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
@@ -362,6 +383,7 @@ struct Presenter::Impl {
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
+	uint64_t              composite_override_seen = 0;
 };
 
 vk::SurfaceFormatKHR Swapchain::SelectFormat() {
@@ -813,7 +835,8 @@ void Swapchain::DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* s
 		uint32_t flags;
 		float    gamma;
 		float    exposure;
-	} push {16u, env_float("KYTY_PRESENT_GAMMA", 2.2f), exposure};
+	} push {16u | (m_hdr_active ? 2u : 0u) | (source->hdr ? 4u : 0u),
+	        env_float("KYTY_PRESENT_GAMMA", 2.2f), exposure};
 	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
 	                      sizeof(push), &push);
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
@@ -847,8 +870,30 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	auto       vk_command      = command.Handle();
 	const bool draw_overlay    = overlay.frame != nullptr;
 	const bool draw_attachment = draw_overlay || draw_system_overlay;
-	static const bool gamma_requested = std::getenv("KYTY_PRESENT_GAMMA") != nullptr;
-	const bool        gamma           = gamma_requested && source != nullptr;
+	// Frames composited from the linear HDR scene target (see g_composite_override_tick)
+	// carry no display encode, so they are drawn through the overlay pipeline with an
+	// exposure and gamma instead of being blitted. Only titles that are known to present
+	// that raw scene target get this, so other games keep their own brightness;
+	// KYTY_PRESENT_ENCODE=linear|off overrides the choice for testing.
+	static const bool linear_encode_title = PresentEncodeWantedByTitle();
+	static const int  encode_setting      = [] {
+		if (std::getenv("KYTY_PRESENT_NO_GAMMA") != nullptr) {
+			return 0;
+		}
+		const char* value = std::getenv("KYTY_PRESENT_ENCODE");
+		if (value == nullptr) {
+			return -1; // the title decides
+		}
+		std::string text {value};
+		std::ranges::transform(text, text.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+		return text == "off" || text == "none" || text == "0" ? 0 : 1;
+	}();
+	const bool linear_encode = encode_setting < 0 ? linear_encode_title : encode_setting != 0;
+	static const bool gamma_forced = std::getenv("KYTY_PRESENT_GAMMA") != nullptr;
+	const bool        gamma        = source != nullptr &&
+	                          (gamma_forced || (linear_encode && source->linear_source));
 	if (source != nullptr) {
 		source->Transit(vk_command,
 		                gamma ? vk::ImageLayout::eShaderReadOnlyOptimal
@@ -1087,6 +1132,12 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	auto* frame = m_impl->frames.Acquire(extent, frame_format);
 	frame->hdr   = hdr;
 	frame->blank = false;
+	// The renderer substitutes the rendered scene target for the guest's empty composite
+	// source; that target is linear HDR, so this frame needs a display encode at present.
+	const auto override_tick = g_composite_override_tick.load(std::memory_order_relaxed);
+	frame->linear_source            = override_tick != m_impl->composite_override_seen;
+	m_impl->composite_override_seen = override_tick;
+
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
 	Image*            override_ready = nullptr;
 	if (override_image != nullptr) {
@@ -1111,6 +1162,7 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	auto*             frame  = m_impl->frames.Acquire({width, height}, format);
 	frame->hdr   = false;
 	frame->blank = true;
+	frame->linear_source = false;
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
 	frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
 	vk::ClearColorValue clear {};

@@ -10,6 +10,8 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <vector>
@@ -34,6 +36,13 @@ struct DrawRenderState;
 class RenderContext;
 class CommandScheduler;
 struct RenderExecutorTestAccess;
+
+// Counts the composite draws where the renderer substituted the guest's (unwritten) scene
+// source with the rendered scene colour target. That substitute holds linear HDR values,
+// while the video-out buffer it is composited into expects display-encoded ones, so the
+// presenter has to encode such frames itself. The presenter notices an override by this
+// counter changing since the previous video-out frame.
+extern std::atomic<uint64_t> g_composite_override_tick;
 
 enum class CommandBufferDebugOp : uint32_t {
 	DispatchDirect,

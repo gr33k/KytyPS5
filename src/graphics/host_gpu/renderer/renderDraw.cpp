@@ -111,6 +111,10 @@ static uint64_t                                       g_scene_target_seq = 0;
 // draw. Diagnostics watch draws into this address to find the tonemap pass.
 static std::atomic<uint64_t> g_composite_source_addr {0};
 
+// See render.h: lets the presenter know a frame was composited from the linear
+// HDR scene target instead of a display-encoded guest buffer.
+std::atomic<uint64_t> g_composite_override_tick {0};
+
 // Tonemap input images learned from the tonemap draw, shared with the compute
 // path so we can find which dispatches (if any) write them.
 namespace KytySceneDiag {
@@ -1592,6 +1596,7 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 	tb.image_id = id;
 	tb.image_view = cache.FindTexture(id, scene_desc);
 	tb.desc = scene_desc;
+	g_composite_override_tick.fetch_add(1, std::memory_order_relaxed);
 	static std::atomic_uint logged {0};
 	if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
 		LOGF("CompositeOverride: tex0 -> 0x%010" PRIx64 " id=%u/%u ext=%ux%u fmt=%s frame=%d\n",
