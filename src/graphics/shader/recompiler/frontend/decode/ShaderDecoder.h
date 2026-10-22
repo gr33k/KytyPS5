@@ -587,6 +587,7 @@ enum class Opcode {
 	BUFFER_ATOMIC_CMPSWAP,
 	BUFFER_ATOMIC_SWAP_X2,
 	BUFFER_ATOMIC_ADD,
+	BUFFER_ATOMIC_ADD_X2,
 	BUFFER_ATOMIC_SUB,
 	BUFFER_ATOMIC_SMIN,
 	BUFFER_ATOMIC_UMIN,
@@ -599,6 +600,8 @@ enum class Opcode {
 	BUFFER_ATOMIC_XOR,
 	BUFFER_ATOMIC_FMIN,
 	BUFFER_ATOMIC_FMAX,
+	BUFFER_GL0_INV,
+	BUFFER_GL1_INV,
 	FLAT_LOAD_UBYTE,
 	FLAT_LOAD_SBYTE,
 	FLAT_LOAD_USHORT,
@@ -632,6 +635,7 @@ enum class Opcode {
 	DS_MAX_U32,
 	DS_MAX_RTN_U32,
 	DS_MAX_RTN_U64,
+	DS_CMPST_RTN_B32,
 	DS_CMPST_RTN_B64,
 	DS_AND_B32,
 	DS_AND_RTN_B32,
@@ -879,6 +883,7 @@ Program DecodeFrontProgram(std::span<const uint32_t> front);
 void DecodeProgram(std::span<const uint32_t> code, Program& program);
 bool IsConditionalBranch(Opcode opcode);
 bool IsDirectBranch(Opcode opcode);
+bool IsDsWriteOpcode(Opcode opcode);
 
 void DecodeScalarSource(uint32_t code, uint32_t pc, Operand& operand);
 void DecodeScalarDestination(uint32_t code, uint32_t pc, Operand& operand);

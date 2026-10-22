@@ -47,26 +47,17 @@ void ValidateOptions(const Program& program, ShaderStageInputInfo input_info) {
 		case ShaderType::TessellationControl:
 		case ShaderType::TessellationEvaluation:
 		case ShaderType::Mesh:
-			if (input_info.vertex == nullptr) {
-				return Fail("vertex shader has no input metadata");
-			}
 			if (input_info.vertex->resources_num < 0 ||
 			    input_info.vertex->resources_num > ShaderVertexInputInfo::RES_MAX) {
 				return Fail("vertex resource count is out of range");
 			}
 			return;
 		case ShaderType::Pixel:
-			if (input_info.pixel == nullptr) {
-				return Fail("pixel shader has no input metadata");
-			}
 			if (input_info.pixel->input_num > std::size(input_info.pixel->interpolator_settings)) {
 				return Fail("pixel input count is out of range");
 			}
 			return;
 		case ShaderType::Compute:
-			if (input_info.compute == nullptr) {
-				return Fail("compute shader has no input metadata");
-			}
 			if (input_info.compute->thread_ids_num < 0 || input_info.compute->thread_ids_num > 3) {
 				return Fail("compute thread ID count is out of range");
 			}
@@ -191,7 +182,7 @@ void AddBuiltinInput(ShaderInfo& info, StageInputKind kind) {
 
 void CollectOutput(const Program& program, ShaderStageInputInfo input_info,
                    ShaderInfo& info, const Inst& inst) {
-	const bool alpha_remap = program.stage == ShaderType::Pixel && input_info.pixel != nullptr &&
+	const bool alpha_remap = program.stage == ShaderType::Pixel &&
 	                         input_info.pixel->alpha_blend_source != ShaderAlphaBlendSource::None;
 	const auto& export_info = program.export_info[inst.Flags<ExportFlags>().index];
 	if (export_info.kind == ExportTargetKind::MrtZ) {
@@ -340,6 +331,7 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			}
 			if (kind == ResourceKind::Buffer) {
 				info.coherent_buffers |= memory.coherent;
+				info.buffer_int64_atomics |= memory.IsCoherentBufferPairLoad(op);
 				if (memory.resource >= info.buffers.size()) {
 					return Fail("buffer operation has invalid resource metadata");
 				}
@@ -508,6 +500,7 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 		case ValueOpcode::ReadConst: info.uses_flattened_srt = true; break;
 		case ValueOpcode::BitwiseXor32: info.has_bitwise_xor = true; break;
 		case ValueOpcode::StoreCompletion: info.subgroup_barrier = true; break;
+		case ValueOpcode::DataCacheInvalidate: info.coherent_buffers = true; break;
 		case ValueOpcode::BvhIntersect: info.bvh = true; break;
 		case ValueOpcode::ConditionRef:
 			info.subgroup_vote |=

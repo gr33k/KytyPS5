@@ -82,6 +82,11 @@ struct MemoryInfo {
 	bool                    coherent                                              = false;
 	bool                    planning_only                                         = false;
 
+	[[nodiscard]] bool IsCoherentBufferPairLoad(ValueOpcode opcode) const {
+		return kind == ResourceKind::Buffer && opcode == ValueOpcode::LoadBufferU32x2 && coherent &&
+		       !typed && !formatted && data_bits == 32u;
+	}
+
 	[[nodiscard]] bool SupportsIndirectBufferLoad(ValueOpcode opcode) const {
 		if (typed) return false;
 		if (data_bits == 8u) return !formatted && opcode == ValueOpcode::LoadBufferU8;
@@ -120,6 +125,7 @@ struct BufferResource {
 	uint32_t               descriptor_index   = UINT32_MAX;
 	uint32_t               first_use_pc       = 0;
 	uint32_t               max_byte_extent    = 0;
+	uint32_t               write_extent       = 0; // UINT32_MAX once a write is runtime-addressed or formatted
 	uint32_t               packed_stride      = 0;
 	Prospero::BufferFormat descriptor_format  = Prospero::BufferFormat::kInvalid;
 	uint32_t               descriptor_swizzle = DstSel(4, 5, 6, 7);
@@ -215,8 +221,11 @@ enum class TessellationAttribute {
 	ControlOutput,
 	EvaluationInput,
 	PatchOutput,
+	PatchInput,
 	Factor
 };
+constexpr uint32_t NumTessellationAttributes =
+    static_cast<uint32_t>(TessellationAttribute::Factor) + 1u;
 
 enum class StageInputKind {
 	VertexIndex,
@@ -351,7 +360,14 @@ struct PushData {
 	static constexpr uint32_t NoStart    = UINT32_MAX;
 	std::array<uint32_t, DwordCount> dwords {};
 
-	[[nodiscard]] static constexpr uint32_t GraphicsDrawDwords(bool mesh, bool object_id) {
+	// User clip planes 0..N follow the mesh draw parameters or object ID, four dwords each.
+	static constexpr uint32_t UserClipPlaneDword = MeshDrawDwordCount;
+
+	[[nodiscard]] static constexpr uint32_t GraphicsDrawDwords(bool mesh, bool object_id,
+	                                                           uint32_t user_clip_planes = 0) {
+		if (user_clip_planes != 0) {
+			return UserClipPlaneDword + 4u * std::bit_width(user_clip_planes);
+		}
 		return mesh ? MeshDrawDwordCount : static_cast<uint32_t>(object_id);
 	}
 
@@ -490,7 +506,6 @@ struct ShaderInfo {
 	static constexpr uint32_t MaxBufferRoots  = 64;
 	static constexpr uint32_t MaxImages       = 64;
 	static constexpr uint32_t MaxSamplers     = 32;
-	static constexpr uint32_t MaxSampledPairs = 64;
 
 	std::vector<BufferResource>      buffers;
 	std::vector<ImageResource>       images;
@@ -622,6 +637,8 @@ struct CompiledShaderInfo {
 struct UniformFillPlan {
 	UniformFill          fill;
 	std::array<Value, 4> values;
+	Value                pattern_size;
+	Value                element_count;
 };
 
 // Resource analysis retained by the shader cache. It owns immutable descriptor/SRT,

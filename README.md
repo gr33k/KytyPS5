@@ -291,6 +291,43 @@ sources, so it needs network access; a fully sandboxed `nix build` would require
 inputs. A Vulkan 1.3 driver must be available at runtime (on NixOS,
 `hardware.graphics.enable = true`).
 
+### Building on Fedora and Fedora Atomic (Bazzite, Bluefin, Silverblue)
+
+On regular Fedora, install dependencies on the host. On Fedora Atomic variants such as Bazzite,
+Bluefin and Silverblue, use [Distrobox](https://distrobox.it/) and run the install and build steps
+inside the container. Keep the checkout in your home directory so it is shared with the container.
+Add `--nvidia` to the create command for hosts using the proprietary NVIDIA driver:
+
+```bash
+distrobox create --name kyty-build --image registry.fedoraproject.org/fedora:latest
+distrobox enter kyty-build
+```
+
+Install the toolchain, Qt 6 and SDL3 dependencies:
+
+```bash
+sudo dnf install -y \
+  clang lld ninja-build cmake git glslang python3 pkgconf-pkg-config \
+  mesa-libGL-devel libX11-devel libXcursor-devel libXext-devel libXfixes-devel \
+  libXi-devel libXrandr-devel libXScrnSaver-devel libXtst-devel libxkbcommon-devel \
+  alsa-lib-devel pulseaudio-libs-devel systemd-devel dbus-devel \
+  wayland-devel wayland-protocols-devel qt6-qtbase-devel
+```
+
+From the repository root, follow the launcher configure, build and install steps in
+[Building on Linux](#building-on-linux), omitting `-DCMAKE_PREFIX_PATH="$Qt6_DIR"`; CMake finds
+Fedora's packaged Qt 6 automatically.
+
+Run `./_Build/linux/install/kyty_launcher` on regular Fedora or inside the container. To launch a
+container build from the host, leave the container with `exit`, then run from the repository root:
+
+```bash
+distrobox enter kyty-build -- ./_Build/linux/install/kyty_launcher
+```
+
+Qt libraries and plugins are bundled. You can also launch directly on a Fedora Atomic host
+if its other system libraries are compatible with the container build.
+
 ### Building on macOS
 
 macOS builds target x86-64 and run under Rosetta 2 on Apple Silicon, so the PS5's x86-64 game
@@ -346,18 +383,35 @@ cmake --build _Build/windows --target kyty_tests
 ctest --test-dir _Build/windows --output-on-failure
 ```
 
-(Use `_Build/linux` on Linux.)
+Use `_Build/linux` instead of `_Build/windows` for a Linux build.
+
+### Visual Studio Code
+
+A ready-made Visual Studio Code setup is included in [`.vscode`](.vscode). It configures CMake
+Tools to build the project with Ninja and `clang-cl` and provides launch profiles for both
+`kyty_launcher.exe` and `kyty_emulator.exe`. It is Windows-only: VS Code settings cannot select a
+compiler per platform, so on Linux configure from the command line as shown above.
+
+Before using it:
+
+1. Install the **CMake Tools** and **C/C++** extensions in Visual Studio Code.
+2. Update `CMAKE_PREFIX_PATH` in [`.vscode/settings.json`](.vscode/settings.json) to point to your
+   Qt 6 MSVC installation.
+3. Update the `--game` path in [`.vscode/launch.json`](.vscode/launch.json) for the
+   **Debug kyty_emulator** profile.
+4. Open the repository in an x64 Visual Studio developer environment, configure the CMake project,
+   and select a launch profile from **Run and Debug**.
 
 ## Running
 
 Update the graphics driver before reporting rendering problems. Launch the GUI:
 
 ```powershell
-.\_Build\windows\install\launcher.exe
+.\_Build\windows\install\kyty_launcher.exe
 ```
 
 ```bash
-./_Build/linux/install/launcher
+./_Build/linux/install/kyty_launcher
 ```
 
 On first launch, add game folders in the global settings. The launcher searches

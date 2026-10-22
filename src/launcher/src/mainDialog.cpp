@@ -1,4 +1,4 @@
-Ôªø#include "mainDialog.h"
+#include "mainDialog.h"
 
 #include "cheatFile.h"
 #include "configuration.h"
@@ -8,8 +8,8 @@
 #include "gameContent.h"
 #include "launcherTheme.h"
 #include "patchesDialog.h"
+#include "titleSound.h"
 #include "trophyViewerDialog.h"
-
 #include "updateChecker.h"
 
 #include <QApplication>
@@ -19,6 +19,7 @@
 #include <QByteArray>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDialog>
 #include <QDesktopServices>
 #include <QDir>
@@ -49,6 +50,7 @@
 #include <QStringList>
 #include <QStatusBar>
 #include <QStyle>
+#include <QStyleHints>
 #include <QTextStream>
 #include <QToolBar>
 #include <QUrl>
@@ -123,6 +125,7 @@ private:
 	MainDialog*     m_main_dialog    = nullptr;
 	UpdateChecker*  m_update_checker = nullptr;
 	ControllerPreview m_controller_preview;
+	TitleSound      m_title_sound;
 	QString         m_interpreter;
 	QString         m_version;
 
@@ -157,7 +160,7 @@ private:
 QByteArray MainDialogPrivate::g_last_geometry;
 QByteArray MainDialogPrivate::g_last_state;
 bool       MainDialogPrivate::g_check_updates_on_startup = true;
-int        MainDialogPrivate::g_theme                   = 0;
+int        MainDialogPrivate::g_theme                    = 0;
 
 MainDialog::MainDialog(QWidget* parent): QMainWindow(parent), m_p(new MainDialogPrivate(this)) {
 	m_p->Setup(this);
@@ -182,7 +185,13 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 
 	connect(main_dialog, &MainDialog::Start, this, &MainDialogPrivate::FindInterpreter,
 	        Qt::QueuedConnection);
-	connect(m_ui->widget, &ConfigurationListWidget::Select, this, &MainDialogPrivate::Update);
+	connect(m_ui->widget, &ConfigurationListWidget::Select, this, [this]() {
+		Update();
+		const auto* item = m_ui->widget->GetSelectedItem();
+		m_title_sound.SetTitle(m_process.state() == QProcess::NotRunning && item != nullptr
+		                           ? item->GetInfo().basedir
+		                           : QString());
+	});
 	connect(m_ui->widget, &ConfigurationListWidget::PreviewControllerColor, this,
 	        [this](const QString& color) {
 		        if (m_process.state() == QProcess::NotRunning) {
@@ -637,8 +646,10 @@ void MainDialogPrivate::FindInterpreter() {
 	}
 }
 
-static QString BoolArg(bool value) {
-	return value ? QStringLiteral("true") : QStringLiteral("false");
+static void AddFlag(QStringList& args, bool enabled, const char* name) {
+	if (enabled) {
+		args << name;
+	}
 }
 
 static QStringList CreateEmulatorArgs(const Configuration& info) {
@@ -661,58 +672,44 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	}
 	args << "--controller-volume" << QString::number(info.controller.speaker_volume);
 	args << "--controller-vibration" << QString::number(info.controller.vibration_intensity);
+	args << "--keyboard-player" << QString::number(info.controller.keyboard_player);
 	args << "--present-mode" << EnumToText(info.present_mode);
 	if (info.gpu_index >= 0) {
 		args << "--gpu" << QString::number(info.gpu_index);
 	}
-	if (info.fullscreen_enabled) {
-		args << "--fullscreen";
-	}
-	if (info.hdr_enabled) {
-		args << "--hdr";
-	}
-	if (info.hide_cursor_enabled) {
-		args << "--hide-cursor";
-	}
-	args << "--readback-linear-images" << BoolArg(info.readback_linear_images);
-	args << "--sync-raw-image-buffers" << BoolArg(info.sync_raw_image_buffers);
-	args << "--trophy-notifications" << BoolArg(info.trophy_enabled);
+	AddFlag(args, info.fullscreen_enabled, "--fullscreen");
+	AddFlag(args, info.hdr_enabled, "--hdr");
+	AddFlag(args, info.hide_cursor_enabled, "--hide-cursor");
+	AddFlag(args, info.readback_linear_images, "--readback-linear-images");
+	AddFlag(args, info.readback_tiled_images, "--readback-tiled-images");
+	AddFlag(args, info.sync_raw_image_buffers, "--sync-raw-image-buffers");
+	AddFlag(args, !info.trophy_enabled, "--no-trophy-notifications");
 	args << "--trophy-duration" << QString::number(info.trophy_duration_seconds);
-	args << "--skip-notice-screen" << BoolArg(info.skip_notice_screen);
-	args << "--network-connected" << BoolArg(info.network_connected);
-	if (info.tessellation_enabled) {
-		args << "--tessellation";
-	}
+	AddFlag(args, info.perf_overlay_enabled, "--perf-overlay");
+	AddFlag(args, info.skip_notice_screen, "--skip-notice-screen");
+	AddFlag(args, info.network_connected, "--network-connected");
+	AddFlag(args, info.tessellation_enabled, "--tessellation");
 	args << "--vblank-frequency" << QString::number(info.vblank_frequency);
 	args << "--console-language" << QString::number(info.console_language);
-	args << "--vulkan-validation" << BoolArg(info.vulkan_validation_enabled);
-	args << "--shader-validation" << BoolArg(info.shader_validation_enabled);
-	args << "--gpu-assisted-validation" << BoolArg(info.gpu_assisted_validation_enabled);
+	AddFlag(args, info.vulkan_validation_enabled, "--vulkan-validation");
+	AddFlag(args, info.shader_validation_enabled, "--shader-validation");
+	AddFlag(args, info.gpu_assisted_validation_enabled, "--gpu-assisted-validation");
 	args << "--shader-optimization-type" << EnumToText(info.shader_optimization_type);
 	args << "--shader-log-direction" << EnumToText(info.shader_log_direction);
 	args << "--shader-log-folder" << info.shader_log_folder;
-	args << "--command-buffer-dump" << BoolArg(info.command_buffer_dump_enabled);
+	AddFlag(args, info.command_buffer_dump_enabled, "--command-buffer-dump");
 	args << "--command-buffer-dump-folder" << info.command_buffer_dump_folder;
 	args << "--printf-direction" << EnumToText(info.printf_direction);
 	args << "--printf-output-file" << info.printf_output_file;
-	if (info.profiler_enabled) {
-		args << "--profile";
-	}
-	args << "--spirv-debug-printf" << "false";
-	if (info.amd_cpu_enabled) {
-		args << "--amd-cpu";
-	}
+	AddFlag(args, info.profiler_enabled, "--profile");
+	AddFlag(args, info.amd_cpu_enabled, "--amd-cpu");
 #if defined(_WIN32)
-	if (info.red_zone_protection_enabled) {
-		args << "--redzone";
-	}
+	AddFlag(args, info.red_zone_protection_enabled, "--redzone");
 #endif
 	for (const auto& binding: info.host_input_mapping) {
 		args << "--keymap" << binding;
 	}
-	if (info.renderdoc_enabled) {
-		args << "--rd";
-	}
+	AddFlag(args, info.renderdoc_enabled, "--rd");
 
 	QString game = info.basedir;
 	if (!info.elf.isEmpty() && !GameContent::IsArchive(info.basedir)) {
@@ -968,6 +965,7 @@ void MainDialogPrivate::Run() {
 
 	m_running_item->SetRunning(true);
 	m_controller_preview.SetSuspended(true);
+	m_title_sound.SetTitle({});
 
 	auto info = m_ui->widget->CreateConfiguration(*m_running_item);
 	m_run_timer.start();
@@ -1035,7 +1033,7 @@ void MainDialogPrivate::ShowFailureDialog(int exitCode, QProcess::ExitStatus exi
 		} else {
 			log_size = tr("%1 MiB").arg(log_bytes / (1024 * 1024));
 		}
-		detail += tr("\n\nRan %1 ‚Ä¢ log %2").arg(elapsed, log_size);
+		detail += tr("\n\nRan %1 ï log %2").arg(elapsed, log_size);
 	}
 	QMessageBox box(QMessageBox::Warning, tr("Game failed"), reason + detail, QMessageBox::Ok,
 	                m_main_dialog);
@@ -1076,12 +1074,12 @@ void MainDialogPrivate::Update() {
 				const QString accent =
 				    m_main_dialog->palette().color(QPalette::Highlight).name();
 				status_text +=
-				    tr("   ‚Ä¢   <span style='color:%1'>‚óè</span> <b>%2</b> (%3) ‚Äî running")
+				    tr("   ï   <span style='color:%1'>?</span> <b>%2</b> (%3) ó running")
 				        .arg(accent, name, serial);
 			} else if (serial.isEmpty()) {
-				status_text += tr("   ‚Ä¢   <b>%1</b>").arg(name);
+				status_text += tr("   ï   <b>%1</b>").arg(name);
 			} else {
-				status_text += tr("   ‚Ä¢   <b>%1</b> (%2)").arg(name, serial);
+				status_text += tr("   ï   <b>%1</b> (%2)").arg(name, serial);
 			}
 		}
 		has_patches  = Cheats::IsSupportedTitleId(info.title_id);

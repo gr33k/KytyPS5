@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -61,8 +62,8 @@ static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::Descriptor
 	return true;
 }
 
-void RenderExecutor::UpdateComputeMetaClears(const ShaderComputeInputInfo& input,
-                                            const CommandBuffer&          buffer) {
+bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
+                                                const CommandBuffer&          buffer) {
 	const auto& program   = *input.stage.program;
 	const auto& resources = *input.stage.resources;
 	if (resources.buffers.size() != program.info.buffers.size()) {
@@ -72,9 +73,10 @@ void RenderExecutor::UpdateComputeMetaClears(const ShaderComputeInputInfo& input
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		const auto& resource   = program.info.buffers[i];
 		const auto  descriptor = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-		// Reads and transforms of metadata do not establish a clear state.
+		// A metadata resource that is also read is not proven to be a full overwrite. Execute it
+		// conservatively instead of replacing the dispatch with a coarse full-surface clear.
 		if ((!resource.written || resource.read) && cache.IsMeta(descriptor.Base48())) {
-			return;
+			return false;
 		}
 	}
 
@@ -84,10 +86,13 @@ void RenderExecutor::UpdateComputeMetaClears(const ShaderComputeInputInfo& input
 			if (resource.written) {
 				const auto descriptor =
 				    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-				(void)cache.ClearMeta(descriptor.Base48());
+				if (cache.ClearMeta(descriptor.Base48())) {
+					return true;
+				}
 			}
 		}
 	}
+	return false;
 }
 
 bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x,
@@ -105,9 +110,10 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	constexpr std::array formats {
 	    Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32_32UInt,
 	    Prospero::BufferFormat::k32_32_32UInt, Prospero::BufferFormat::k32_32_32_32UInt};
+	// Offset-or-swizzle bounds do not describe the element range proved by the shader.
 	if (descriptor.Stride() != element_size || descriptor.Format() != formats[fill.words - 1] ||
 	    descriptor.SwizzleEnabled() || descriptor.IndexStride() != 0 || descriptor.AddTid() ||
-	    descriptor.Base48() == 0) {
+	    descriptor.OutOfBounds() == 3 || descriptor.Base48() == 0) {
 		return false;
 	}
 	if (input.threads_num[0] == 0 || input.threads_num[0] != fill.group_stride[0] ||
@@ -119,7 +125,11 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	                                 ? group_x
 	                                 : static_cast<uint64_t>(group_x) * input.threads_num[0];
 	const auto     size        = descriptor.GetSize();
-	if (invocations != descriptor.NumRecords() || size == 0 || size > UINT32_MAX ||
+	const auto elements = descriptor.NumRecords();
+	const bool covered = fill.bounded_elements != 0
+	                         ? fill.bounded_elements == elements && invocations >= elements
+	                         : invocations == elements;
+	if (!covered || invocations > uint64_t {UINT32_MAX} + 1 || size == 0 || size > UINT32_MAX ||
 	    (input.dispatch_thread_dimensions &&
 	     (group_x % input.threads_num[0] != 0 || input.dispatch_threads_num[0] != group_x ||
 	      input.dispatch_threads_num[1] != 1 || input.dispatch_threads_num[2] != 1))) {
@@ -133,9 +143,9 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	return true;
 }
 
-bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
-                                                CommandBuffer& command, uint32_t group_x,
-                                                uint32_t group_y, uint32_t group_z, uint32_t mode) {
+bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
+                                          CommandBuffer& command, uint32_t group_x,
+                                          uint32_t group_y, uint32_t group_z, uint32_t mode) {
 	const auto& program   = *input.stage.program;
 	const auto& resources = *input.stage.resources;
 	const auto& fill      = resources.uniform_fill;
@@ -191,14 +201,26 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 	                              size)) {
 		return false;
 	}
-	if (!cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
-		return false;
+	const bool image_clear =
+	    cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear);
+	if (!image_clear) {
+		// CPU fills invalidate overlapping cached images. Preserve the native dispatch for
+		// partial or ambiguous image backings, including pooled metadata aliases.
+		if ((descriptor.Base48() & 3u) != 0 ||
+		    !m_context.IsMapped(descriptor.Base48(), size) ||
+		    cache.IsRegionRegistered(descriptor.Base48(), size)) {
+			return false;
+		}
+		// Metadata need not have an image backing yet. Keep proven fills in guest memory
+		// when CPU-owned, so color-clear discovery can read them without a GPU download.
+		m_context.GetBufferCache().FillBuffer(descriptor.Base48(), size, packed_clear, false);
 	}
 	static std::atomic<uint32_t> logged_clears {0};
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
-		LOGF("GraphicsRenderDispatchDirect: compute image clear shader=0x%016" PRIx64
+		LOGF("GraphicsRenderDispatchDirect: compute %s shader=0x%016" PRIx64
 		     " addr=0x%016" PRIx64 " size=0x%016" PRIx64 " value=0x%08" PRIx32 "\n",
-		     input.stage.program->shader_hash, descriptor.Base48(), size, packed_clear);
+		     image_clear ? "image clear" : "buffer fill", input.stage.program->shader_hash,
+		     descriptor.Base48(), size, packed_clear);
 	}
 	return true;
 }
@@ -418,10 +440,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
-	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {
-		return;
-	}
-
 	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
 	constexpr uint32_t DISPATCH_INITIATOR_BASE_BITS             = 0x41u;
 	constexpr uint32_t DISPATCH_INITIATOR_MODIFIER_BITS         = 0xa038u;
@@ -475,123 +493,12 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
-	// Known-hang compute shaders: skipping lets the game continue instead of
-	// hanging the GPU (TDR). 0x5d7ccd5dbcdd0c9f hangs amdvlk on first dispatch
-	// in RE Engine streaming loads; the game runs fine without its results.
-	// Additional hashes (one per line/space/comma, hex) can be supplied in
-	// skip_cs_hashes.txt next to the executable for triage.
-	static constexpr uint64_t kHungComputeHashes[] = {0x5d7ccd5dbcdd0c9full};
-	static std::vector<uint64_t> extra_hashes;
-	// Conditional entries: {hash, min_groups} skips only dispatches whose
-	// x*y*z exceeds min_groups (file syntax HASH>MIN, MIN decimal).
-	static std::vector<std::pair<uint64_t, uint64_t>> extra_hash_limits;
-	static std::once_flag         hashes_once;
-	std::call_once(hashes_once, [] {
-		Common::File file;
-		if (!file.Open(std::filesystem::path("skip_cs_hashes.txt"),
-		               Common::File::Mode::Read)) {
-			return;
-		}
-		const auto size = file.Size();
-		if (size == 0 || size > 4096) {
-			return;
-		}
-		std::string text(static_cast<size_t>(size), '\0');
-		uint32_t    bytes_read = 0;
-		file.Read(text.data(), static_cast<uint32_t>(size), &bytes_read);
-		text.resize(bytes_read);
-		for (char& c: text) {
-			if (c == ',' || c == '\r' || c == '\n' || c == '\t') {
-				c = ' ';
-			}
-		}
-		for (const auto& word: Common::Split(text, ' ', false)) {
-			if (word.empty()) {
-				continue;
-			}
-			const auto gt = word.find('>');
-			const std::string hash_part =
-			    (gt == std::string::npos) ? word : word.substr(0, gt);
-			char*        end  = nullptr;
-			const uint64_t hash = std::strtoull(hash_part.c_str(), &end, 16);
-			if (end == hash_part.c_str()) {
-				continue;
-			}
-			if (gt != std::string::npos) {
-				if (*end != '\0') {
-					continue;
-				}
-				char*          lim_end = nullptr;
-				const uint64_t limit =
-				    std::strtoull(word.c_str() + gt + 1, &lim_end, 10);
-				if (lim_end == word.c_str() + gt + 1 || *lim_end != '\0') {
-					continue;
-				}
-				extra_hash_limits.emplace_back(hash, limit);
-			} else if (*end == '\0') {
-				extra_hashes.push_back(hash);
-			}
-		}
-		if (!extra_hashes.empty() || !extra_hash_limits.empty()) {
-			std::printf("DispatchDirect: loaded %zu extra skip hashes + %zu size-limited\n",
-			            extra_hashes.size(), extra_hash_limits.size());
-			std::fflush(stdout);
-		}
-	});
-	for (const auto hung : kHungComputeHashes) {
-		if (program.shader_hash == hung) {
-			static std::atomic_uint hung_logged = 0;
-			if (hung_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
-				std::printf("DispatchDirect: skipping known-hang shader 0x%016llx\n",
-				            static_cast<unsigned long long>(program.shader_hash));
-				std::fflush(stdout);
-			}
-			ResetBindings();
-			return;
-		}
-	}
-	for (const auto hung : extra_hashes) {
-		if (program.shader_hash == hung) {
-			ResetBindings();
-			return;
-		}
-	}
-	{
-		const uint64_t groups = static_cast<uint64_t>(thread_group_x) * thread_group_y *
-		                        thread_group_z;
-		for (const auto& [hung, min_groups]: extra_hash_limits) {
-			if (program.shader_hash == hung && groups > min_groups) {
-				static std::atomic_uint limit_logged {0};
-				if (limit_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
-					std::printf("DispatchDirect: size-skipped hash=0x%016llx groups=%ux%ux%u\n",
-					            static_cast<unsigned long long>(program.shader_hash),
-					            thread_group_x, thread_group_y, thread_group_z);
-					std::fflush(stdout);
-				}
-				ResetBindings();
-				return;
-			}
-		}
-	}
-	// TEMP-DIAG: insane dispatch sizes hang the GPU (TDR) with no other trace.
-	{
-		const uint64_t total = static_cast<uint64_t>(thread_group_x) * thread_group_y * thread_group_z;
-		if (total > 100000000ull) {
-			std::printf("SUSPICIOUS DISPATCH: submit=%llu shader_hash=0x%016llx groups=%ux%ux%u\n",
-			            static_cast<unsigned long long>(submit_id),
-			            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
-			            thread_group_y, thread_group_z);
-			std::fflush(stdout);
-		}
-	}
-	if (resources.specialization_reads.empty()) {
-		// Cached metadata addresses can be reused as ordinary buffers; preserve their guest writes.
-		UpdateComputeMetaClears(input_info, buffer);
-		if (TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
-		                               thread_group_z, mode)) {
-			ResetBindings();
-			return;
-		}
+	if (resources.specialization_reads.empty() &&
+	    (TryConsumeComputeMetaClear(input_info, buffer) ||
+	     TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
+	                           thread_group_z, mode))) {
+		ResetBindings();
+		return;
 	}
 
 	const bool large_workgroup =
@@ -815,7 +722,28 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
+	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
+	                                   std::max(input_info.threads_num[1], 1u) *
+	                                   std::max(input_info.threads_num[2], 1u);
+	if ((mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) != 0 && program.info.uses_gds &&
+	    group_threads <= input_info.wave_size && !input_info.lds_storage) {
+		// A single guest wave per group can run in launch order without a device-wide
+		// spinlock. Keep the guest workgroup IDs when splitting the dispatch.
+		for (uint32_t z = 0; z < thread_group_z; ++z) {
+			for (uint32_t y = 0; y < thread_group_y; ++y) {
+				for (uint32_t x = 0; x < thread_group_x; ++x) {
+					if ((x | y | z) != 0u) {
+						ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+					}
+					vk_buffer.dispatchBase(x, y, z, 1, 1, 1);
+				}
+			}
+		}
+	} else {
+		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -989,6 +917,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 	SplitOversizedSubmit();

@@ -8,7 +8,17 @@ int main(int argc, char* argv[]) {
 	QApplication a(argc, argv);
 	QApplication::setApplicationDisplayName(QStringLiteral("KytyPS5 Launcher"));
 	a.setDesktopFileName(QStringLiteral("KytyPS5"));
-	a.setWindowIcon(QIcon(QStringLiteral(":/icons/app-icon.png")));
+	// Title bars and taskbars get the bolder small-size artwork.
+	const QIcon small_art(QStringLiteral(":/icons/kyty-small.svg"));
+	const QIcon large_art(QStringLiteral(":/icons/kyty.svg"));
+	QIcon       icon;
+	for (int size: {16, 24, 32, 48, 64}) {
+		icon.addPixmap(small_art.pixmap(QSize(size, size), 1.0));
+	}
+	for (int size: {128, 256}) {
+		icon.addPixmap(large_art.pixmap(QSize(size, size), 1.0));
+	}
+	QApplication::setWindowIcon(icon);
 	LauncherTheme::Initialize(a);
 
 	MainDialog w;
