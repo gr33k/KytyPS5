@@ -1,10 +1,13 @@
-# KytyPS5 (fork)
+# KytyPS5 — Experimental Compatibility & Diagnostics Fork
 
-> **Fork note:** this repository is a fork of [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5)
-> (`upstream`). It tracks upstream `main` and adds the compatibility,
-> diagnostics, and launcher changes listed below. Game compatibility results
-> in this file were measured on the test platform described under
-> [Test Platform](#test-platform) and apply to this fork only.
+> **Fork note:** this is an experimental fork of [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5)
+> (`upstream`). It regularly merges upstream `main` while adding local
+> compatibility testing, diagnostics, and launcher improvements. This fork's
+> goal is to make more titles boot and progress reliably, record reproducible
+> per-title results, and turn rendering or stability regressions into actionable
+> fixes. Compatibility is still experimental; a title reaching gameplay does
+> not mean it is stable or fully playable. Results below apply only to this fork
+> and the test platform described under [Test Platform](#test-platform).
 
 ## Changes in This Fork
 
@@ -36,6 +39,14 @@ Relative to upstream `main`:
   diagnose hangs and device-memory pressure.
 
 Upstream merges are pulled in regularly; local commits sit on top.
+
+### Fork goals
+
+- Keep the fork close to upstream while carrying focused, reviewable fixes.
+- Test a broad local game set and publish the exact observed state, including
+  crashes, missing graphics, visual artifacts, and performance limitations.
+- Improve compatibility and diagnostics without implying that booting or
+  reaching gameplay equals a finished or fully playable experience.
 
 ## About KytyPS5
 
@@ -73,12 +84,10 @@ emulator progress.
 
 ## Compatibility (This Fork, Test Platform Above)
 
-56 titles tested: 6 InGame, 0 Unknown (reported working, awaiting
-re-confirmation), 19 MainMenu, 13 Logo, 18 DoesntBoot. Dates are the test
-dates (M/D/YY). Names are taken from the local dump folder names.
-dates (M/D/YY). Names are taken from the local dump folder names.
-dates (M/D/YY). Names are taken from the local dump folder names.
-dates (M/D/YY). Names are taken from the local dump folder names.
+56 titles tested: 9 InGame, 0 Unknown (reported working, awaiting
+re-confirmation), 17 MainMenu, 13 Logo, 17 DoesntBoot. Dates are the latest
+recorded test dates (M/D/YY); names are taken from the local dump folder names.
+InGame means the title reached gameplay, not that it is stable or fully playable.
 
 | Game | Title ID | Status | Notes |
 | ---- | -------- | ------ | ----- |
@@ -93,14 +102,14 @@ dates (M/D/YY). Names are taken from the local dump folder names.
 | Chernobylite | PPSA04747 | MainMenu | Game boots to initial logo - then freezes for a while (press buttons?) - then proceeds to game menu and crashes before getting in-game - 10/2/26 |
 | Five Nights at Freddys Security Breach | PPSA04677 | MainMenu | Game boots to menu - Starts video but crashes before in-game - 10/2/26 (Github states in-game) |
 | Ghostwire Tokyo | PPSA01337 | MainMenu | Game boots to menu - Starts loading game then crashes before game plan - 10/2/26 |
-| Grand Theft Auto San Andreas - The Definitive Edition | PPSA03524 | MainMenu | Game boots to menu - Crashes when start - 10/2/26 (Github states in-game 1 report · status: in-game · tested on 2026-09-27-421684e) |
-| Grand Theft Auto Vice City - The Definitive Edition | PPSA03530 | MainMenu | Game boots to menu - Crashes when start - 10/2/26 |
+| Grand Theft Auto San Andreas - The Definitive Edition | PPSA03524 | InGame | Reached gameplay with HUD/minimap after loading; survived repeated loads after host-lock fix. Slow (about 5–14 fps in gameplay). 10/21/26 |
+| Grand Theft Auto Vice City - The Definitive Edition | PPSA03530 | InGame | Reached cutscene and gameplay with HUD; image looked correct with presenter encode disabled. Slow (about 5–14 fps in gameplay). 10/21/26 |
 | Hotwheels Unleashed | PPSA02325 | MainMenu | Game boots to menu - Crashes in menu - 10/2/26 |
 | MXGP 2020 | PPSA01646 | MainMenu | Game boots to menu - graphical issue items not rendering and eventually crashes - 10/2/26 |
-| Madison | PPSA07370 | MainMenu |  |
+| Madison | PPSA07370 | MainMenu | No launcher comment recorded. |
 | Maneater | PPSA01862 | MainMenu | Game boots to menu - crashes in menu - 10/2/26 |
 | PPSA01619 | PPSA01619 | MainMenu | Game boot to menu - crashes once making a selection to proceed in-game - 10/2/26 |
-| PPSA04341 | PPSA04341 | MainMenu |  |
+| Avatar The Last Airbender - Quest for Balance | PPSA04341 | MainMenu | No notes recorded (the launcher comment is currently empty; retaining the historical README entry). |
 | PPSA04734 | PPSA04734 | MainMenu | Game boots to menu - crashes while loading to in-game - 10/5/26 |
 | Resident Evil 8 - Maiden Demo | PPSA01859 | MainMenu | Boots to menu now - Muse Spark fixed no boot 10/2/26 |
 | Ride 4 | PPSA01599 | MainMenu | Boots to menu - crashes when loading in menu (before attempting to start game) - 10/2/26 |
@@ -128,7 +137,7 @@ dates (M/D/YY). Names are taken from the local dump folder names.
 | Five Nights at Freddy's Help Wanted 2 | PPSA18887 | DoesntBoot | GPU flip submission failed at boot (result=-2144796661), no video - 10/8/26 (reconstructed from log; original note lost) |
 | Ghost of Tsushima Directors Cut | PPSA03208 | DoesntBoot | No Boot - 10/2/26 |
 | Ghostrunner | PPSA03682 | DoesntBoot | Starts video briefly and crashed (essentially doesn't boot) - 10/2/26 |
-| Grand Theft Auto III - The Definitive Edition | PPSA03527 | DoesntBoot | No Boot - 10/2/26 |
+| Grand Theft Auto III - The Definitive Edition | PPSA03527 | InGame | Restored the earlier tick-based GTA III display encode after later per-buffer/decode experiments caused flashing. Latest gameplay probe: 6 captures across both video-out buffers stayed visually consistent (about 7–8 fps); earlier bleached/flash reports mean pregame/loading and longer gameplay still need confirmation. 10/23/26 |
 | GreedFall | PPSA02982 | DoesntBoot | No Boot - 10/2/26 |
 | MARVEL Tokon Fighting Souls | PPSA15595 | DoesntBoot | Guest abort() in libC at boot, no submits - 10/8/26 (reconstructed from log; original note lost) |
 | Martha is Dead | PPSA02006 | DoesntBoot | No Boot - 10/2/26 |

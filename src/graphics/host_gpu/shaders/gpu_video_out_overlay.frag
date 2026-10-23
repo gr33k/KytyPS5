@@ -47,13 +47,6 @@ void main() {
 		c = c / (vec3(1.0) + c);
 		sampled.rgb = pow(c, vec3(1.0 / max(gamma, 0.1)));
 		sampled.a   = 1.0;
-	} else if ((flags & 32u) != 0u) {
-		// The guest wrote display values through an sRGB view into a buffer it then
-		// declared sRGB, so the stored bytes carry the display encode twice. Undo one
-		// round so the menu and loading screens show the values the guest authored.
-		vec3 c = clamp(sampled.rgb, 0.0, 1.0);
-		sampled.rgb = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),
-		                  greaterThan(c, vec3(0.04045)));
 	}
 	bool premultiplied = (flags & 1u) != 0u;
 	bool convert_to_hdr = (flags & (HDR_TARGET | PQ_SOURCE)) == HDR_TARGET;
