@@ -40,9 +40,19 @@ struct RenderExecutorTestAccess;
 // Counts the composite draws where the renderer substituted the guest's (unwritten) scene
 // source with the rendered scene colour target. That substitute holds linear HDR values,
 // while the video-out buffer it is composited into expects display-encoded ones, so the
-// presenter has to encode such frames itself. The presenter notices an override by this
-// counter changing since the previous video-out frame.
+// presenter has to encode such frames itself.
+//
+// The presented buffer is not necessarily the one that was just drawn into: the guest
+// double buffers its video-out targets and the presenter can copy either of them. So each
+// video-out buffer remembers the guest frame in which an overridden composite last wrote
+// the linear scene target into it (0 when the guest's own composite wrote it). The
+// presenter encodes a buffer only while that frame is current, so every present of one
+// frame looks the same and a menu frame is not encoded because the intro was overridden
+// minutes earlier.
+inline constexpr size_t kVideoOutLinearSlots = 8;
 extern std::atomic<uint64_t> g_composite_override_tick;
+extern std::atomic<uint64_t> g_video_out_linear_addr[kVideoOutLinearSlots];
+extern std::atomic<int64_t>  g_video_out_linear_frame[kVideoOutLinearSlots];
 
 enum class CommandBufferDebugOp : uint32_t {
 	DispatchDirect,

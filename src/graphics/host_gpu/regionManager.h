@@ -36,25 +36,41 @@ class TrackingSpinLock final {
 public:
 	void lock() noexcept {
 		const auto thread = CurrentThread();
+		// The tracker can re-enter its own region lock on one thread: an upload keeps
+		// the lock held across the upload callback, and that callback may upload into
+		// the same region again (San Andreas does this while streaming). Recursion is
+		// safe here because exclusive ownership already belongs to this thread, so
+		// count the depth instead of spinning on our own flag forever.
+		if (m_owner.load(std::memory_order_relaxed) == thread) {
+			++m_recursion;
+			return;
+		}
 		while (m_lock.test_and_set(std::memory_order_acquire)) {
-			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
-#if defined(__x86_64__) || defined(_M_X64)
-			_mm_pause();
-#elif defined(_M_ARM64)
-			__yield();
-#elif defined(__aarch64__)
-			asm volatile("yield");
-#endif
+			Pause();
 		}
 		m_owner.store(thread, std::memory_order_relaxed);
+		m_recursion = 1;
 	}
 	void unlock() noexcept {
 		EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) != CurrentThread());
+		if (--m_recursion != 0) {
+			return;
+		}
 		m_owner.store(0, std::memory_order_relaxed);
 		m_lock.clear(std::memory_order_release);
 	}
 
 private:
+	static void Pause() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+		_mm_pause();
+#elif defined(_M_ARM64)
+		__yield();
+#elif defined(__aarch64__)
+		asm volatile("yield");
+#endif
+	}
+
 	static uint32_t CurrentThread() noexcept {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		return GetCurrentThreadId();
@@ -73,6 +89,8 @@ private:
 
 	std::atomic_flag     m_lock = ATOMIC_FLAG_INIT;
 	std::atomic_uint32_t m_owner {0};
+	// Only the owning thread touches the depth, so a plain counter is enough.
+	uint32_t             m_recursion = 0;
 };
 
 static_assert(std::atomic_uint32_t::is_always_lock_free);

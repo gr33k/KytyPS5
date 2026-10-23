@@ -8,6 +8,7 @@
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
 #include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -20,6 +21,7 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -34,21 +36,83 @@
 
 namespace Libs::Graphics {
 
-// Titles whose video-out composite samples the raw linear scene target (see
-// RenderExecutor's composite override) instead of a display-encoded guest buffer.
-// Their frames carry no sRGB encode at all, so the presenter has to add one.
-// Keep this list narrow: any other title keeps its own brightness and colour.
-[[nodiscard]] static bool PresentEncodeWantedByTitle() {
-	static const bool wanted = [] {
-		char title_id[12] = {};
-		if (!Loader::SystemContentParamSfoGetString("TITLE_ID", title_id, sizeof(title_id))) {
+// True for the sRGB image formats: writes into those are display-encoded by the hardware,
+// so their pixel values are already in the colour space the display expects.
+[[nodiscard]] static bool IsDisplayEncodedFormat(vk::Format format) {
+	switch (format) {
+		case vk::Format::eR8G8B8A8Srgb:
+		case vk::Format::eB8G8R8A8Srgb:
+		case vk::Format::eA8B8G8R8SrgbPack32:
+		case vk::Format::eR8G8B8Srgb:
+		case vk::Format::eB8G8R8Srgb: return true;
+		default: return false;
+	}
+}
+
+// Whether the presenter may display-encode video-out frames at all. The renderer marks
+// each video-out buffer whose contents came from the linear scene target (see
+// SetVideoOutLinear), and only those frames are encoded, so this is just the master switch:
+// KYTY_PRESENT_ENCODE=off disables the encode, KYTY_PRESENT_NO_GAMMA forces it off.
+[[nodiscard]] static bool PresentEncodeRequested() {
+	static const bool requested = [] {
+		if (std::getenv("KYTY_PRESENT_NO_GAMMA") != nullptr) {
 			return false;
 		}
-		const std::string id {title_id};
-		// Grand Theft Auto III - The Definitive Edition.
-		return id == "PPSA03527";
+		const char* value = std::getenv("KYTY_PRESENT_ENCODE");
+		if (value == nullptr) {
+			return true;
+		}
+		std::string text {value};
+		std::ranges::transform(text, text.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+		return !(text == "off" || text == "none" || text == "0");
 	}();
-	return wanted;
+	return requested;
+}
+
+// KYTY_PRESENT_GAMMA=1 forces the display encode on every frame, for A/B testing.
+[[nodiscard]] static bool PresentGammaForced() {
+	static const bool forced = std::getenv("KYTY_PRESENT_GAMMA") != nullptr;
+	return forced;
+}
+
+// True when the renderer last wrote this video-out buffer with the linear scene target, so
+// its contents still need a display encode. The renderer clears the marker as soon as a new
+// guest frame draws into the buffer, so this follows the pixels rather than the clock.
+[[nodiscard]] static bool VideoOutHoldsLinearScene(uint64_t address, int64_t /*now_frame*/) {
+	if (address == 0) {
+		return false;
+	}
+	for (size_t slot = 0; slot < kVideoOutLinearSlots; ++slot) {
+		if (g_video_out_linear_addr[slot].load(std::memory_order_acquire) != address) {
+			continue;
+		}
+		return g_video_out_linear_frame[slot].load(std::memory_order_acquire) > 0;
+	}
+	return false;
+}
+// Exposure applied while display-encoding those frames. III composites an HDR scene
+// target and its world is very dark, so it needs a lift. Vice City and San Andreas
+// hand the presenter a display-referred-ish 8-bit target already; lifting that just
+// blows the highlights out.
+[[nodiscard]] static float PresentEncodeExposure() {
+	// The title database may not be readable the first time a frame is presented, so do not
+	// cache a failed lookup: an III frame presented with exposure 1.0 instead of 3.0 is
+	// visibly darker than the same frame from the other video-out buffer.
+	static std::atomic<float> cached {0.0f};
+	const float              known = cached.load(std::memory_order_acquire);
+	if (known > 0.0f) {
+		return known;
+	}
+	char title_id[12] = {};
+	if (!Loader::SystemContentParamSfoGetString("TITLE_ID", title_id, sizeof(title_id))) {
+		return 1.0f;
+	}
+	const std::string id      = title_id;
+	const float       exposure = id == "PPSA03527" ? 3.0f : 1.0f;
+	cached.store(exposure, std::memory_order_release);
+	return exposure;
 }
 
 struct Presenter::Frame {
@@ -60,6 +124,9 @@ struct Presenter::Frame {
 	bool          blank        = false;
 	// Composited from the linear HDR scene target, so its values are not display-encoded.
 	bool          linear_source = false;
+	// Written through an sRGB view into a buffer the guest declares as sRGB, so the stored
+	// bytes carry the display encode twice and one round has to be undone on the way out.
+	bool          decode_source = false;
 
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
@@ -387,7 +454,6 @@ struct Presenter::Impl {
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
-	uint64_t              composite_override_seen = 0;
 };
 
 vk::SurfaceFormatKHR Swapchain::SelectFormat() {
@@ -824,7 +890,7 @@ void Swapchain::DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* s
 		const char* value = std::getenv(name);
 		return value != nullptr ? static_cast<float>(std::atof(value)) : fallback;
 	};
-	float exposure = env_float("KYTY_PRESENT_EXPOSURE", 3.0f);
+	float exposure = env_float("KYTY_PRESENT_EXPOSURE", PresentEncodeExposure());
 	// Live tuning: re-read the exposure from a file every frame while the game runs.
 	if (const char* path = std::getenv("KYTY_PRESENT_EXPOSURE_FILE")) {
 		if (std::FILE* file = std::fopen(path, "r")) {
@@ -839,7 +905,9 @@ void Swapchain::DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* s
 		uint32_t flags;
 		float    gamma;
 		float    exposure;
-	} push {16u | (m_hdr_active ? 2u : 0u) | (source->hdr ? 4u : 0u),
+	} push {((PresentGammaForced() || source->linear_source) ? 16u : 0u) |
+	            (source->decode_source ? 32u : 0u) |
+	            (m_hdr_active ? 2u : 0u) | (source->hdr ? 4u : 0u),
 	        env_float("KYTY_PRESENT_GAMMA", 2.2f), exposure};
 	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
 	                      sizeof(push), &push);
@@ -879,25 +947,10 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	// exposure and gamma instead of being blitted. Only titles that are known to present
 	// that raw scene target get this, so other games keep their own brightness;
 	// KYTY_PRESENT_ENCODE=linear|off overrides the choice for testing.
-	static const bool linear_encode_title = PresentEncodeWantedByTitle();
-	static const int  encode_setting      = [] {
-		if (std::getenv("KYTY_PRESENT_NO_GAMMA") != nullptr) {
-			return 0;
-		}
-		const char* value = std::getenv("KYTY_PRESENT_ENCODE");
-		if (value == nullptr) {
-			return -1; // the title decides
-		}
-		std::string text {value};
-		std::ranges::transform(text, text.begin(), [](unsigned char c) {
-			return static_cast<char>(std::tolower(c));
-		});
-		return text == "off" || text == "none" || text == "0" ? 0 : 1;
-	}();
-	const bool linear_encode = encode_setting < 0 ? linear_encode_title : encode_setting != 0;
-	static const bool gamma_forced = std::getenv("KYTY_PRESENT_GAMMA") != nullptr;
 	const bool        gamma        = source != nullptr &&
-	                          (gamma_forced || (linear_encode && source->linear_source));
+	                          (PresentGammaForced() ||
+	                           (PresentEncodeRequested() &&
+	                            (source->linear_source || source->decode_source)));
 	if (source != nullptr) {
 		source->Transit(vk_command,
 		                gamma ? vk::ImageLayout::eShaderReadOnlyOptimal
@@ -1139,9 +1192,13 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	frame->blank = false;
 	// The renderer substitutes the rendered scene target for the guest's empty composite
 	// source; that target is linear HDR, so this frame needs a display encode at present.
-	const auto override_tick = g_composite_override_tick.load(std::memory_order_relaxed);
-	frame->linear_source            = override_tick != m_impl->composite_override_seen;
-	m_impl->composite_override_seen = override_tick;
+	// The guest double buffers its video-out targets, so the answer is per buffer and comes
+	// from the renderer: it knows which buffer last received the linear scene target, and
+	// in which guest frame. Only that frame is encoded, so every present of one frame looks
+	// the same and a buffer that the guest has since drawn itself (menu, HUD) is left alone.
+	const auto now_frame = static_cast<int64_t>(m_impl->renderer.GetGpu().GetFrameNum());
+	const bool linear_scene = override_image != nullptr ||
+	                          VideoOutHoldsLinearScene(info.data.address, now_frame);
 
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
 	Image*            override_ready = nullptr;
@@ -1154,8 +1211,31 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
 	}
+	// Four combinations, each with a stable answer:
+	//  - linear scene written to a UNORM buffer -> encode here
+	//  - linear scene written to an sRGB buffer -> hardware already encoded it, take as is
+	//  - guest (UI/loading) written to UNORM    -> already display values, take as is
+	//  - guest (UI/loading) written to sRGB     -> encoded twice, undo one round
+	// The guest declares one of its two video-out buffers sRGB and the other UNORM, so both
+	// kinds of content land in both buffers; without all four cases the picture alternates
+	// between washed and dark at the present rate.
+	const bool srgb_declared = IsDisplayEncodedFormat(image.info.pixel_format);
+	frame->linear_source    = PresentEncodeRequested() && linear_scene && !srgb_declared;
+	frame->decode_source    = PresentEncodeRequested() && !linear_scene && srgb_declared;
 	frame->Configure(m_impl->window.graphic_ctx,
 	                 {image.backing.extent.width, image.backing.extent.height}, frame_format);
+	if (std::getenv("KYTY_PRESENT_DIAG") != nullptr) {
+		static std::atomic_uint present_logged {0};
+		if (present_logged.fetch_add(1, std::memory_order_relaxed) < 200000) {
+			std::printf("Present: seq=%llu addr=0x%010" PRIx64 " ext=%ux%u fmt=%s linear=%d\n",
+			            static_cast<unsigned long long>(
+			                g_composite_override_tick.load(std::memory_order_relaxed)),
+			            image.info.data.address, image.info.extent.width,
+			            image.info.extent.height, vk::to_string(image.info.pixel_format).c_str(),
+			            frame->linear_source ? 1 : 0);
+			std::fflush(stdout);
+		}
+	}
 	frame->CopyFrom(buffer, image);
 	if (headset) {
 		// The frame holds the raw display-encoded pixels the headset needs.
@@ -1174,6 +1254,7 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	frame->hdr   = false;
 	frame->blank = true;
 	frame->linear_source = false;
+	frame->decode_source = false;
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
 	frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
 	vk::ClearColorValue clear {};

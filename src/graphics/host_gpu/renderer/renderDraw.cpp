@@ -1,6 +1,8 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
 
 #include "common/assert.h"
+
+#include <chrono>
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -112,10 +114,54 @@ static uint64_t                                       g_scene_target_seq = 0;
 // draw. Diagnostics watch draws into this address to find the tonemap pass.
 static std::atomic<uint64_t> g_composite_source_addr {0};
 
-// See render.h: lets the presenter know a frame was composited from the linear
-// HDR scene target instead of a display-encoded guest buffer.
+// See render.h: lets the presenter know what a video-out buffer currently holds.
 std::atomic<uint64_t> g_composite_override_tick {0};
+std::atomic<uint64_t> g_video_out_linear_addr[kVideoOutLinearSlots];
+std::atomic<int64_t>  g_video_out_linear_frame[kVideoOutLinearSlots];
 
+// A guest frame that starts drawing into a video-out buffer replaces whatever the previous
+// frame left there, so the linear-scene marker no longer describes its contents.
+static void ClearVideoOutLinearBeforeFrame(uint64_t target_addr, int64_t frame) {
+	for (size_t slot = 0; slot < kVideoOutLinearSlots; ++slot) {
+		if (g_video_out_linear_addr[slot].load(std::memory_order_acquire) != target_addr) {
+			continue;
+		}
+		if (g_video_out_linear_frame[slot].load(std::memory_order_acquire) < frame) {
+			g_video_out_linear_frame[slot].store(0, std::memory_order_release);
+		}
+		return;
+	}
+}
+
+// Records the guest frame in which a video-out buffer last received the linear scene
+// target (frame > 0), or that it now holds the guest's own composite again (frame == 0).
+// Keyed by address so both members of the guest's double buffer keep their own state.
+static void SetVideoOutLinearFrame(uint64_t target_addr, int64_t frame) {
+	if (target_addr == 0) {
+		return;
+	}
+	for (size_t slot = 0; slot < kVideoOutLinearSlots; ++slot) {
+		if (g_video_out_linear_addr[slot].load(std::memory_order_acquire) == target_addr) {
+			g_video_out_linear_frame[slot].store(frame, std::memory_order_release);
+			return;
+		}
+	}
+	if (frame == 0) {
+		return;
+	}
+	for (size_t slot = 0; slot < kVideoOutLinearSlots; ++slot) {
+		uint64_t expected = 0;
+		if (g_video_out_linear_addr[slot].compare_exchange_strong(
+		        expected, target_addr, std::memory_order_acq_rel)) {
+			g_video_out_linear_frame[slot].store(frame, std::memory_order_release);
+			return;
+		}
+	}
+	static std::atomic_uint next_slot {0};
+	const auto slot = next_slot.fetch_add(1, std::memory_order_relaxed) % kVideoOutLinearSlots;
+	g_video_out_linear_addr[slot].store(target_addr, std::memory_order_release);
+	g_video_out_linear_frame[slot].store(frame, std::memory_order_release);
+}
 // Tonemap input images learned from the tonemap draw, shared with the compute
 // path so we can find which dispatches (if any) write them.
 namespace KytySceneDiag {
@@ -1512,6 +1558,19 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
                                    const DrawRenderState& state,
                                    const DrawCallInfo& draw,
                                    PreparedBindings* pixel_bindings) {
+	// Switch for checking whether the substitute is still needed at all:
+	// KYTY_COMPOSITE_OVERRIDE=off leaves the guest's own composite untouched.
+	static const bool disabled = [] {
+		const char* value = std::getenv("KYTY_COMPOSITE_OVERRIDE");
+		if (value == nullptr) {
+			return false;
+		}
+		const std::string text {value};
+		return text == "off" || text == "0" || text == "none";
+	}();
+	if (disabled) {
+		return;
+	}
 	if (state.color_count == 0 || !state.color_info[0].image_id ||
 	    pixel_bindings == nullptr || pixel_bindings->images.empty()) {
 		return;
@@ -1521,6 +1580,13 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 	if (!IsVideoOutAddress(target_addr)) {
 		return;
 	}
+	const auto guest_frame = static_cast<int64_t>(buffer.GetContext().GetGpu().GetFrameNum());
+	// Each guest frame starts by drawing into the video-out buffer again; anything the
+	// previous frame left there (including whether it came from the linear scene target) is
+	// replaced now. Doing this here, instead of by elapsed frames in the presenter, keeps
+	// the answer tied to the pixels: a menu or loading screen clears it on its own first
+	// draw and is therefore never display-encoded.
+	ClearVideoOutLinearBeforeFrame(target_addr, guest_frame);
 	auto&          tb        = pixel_bindings->images[0];
 	const uint64_t bound_addr = tb.desc.info.data.address;
 	const uint32_t bound_w    = tb.desc.info.extent.width;
@@ -1552,6 +1618,15 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 	}
 
 	if (draw.index_count > 6u || !scene_sized || IsVideoOutAddress(bound_addr)) {
+		static const bool diag_draws = std::getenv("KYTY_PRESENT_DIAG") != nullptr;
+		static std::atomic_uint vo_diag {0};
+		if (diag_draws && vo_diag.fetch_add(1, std::memory_order_relaxed) < 600) {
+			std::printf("VoDraw: frame=%d target=0x%010" PRIx64 " idx=%u bound=0x%010" PRIx64
+			            " ext=%ux%u scene=%d\n",
+			            buffer.GetContext().GetGpu().GetFrameNum(), target_addr, draw.index_count,
+			            bound_addr, bound_w, bound_h, scene_sized ? 1 : 0);
+			std::fflush(stdout);
+		}
 		return;
 	}
 	auto& cache = buffer.GetContext().GetTextureCache();
@@ -1602,6 +1677,9 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 		id = cache.FindImageFromRange(use_addr, 4, false);
 	}
 	if (!id) {
+		// The substitute could not be resolved, so this composite draws the guest's own
+		// source into the video-out buffer; its contents are the guest's, not ours.
+		SetVideoOutLinearFrame(target_addr, 0);
 		return;
 	}
 	auto& image = cache.GetImage(id);
@@ -1623,8 +1701,20 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 	tb.image_id = id;
 	tb.image_view = cache.FindTexture(id, scene_desc);
 	tb.desc = scene_desc;
+	// The presenter must display-encode this buffer's contents for this frame.
 	g_composite_override_tick.fetch_add(1, std::memory_order_relaxed);
+	SetVideoOutLinearFrame(target_addr, buffer.GetContext().GetGpu().GetFrameNum());
+	static const bool diag = std::getenv("KYTY_PRESENT_DIAG") != nullptr;
 	static std::atomic_uint logged {0};
+	if (diag && logged.fetch_add(1, std::memory_order_relaxed) < 4000) {
+		std::printf("OvFmt: seq=%llu frame=%d target=0x%010" PRIx64 " fmt=%s ext=%ux%u addr=0x%010" PRIx64 "\n",
+		            static_cast<unsigned long long>(
+		                g_composite_override_tick.load(std::memory_order_relaxed)),
+		            buffer.GetContext().GetGpu().GetFrameNum(), target_addr,
+		            vk::to_string(image.info.pixel_format).c_str(), image.info.extent.width,
+		            image.info.extent.height, image.info.data.address);
+		std::fflush(stdout);
+	}
 	if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
 		LOGF("CompositeOverride: tex0 -> 0x%010" PRIx64 " id=%u/%u ext=%ux%u fmt=%s frame=%d\n",
 		     image.info.data.address, id.index, id.generation, image.info.extent.width,
