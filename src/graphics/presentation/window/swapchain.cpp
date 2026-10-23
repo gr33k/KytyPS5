@@ -36,19 +36,6 @@
 
 namespace Libs::Graphics {
 
-// sRGB render targets are encoded by the GPU when the composite writes them. The presenter
-// must not apply the linear-scene display encode a second time to their pixels.
-[[nodiscard]] static bool IsDisplayEncodedFormat(vk::Format format) {
-	switch (format) {
-		case vk::Format::eR8G8B8A8Srgb:
-		case vk::Format::eB8G8R8A8Srgb:
-		case vk::Format::eA8B8G8R8SrgbPack32:
-		case vk::Format::eR8G8B8Srgb:
-		case vk::Format::eB8G8R8Srgb: return true;
-		default: return false;
-	}
-}
-
 // GTA III's composite override feeds raw linear scene values to video-out; that title needs
 // a display encode. Keep all other titles untouched unless explicitly enabled for testing.
 [[nodiscard]] static bool PresentEncodeWantedByTitle() {
@@ -1196,10 +1183,11 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
 	}
-	// The guest double-buffers: one target is UNORM and requires our display encode, while
-	// the sRGB target is encoded by the render-target write itself. Encoding both was the
-	// bleached/white half of the alternating GTA III frames.
-	frame->linear_source = override_changed && !IsDisplayEncodedFormat(image.info.pixel_format);
+	// Both guest video-out buffers contain the same raw linear scene when the override is
+	// active, despite one being declared sRGB and the other UNORM. Treat them identically:
+	// skipping the sRGB-declared buffer caused it to display dark, alternating with the
+	// correctly encoded bright UNORM buffer.
+	frame->linear_source = override_changed;
 	frame->Configure(m_impl->window.graphic_ctx,
 	                 {image.backing.extent.width, image.backing.extent.height}, frame_format);
 	if (std::getenv("KYTY_PRESENT_DIAG") != nullptr) {

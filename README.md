@@ -141,7 +141,7 @@ InGame means the title reached gameplay, not that it is stable or fully playable
 | Five Nights at Freddy's Help Wanted 2 | PPSA18887 | DoesntBoot | GPU flip submission failed at boot (result=-2144796661), no video - 10/8/26 (reconstructed from log; original note lost) |
 | Ghost of Tsushima Directors Cut | PPSA03208 | DoesntBoot | No Boot - 10/2/26 |
 | Ghostrunner | PPSA03682 | DoesntBoot | Starts video briefly and crashed (essentially doesn't boot) - 10/2/26 |
-| Grand Theft Auto III - The Definitive Edition | PPSA03527 | InGame | Uses tick-based encoding only for newly overridden frames, and skips the extra encode for sRGB buffers. Latest test reached gameplay; a 12-shot burst in one dark cutscene scene showed no rapid white/dark alternation, and the newspaper brightens during its scene fade-in. About 7–9 fps. Earlier user-reported bleaching/flashing remains to be confirmed fixed; first startup attempt still hit the intermittent runtimeLinker crash, retry succeeded. 10/23/26 |
+| Grand Theft Auto III - The Definitive Edition | PPSA03527 | InGame | Latest build applies the same scene encode to both alternating video-out buffers. Gameplay probe: 8 captures across sRGB and UNORM buffers stayed within 92.4–94.4 mean luminance at about 7–9 fps; the outdoor/HUD scene rendered. Earlier user-reported bleaching and a geometry/shader artifact in another scene remain to be rechecked. First startup attempt still hit the intermittent runtimeLinker crash; retry succeeded. 10/23/26 |
 | GreedFall | PPSA02982 | DoesntBoot | No Boot - 10/2/26 |
 | MARVEL Tokon Fighting Souls | PPSA15595 | DoesntBoot | Guest abort() in libC at boot, no submits - 10/8/26 (reconstructed from log; original note lost) |
 | Martha is Dead | PPSA02006 | DoesntBoot | No Boot - 10/2/26 |
