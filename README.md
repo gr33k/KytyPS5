@@ -9,6 +9,10 @@
 > not mean it is stable or fully playable. Results below apply only to this fork
 > and the test platform described under [Test Platform](#test-platform).
 
+<img width="1920" height="1040" alt="image" src="https://github.com/user-attachments/assets/5dd8eb48-817c-40fd-a378-6b5f7568a94c" />
+<img width="1920" height="1040" alt="image" src="https://github.com/user-attachments/assets/5837dd1b-4d1f-400f-9abe-d78c959f4213" />
+
+
 ## Changes in This Fork
 
 Relative to upstream `main`:
