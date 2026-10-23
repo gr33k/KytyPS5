@@ -1014,7 +1014,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
-	// The SDK stalls only this command processor, not the host command lane or other queues.
+	// Stall only this command processor, not the host command lane or other queues.
 	if (!m_renderer.GetVideoOut().IsSafeForRendering(static_cast<int>(video_out_handle),
 	                                                 static_cast<int>(display_buffer_index))) {
 		SuspendPm4();

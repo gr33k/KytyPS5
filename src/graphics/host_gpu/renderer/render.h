@@ -193,6 +193,8 @@ public:
 	                                  vk::PipelineBindPoint pipeline_bind_point,
 	                                  const PipelineCache::Pipeline&     pipeline,
 	                                  std::span<PreparedBindings* const> bindings);
+	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
+	                                            const ShaderRecompiler::IR::DescriptorValue& value);
 
 private:
 	// False, with nothing drawn, when the draw's indirect records need CPU counts.
@@ -204,8 +206,6 @@ private:
 		std::optional<PreparedBindings> pixel;
 	};
 
-	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
-	                                            const ShaderRecompiler::IR::DescriptorValue& value);
 	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                             std::span<RenderColorInfo> colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,

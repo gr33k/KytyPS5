@@ -1117,6 +1117,7 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 		}
 	}
 	auto& pipeline_cache = buffer.GetContext().GetPipelineCache();
+	buffer.GetContext().GetImageHeap().BeginDraw();
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}

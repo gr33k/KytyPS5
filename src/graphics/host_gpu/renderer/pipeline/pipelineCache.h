@@ -30,6 +30,10 @@ class UserConfig;
 struct ComputeShaderInfo;
 } // namespace HW
 
+namespace ShaderRecompiler::IR {
+class ImageHeapSource;
+} // namespace ShaderRecompiler::IR
+
 #pragma pack(push, 1)
 
 struct PipelineStaticParameters {
@@ -104,7 +108,7 @@ struct ShaderProgram {
 // The owning renderer serializes access, including saves while the GPU is running.
 class PipelineCache {
 public:
-	explicit PipelineCache(GraphicContext& graphics);
+	PipelineCache(GraphicContext& graphics, ShaderRecompiler::IR::ImageHeapSource* image_heap);
 	~PipelineCache();
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
@@ -118,6 +122,7 @@ public:
 		// VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT state (driver fallback);
 		// the static color-write masks apply instead.
 		bool has_dynamic_color_write = true;
+		bool                    uses_image_heap       = false;
 	};
 
 	struct GraphicsPrograms {

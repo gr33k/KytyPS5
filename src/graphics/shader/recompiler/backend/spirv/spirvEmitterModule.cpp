@@ -206,6 +206,17 @@ uint32_t F32ArrayType(EmitterState& state, uint32_t count) {
 	return state.builder.Type(spv::OpTypeArray, TypeF32(state), ConstantU32(state, count));
 }
 
+void DefineImageArray(EmitterState& state, ImageDefinition& definition, const IR::ImageResource& image,
+                      uint32_t count, uint32_t set, uint32_t binding) {
+	definition.type     = ImageType(state, image);
+	const auto array    = state.builder.Type(spv::OpTypeArray, definition.type, ConstantU32(state, count));
+	definition.variable = state.builder.DefineGlobalVariable(
+	    TypePointer(state, spv::StorageClassUniformConstant, array), spv::StorageClassUniformConstant);
+	state.builder.AddAnnotation(spv::OpDecorate, definition.variable, spv::DecorationDescriptorSet, set);
+	state.builder.AddAnnotation(spv::OpDecorate, definition.variable, spv::DecorationBinding, binding);
+	definition.pointer_type = TypePointer(state, spv::StorageClassUniformConstant, definition.type);
+}
+
 void DefineDescriptors(EmitterState& state) {
 	using Kind = IR::DescriptorBindingKind;
 	auto& info = state.program.info;
@@ -221,6 +232,14 @@ void DefineDescriptors(EmitterState& state) {
 		if (!kind.has_value() || image.mip_count == 0u ||
 		    (image.mip_mode != IR::ImageMipMode::Dynamic && image.mip_count != 1u)) {
 			EXIT("shader image has an invalid descriptor type or mip count");
+		}
+		if (image.heap) {
+			// Heap kinds alias one array; the root itself is never accessed.
+			auto& definition = state.heap_images[IR::ImageBindingIndex(*kind)];
+			if (image.indirect_resources.empty() && definition.variable == 0) {
+				DefineImageArray(state, definition, image, IR::ImageHeapCapacity, IR::ImageHeapSet, 0u);
+			}
+			continue;
 		}
 		auto& count = counts[static_cast<size_t>(*kind)];
 		image.descriptor_index = count;
@@ -331,21 +350,11 @@ void DefineDescriptors(EmitterState& state) {
 			default: {
 				EXIT_IF(IR::ImageBindingResourceClass(kind) ==
 				        IR::ImageResourceClass::None);
-				const auto& image = *image_types[IR::ImageBindingIndex(kind)];
-				const auto  name  = "image_" + std::to_string(static_cast<uint32_t>(kind));
 				auto& definition = state.images[IR::ImageBindingIndex(kind)];
-				definition.type = ImageType(state, image);
-				definition.variable = Define(ArrayType(definition.type), name.c_str(),
-				                             spv::StorageClassUniformConstant);
-				definition.pointer_type = TypePointer(
-				    state, spv::StorageClassUniformConstant, definition.type);
-				if (image.dimension == ImageDimension::Dim1D ||
-				    image.dimension == ImageDimension::Dim1DArray) {
-					state.builder.RequireCapability(image.resource_class ==
-					                                        IR::ImageResourceClass::Sampled
-					                                    ? spv::CapabilitySampled1D
-					                                    : spv::CapabilityImage1D);
-				}
+				DefineImageArray(state, definition, *image_types[IR::ImageBindingIndex(kind)],
+				                 counts[index], 0u, IR::NativeBinding(state.program.stage, kind));
+				state.builder.AddName(definition.variable,
+				                      ("image_" + std::to_string(static_cast<uint32_t>(kind))).c_str());
 				break;
 			}
 		}
@@ -752,7 +761,7 @@ void DefineModule(EmitterState& state) {
 	if (state.program.info.buffer_u16) {
 		state.builder.RequireCapability(spv::CapabilityStorageBuffer16BitAccess);
 	}
-	if (state.program.info.uses_dma) {
+	if (state.program.info.uses_dma || state.program.info.uses_image_heap) {
 		state.builder.RequireCapability(spv::CapabilityInt64);
 		state.builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
 		state.builder.RequireExtension("SPV_KHR_physical_storage_buffer");
@@ -820,7 +829,7 @@ void DefineModule(EmitterState& state) {
 		state.builder.RequireExtension("SPV_KHR_fragment_shader_barycentric");
 	}
 	state.builder.RequireExtension("SPV_KHR_float_controls");
-	state.builder.AddMemoryModel(state.program.info.uses_dma
+	state.builder.AddMemoryModel(state.program.info.uses_dma || state.program.info.uses_image_heap
 	                                 ? spv::AddressingModelPhysicalStorageBuffer64
 	                                 : spv::AddressingModelLogical,
 	                             spv::MemoryModelGLSL450);

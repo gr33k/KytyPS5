@@ -228,6 +228,18 @@ struct TileManagerTestAccess {
   }
 };
 
+struct ImageHeapTestAccess {
+  static size_t ElementCount(const ImageHeap &heap) { return heap.m_elements.size(); }
+  static size_t MemoryCount(const ImageHeap &heap) { return heap.m_memories.size(); }
+  static const auto &Views(const ImageHeap &heap) { return heap.m_memories.at(0)->views; }
+  static const auto &Element(const ImageHeap &heap, uint32_t entry) {
+    return heap.m_elements[entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u)];
+  }
+  static ImageId ImageOf(const ImageHeap &heap, uint32_t entry) {
+    return Element(heap, entry).binding.image_id;
+  }
+};
+
 struct TextureCacheTestAccess {
   static_assert(std::same_as<decltype(TextureCache::m_slot_images),
                              Common::SlotVector<Image>>);
@@ -5147,6 +5159,289 @@ public:
             Libs::LibKernel::Memory::KernelReleaseDirectMemory(
                 direct_offset, allocation_size) == 0,
             "dirty-GC direct-memory allocation release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  void CheckResidentImageHeap() {
+    constexpr const char *name = "ResidentImageHeap";
+    constexpr uintptr_t base = 0x0000000206800000ull;
+    constexpr uint64_t allocation_size = 0x200000;
+    constexpr uint64_t table = base + 0x100000;
+    constexpr uint64_t idle_table = base + 0x180000;
+    constexpr uint64_t table_size = 0x10000;
+    namespace IR = ShaderRecompiler::IR;
+    using Format = Prospero::BufferFormat;
+    EnsureRuntimeContext();
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_size, 0, &direct_offset) == 0,
+            "image heap allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_size) == 0 && mapped == reinterpret_cast<void *>(base),
+            "image heap mapping failed");
+    std::memset(mapped, 0, allocation_size);
+    // A 4x4 linear 2D texture per index.
+    const auto descriptor = [](uint32_t texture, Format format) {
+      const uint64_t address = base + 0x10000u + texture * 0x1000u;
+      std::array<uint32_t, 8> words{};
+      words[0] = static_cast<uint32_t>(address >> 8u);
+      words[1] = static_cast<uint32_t>(address >> 40u) | (static_cast<uint32_t>(format) << 20u);
+      words[2] = 3u | (3u << 14u);
+      words[3] = DstSel(4, 5, 6, 7) |
+                 (static_cast<uint32_t>(Prospero::ImageType::kColor2D) << 28u);
+      return words;
+    };
+    const auto put = [&](uint64_t probe, const std::array<uint32_t, 8> &words) {
+      std::memcpy(reinterpret_cast<void *>(table + probe * 32u), words.data(), sizeof(words));
+    };
+    put(0, descriptor(0, Format::k8_8_8_8UNorm));
+    put(1, descriptor(0, Format::k8_8_8_8UNorm));
+    put(5, descriptor(1, Format::k8_8_8_8UNorm));
+    {
+      RenderContext context(m_runtime_context);
+      auto &scheduler = context.GetCommandScheduler();
+      HW::Context registers{};
+      HW::UserConfig user_config{};
+      HW::Shader shaders{};
+      scheduler.Begin(registers, user_config, shaders);
+      context.MapMemory(base, allocation_size);
+      auto &heap = context.GetImageHeap();
+      auto &executor = context.GetRenderExecutor();
+      auto &textures = context.GetTextureCache();
+      auto &device = context.GetGraphics().device;
+      const vk::DescriptorSetLayoutCreateInfo empty_info{};
+      vk::DescriptorSetLayout empty = nullptr;
+      vk::PipelineLayout layout = nullptr;
+      Require(name, "set 0 layout",
+              device.createDescriptorSetLayout(&empty_info, nullptr, &empty) ==
+                  vk::Result::eSuccess,
+              "could not create the set 0 layout");
+      const std::array set_layouts{empty, context.GetGraphics().image_heap_layout};
+      vk::PipelineLayoutCreateInfo layout_info{};
+      layout_info.setLayoutCount = 2;
+      layout_info.pSetLayouts = set_layouts.data();
+      Require(name, "pipeline layout",
+              device.createPipelineLayout(&layout_info, nullptr, &layout) == vk::Result::eSuccess,
+              "could not create a pipeline layout with the heap set");
+
+      IR::ImageResource sampled{};
+      sampled.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2D;
+      sampled.unfiltered_access_only = false;
+      auto unfiltered = sampled;
+      unfiltered.unfiltered_access_only = true;
+      IR::ImageHeapView view{};
+      const auto acquire = [&](const IR::ImageResource &root, uint64_t address = table,
+                               uint64_t count = table_size / 32u) {
+        return heap.Acquire({address, table_size, 32u, 0u, count, &root}, view);
+      };
+      const auto draw = [&] {
+        heap.Rebind(executor);
+        heap.Commit(scheduler.Current(), vk::PipelineBindPoint::eCompute, layout);
+        scheduler.Finish();
+        heap.BeginDraw();
+      };
+      const auto write = [&](uint64_t probe, const std::array<uint32_t, 8> &words) {
+        Libs::LibKernel::Memory::WriteBacking(table + probe * 32u, words.data(), sizeof(words));
+        Require(name, "table write", context.InvalidateMemory(table + probe * 32u, sizeof(words)),
+                "the table was not mapped");
+      };
+
+      Require(name, "first view",
+              acquire(sampled) && view.kinds.size() == 1u && view.slot_count == table_size / 4u,
+              "a 64-KiB table was not kept resident");
+      const auto &views = ImageHeapTestAccess::Views(heap);
+      const auto &filtered = *views[0];
+      Require(name, "slot words",
+              filtered.slots[0] != 0u && filtered.slots[8] == filtered.slots[0] &&
+                  filtered.slots[40] != 0u && filtered.slots[40] != filtered.slots[0] &&
+                  filtered.slots[1] == 0u && filtered.slots.back() == 0u &&
+                  ImageHeapTestAccess::ElementCount(heap) == 3u &&
+                  ImageHeapTestAccess::Element(heap, 0u).binding.layout ==
+                      vk::ImageLayout::eShaderReadOnlyOptimal,
+              "probes did not share equal descriptors, left a non-null gap or wrote the null "
+              "element without a sampled layout");
+      Require(name, "second view",
+              acquire(unfiltered) && views.size() == 2u &&
+                  ImageHeapTestAccess::ElementCount(heap) == 5u,
+              "a second root profile did not get its own view");
+      const auto &idle = *views[1];
+      draw();
+      const auto resident = ImageHeapTestAccess::ImageOf(heap, filtered.slots[0]);
+      Require(name, "resident images",
+              resident && textures.GetImage(resident).heap_refs.load() == 2u,
+              "resolved elements did not pin their image");
+
+      // Only acquired views take table changes; the idle one must not allocate.
+      const auto idle_slot = idle.slots[40];
+      for (uint32_t texture = 2; texture < 4u; ++texture) {
+        write(5, descriptor(texture, Format::k8_8_8_8UNorm));
+        Require(name, "changed table", acquire(sampled), "a changed table was declined");
+        draw();
+      }
+      Require(name, "idle view",
+              idle.slots[40] == idle_slot && ImageHeapTestAccess::ElementCount(heap) <= 6u,
+              "an idle view took table changes or leaked released elements");
+      Require(name, "reactivated view", acquire(unfiltered), "the idle view was declined");
+      draw();
+      Require(name, "deferred probes",
+              ImageHeapTestAccess::ImageOf(heap, idle.slots[40]) ==
+                      ImageHeapTestAccess::ImageOf(heap, filtered.slots[40]) &&
+                  ImageHeapTestAccess::ElementCount(heap) <= 7u,
+              "a reactivated view missed the changes made while it was idle");
+
+      // All programs of one draw see the table and kinds of its first acquire.
+      Require(name, "draw kinds", acquire(sampled), "the view was declined");
+      write(7, descriptor(12, Format::k8_8_8_8UInt));
+      Require(name, "stable kinds",
+              acquire(sampled) && view.kinds.size() == 1u && filtered.slots[56] == 0u,
+              "a later program of a draw saw a kind the first one lacked");
+      draw();
+      Require(name, "next draw kinds",
+              acquire(sampled) && view.kinds.size() == 2u &&
+                  filtered.slots[56] >> IR::ImageHeapKindShift == 1u,
+              "the next draw did not take the new kind");
+      draw();
+
+      Require(name, "bounded view",
+              acquire(sampled, table, 4u) && views.size() == 3u && views[2]->slots[0] != 0u &&
+                  views[2]->slots[40] == 0u,
+              "a view probed descriptors past the guest table bound");
+      draw();
+
+      // Only leaving the read state invalidates resident images.
+      auto &image = textures.GetImage(resident);
+      const auto epoch = Libs::Graphics::Image::heap_epoch.load();
+      for (uint32_t pass = 0; pass < 2u; ++pass) {
+        image.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite, {},
+                      scheduler.Current().Handle());
+      }
+      Require(name, "write epoch", Libs::Graphics::Image::heap_epoch.load() == epoch + 1u,
+              "repeated writes after leaving the read state bumped the heap epoch again");
+      Require(name, "read again", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "read layout",
+              image.backing.state.layout == vk::ImageLayout::eShaderReadOnlyOptimal &&
+                  Libs::Graphics::Image::heap_epoch.load() == epoch + 1u,
+              "commit did not return a resident image to its read layout");
+
+      // An image freed during a draw's discovery lives until the tick ends, and the draw's
+      // slots still select it.
+      write(9, descriptor(13, Format::k8_8_8_8UNorm));
+      Require(name, "freed image", acquire(sampled), "the view was declined");
+      heap.Rebind(executor);
+      const auto freed = ImageHeapTestAccess::ImageOf(heap, filtered.slots[72]);
+      textures.UnmapMemory(base + 0x10000u + 13u * 0x1000u, 0x1000u);
+      heap.Commit(scheduler.Current(), vk::PipelineBindPoint::eCompute, layout);
+      Require(name, "freed image layout",
+              !textures.GetImage(freed).registered &&
+                  textures.GetImage(freed).backing.state.layout ==
+                      vk::ImageLayout::eShaderReadOnlyOptimal,
+              "commit skipped the read transition of a freed but sampled image");
+      scheduler.Finish();
+      heap.BeginDraw();
+
+      // A draw skipped after its programs acquired views still leaves the next draw a fresh
+      // table.
+      Require(name, "skipped draw", acquire(sampled), "the view was declined");
+      heap.BeginDraw();
+      write(11, descriptor(16, Format::k8_8_8_8UNorm));
+      Require(name, "draw after a skipped one", acquire(sampled) && filtered.slots[88] != 0u,
+              "a draw sampled the table of a skipped draw");
+      // The skipped draw's view stays acquired. Another view refreshing the table must not let
+      // a stale element take a newer kind from it.
+      heap.BeginDraw();
+      write(5, descriptor(15, Format::k8_8_8_8SInt));
+      Require(name, "other view", acquire(unfiltered), "the view was declined");
+      textures.UnmapMemory(base + 0x10000u + 3u * 0x1000u, 0x1000u);
+      draw();
+      Require(name, "stale rescan",
+              filtered.kinds.size() == 2u &&
+                  ImageHeapTestAccess::Element(heap, filtered.slots[40]).value.dwords ==
+                      descriptor(3, Format::k8_8_8_8UNorm),
+              "a stale element's rescan took a kind its view's programs lack");
+
+      // Tables keep the descriptors of unmapped textures, which PS5 never samples. Their words
+      // stay null in every view, even when the memory is mapped again before the next draw,
+      // until one of their own words changes.
+      const auto texture = [](uint32_t index) { return base + 0x10000u + index * 0x1000u; };
+      write(20, descriptor(20, Format::k8_8_8_8UNorm));
+      Require(name, "live texture", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "live image",
+              static_cast<bool>(ImageHeapTestAccess::ImageOf(heap, filtered.slots[160])),
+              "a mapped texture was not resolved");
+      context.UnmapMemory(texture(20), 0x1000u);
+      context.MapMemory(texture(20), 0x1000u);
+      heap.BeginDraw();
+      Require(name, "dead in a new view",
+              acquire(sampled, table, 64u) && views.back()->slots[160] == 0u,
+              "a view created after the remap resolved a dead descriptor");
+      Require(name, "remapped texture", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "dead descriptor",
+              filtered.slots[160] == 0u && !textures.IsRegionRegistered(texture(20), 0x1000u),
+              "the descriptor of an unmapped texture was resolved again after a remap");
+      write(19, descriptor(19, Format::k8_8_8_8UNorm));
+      write(21, descriptor(21, Format::k8_8_8_8UNorm));
+      Require(name, "neighbour writes", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "dead reprobe", filtered.slots[160] == 0u,
+              "rescanning changed neighbours revived a dead descriptor");
+      write(24, descriptor(20, Format::k8_8_8_8UNorm));
+      Require(name, "republished texture", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "republished descriptor",
+              filtered.slots[160] == 0u && ImageHeapTestAccess::ImageOf(heap, filtered.slots[192]),
+              "the same descriptor in another word was not resolved");
+      write(20, descriptor(22, Format::k8_8_8_8UNorm));
+      Require(name, "rewritten word", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "rewritten descriptor",
+              static_cast<bool>(ImageHeapTestAccess::ImageOf(heap, filtered.slots[160])),
+              "a new descriptor in a dead word was not resolved");
+      // A view that a skipped draw left acquired buries before its rescan.
+      Require(name, "skipped draw view", acquire(sampled), "the view was declined");
+      context.UnmapMemory(texture(22), 0x1000u);
+      context.MapMemory(texture(22), 0x1000u);
+      heap.BeginDraw();
+      draw();
+      Require(name, "dead after a skipped draw", filtered.slots[160] == 0u,
+              "the rescan of a view left acquired resolved a dead descriptor");
+      // A new descriptor over unmapped memory is never resolved.
+      context.UnmapMemory(texture(23), 0x1000u);
+      write(23, descriptor(23, Format::k8_8_8_8UNorm));
+      Require(name, "unmapped texture", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "unmapped descriptor", !textures.IsRegionRegistered(texture(23), 0x1000u),
+              "a descriptor over unmapped memory was resolved");
+
+      heap.UnmapMemory(table, table_size);
+      Require(name, "unmapped table",
+              ImageHeapTestAccess::MemoryCount(heap) == 0u &&
+                  textures.GetImage(resident).heap_refs.load() == 0u,
+              "unmapping the table kept its images pinned");
+      // The idle table stays watched; destroying the heap must unwatch it before the page
+      // manager fails on live watches.
+      Require(name, "idle table",
+              acquire(sampled, idle_table) && view.kinds.empty() &&
+                  ImageHeapTestAccess::MemoryCount(heap) == 1u,
+              "an all-null table was not kept resident");
+      draw();
+      context.UnmapMemory(base, idle_table - base);
+      scheduler.Finish();
+      device.destroyPipelineLayout(layout, nullptr);
+      device.destroyDescriptorSetLayout(empty, nullptr);
+    }
+    Require(name, "unmap", Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "image heap unmap failed");
+    Require(name, "release", Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "image heap release failed");
     std::printf("[host]    %-32s ok\n", name);
   }
 
@@ -41317,6 +41612,41 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
   Require(name, "alternating image emitted size", spirv.size() <= 8192u,
           "alternating descriptors exceeded the 32 KiB SPIR-V regression budget");
 
+  // A resident heap selects its typed kind and element from a device slot word.
+  auto heap_root = root;
+  heap_root.heap = true;
+  heap_root.indirect_search_iterations = 0;
+  heap_root.indirect_resources = {0u, 1u, 2u};
+  auto heap_kind = candidate;
+  heap_kind.heap = true;
+  auto heap_uint = heap_kind;
+  heap_uint.numeric_class = Prospero::TextureNumericClass::Uint;
+  for (const bool mixed : {true, false}) {
+    program.info.images = {heap_root, heap_kind};
+    if (mixed) program.info.images.push_back(heap_uint);
+    program.info.images[0].indirect_resources.resize(program.info.images.size());
+    // ApplyResourceSpecialization adds the integer sampler variant of a Uint kind.
+    program.info.samplers.resize(1);
+    if (mixed) {
+      program.info.samplers.push_back(program.info.samplers[0]);
+      program.info.samplers[1].integer_border = true;
+    }
+    program.shader_info_complete = false;
+    CollectShaderInfo(program, {.compute = &compute});
+    spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
+    ValidateSpirv("ResidentImageHeap", spirv);
+    Require(name, "image heap disassembly", tools.Disassemble(spirv, &text),
+            "failed to disassemble the image heap shader");
+    Require(name, "image heap selection",
+            program.info.uses_image_heap && CountText(text, "OpConvertUToPtr") == 1 &&
+                CountText(text, "UMin") == 1 &&
+                CountText(text, "OpSwitch") == (mixed ? 1 : 0) &&
+                CountText(text, "OpImageSampleExplicitLod") == (mixed ? 2 : 1) &&
+                CountText(text, "DescriptorSet 1") == (mixed ? 2 : 1) &&
+                text.find("PhysicalStorageBuffer64") != std::string::npos,
+            "image heap kinds did not sample the slot-selected heap element");
+  }
+
   program.memory_info[0].image_dimension =
       ShaderRecompiler::Decoder::ImageDimension::Dim2DArray;
   program.memory_info[0].image_address_components = 4;
@@ -44083,7 +44413,7 @@ void CheckComputeLdsLimit(VulkanHarness &vulkan) {
   regs.cs_regs.num_thread_y = 1;
   regs.cs_regs.num_thread_z = 1;
   regs.cs_regs.wave_size = 32;
-  PipelineCache cache(graphics);
+  PipelineCache cache(graphics, nullptr);
   ShaderProgram previous;
   uint16_t previous_units = 0;
   for (const auto units : {static_cast<uint16_t>(limit_units - 1u), limit_units,
@@ -49379,7 +49709,7 @@ void CheckPm4IndirectControlFlow(RenderContext &renderer) {
   std::printf("[host]    %-32s ok\n", name);
 }
 
-// waitUntilSafeForRendering stalls only its own command processor (SDK), and a display buffer
+// waitUntilSafeForRendering stalls only its own command processor, and a display buffer
 // stays busy while its flip is pending or while it is on screen.
 void CheckWaitUntilSafeForRendering() {
   constexpr const char *name = "WaitUntilSafeForRendering";
@@ -50682,6 +51012,7 @@ int main(int argc, char **argv) {
     CheckNestedPointerImageTable(vulkan);
     CheckGuardedRecordImageTable(vulkan);
     CheckIndirectImageKeySwitch(vulkan);
+    vulkan.CheckResidentImageHeap();
     CheckFiniteFirstLaneImageChoice(vulkan);
     CheckFiniteInlineSamplerPhi(vulkan);
     RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
@@ -50860,6 +51191,7 @@ int main(int argc, char **argv) {
   CheckNestedPointerImageTable(vulkan);
   CheckGuardedRecordImageTable(vulkan);
   CheckIndirectImageKeySwitch(vulkan);
+  vulkan.CheckResidentImageHeap();
   CheckDynamicSampleOffsets(vulkan, 32u);
   CheckDynamicSampleOffsets(vulkan, 64u);
   CheckFiniteFirstLaneImageChoice(vulkan);

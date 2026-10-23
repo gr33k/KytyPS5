@@ -169,6 +169,7 @@ struct ImageResource {
 	bool                          depth_compare     = false;
 	bool                          cube              = false;
 	bool                          r128              = false;
+	bool                          heap              = false; // Resident image heap root or kind.
 	uint32_t                      indirect_root     = NoIndirectImage;
 	uint32_t                      indirect_mapping_offset   = 0;
 	uint32_t                      indirect_search_iterations = 0;
@@ -344,6 +345,11 @@ inline constexpr uint32_t FirstImageBinding           = 1u;
 inline constexpr uint32_t FirstComparisonImageBinding = 22u;
 inline constexpr uint32_t FirstStorageImageBinding    = 29u;
 inline constexpr uint32_t ImageBindingCount           = 50u;
+// Resident image heaps share one sampled-image array at binding 0 of this set. A heap slot
+// word is kind << ImageHeapKindShift | element; element 0 is the null descriptor.
+inline constexpr uint32_t ImageHeapSet                = 1u;
+inline constexpr uint32_t ImageHeapCapacity           = 65536u;
+inline constexpr uint32_t ImageHeapKindShift          = 20u;
 
 enum class DescriptorBindingKind : uint32_t {
 	Buffers  = 0u,
@@ -529,6 +535,7 @@ struct ShaderInfo {
 	bool                            uses_lds                      = false;
 	bool                            uses_gds                      = false;
 	bool                            uses_flattened_srt            = false;
+	bool                            uses_image_heap               = false;
 	bool                            uses_dispatch_threads         = false;
 	bool                            bvh                           = false;
 	bool                            subgroup_ballot               = false;

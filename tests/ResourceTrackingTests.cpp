@@ -436,6 +436,128 @@ void TestInvariantIndirectImageMaterialization(bool nested) {
         "malformed image table tracking was not transactional");
 }
 
+void TestResidentImageHeap() {
+  struct FakeImageHeap final : ImageHeapSource {
+    bool accept = true;
+    std::vector<DescriptorValue> kinds;
+    std::vector<ImageHeapRequest> requests;
+    bool Acquire(const ImageHeapRequest &request, ImageHeapView &view) override {
+      requests.push_back(request);
+      if (!accept) return false;
+      view = {.slots = 0x123456789abcull, .slot_count = 36u, .kinds = kinds};
+      return true;
+    }
+  };
+  auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u);
+  fixture->PlanAndTrack();
+  const auto plan = ExtractResourcePlan(fixture->program);
+  std::array<uint32_t, 8> descriptor{};
+  descriptor[0] = 0x20u;
+  descriptor[1] = static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+  descriptor[2] = 3u | (3u << 14u);
+  descriptor[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  auto cube = descriptor;
+  cube[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kCube) << 28u);
+  std::array<uint32_t, 16> data{0x3000u, 4u << 16u, 0x100000u, 0u,
+                                0x2000u, 48u << 16u, 3u, 0u};
+  std::copy_n(data.begin(), 4u, data.begin() + 12u);
+  LinearTestMemory memory;
+  memory.fail_address = 0x3000u;
+  memory.watched_address = 0x2000u;
+  std::copy(descriptor.begin(), descriptor.end(), memory.words.begin() + 0x1010u / 4u);
+  FakeImageHeap heap;
+  heap.kinds = {{descriptor, 8u}, {cube, 8u}};
+  SrtRuntime runtime{.user_data = data, .userdata = &memory,
+                     .read_specialization_memory = ReadLinearTestMemory, .image_heap = &heap};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            heap.requests.size() == 1u && heap.requests[0].base == 0x2000u &&
+            heap.requests[0].size == 144u && heap.requests[0].step == 16u &&
+            heap.requests[0].first == 0u && heap.requests[0].count == 9u &&
+            heap.requests[0].root == &plan.info.images[0] &&
+            memory.watched_reads == 0u && snapshot.images.size() == 3u,
+        "resident image heap was materialized entry by entry");
+  const auto &root = specialization.images[0];
+  const auto mapping = root.indirect_mapping_offset;
+  Check(root.heap && root.indirect_root == 0u && root.indirect_search_iterations == 0u &&
+            snapshot.flattened_srt.size() == mapping + 3u &&
+            snapshot.flattened_srt[mapping] == 36u &&
+            snapshot.flattened_srt[mapping + 1u] == 0x56789abcu &&
+            snapshot.flattened_srt[mapping + 2u] == 0x1234u &&
+            specialization.images[1].heap && specialization.images[1].indirect_root == 0u &&
+            !specialization.images[1].cube && specialization.images[2].heap &&
+            specialization.images[2].cube && snapshot.images[2].dwords == cube &&
+            std::ranges::find(snapshot.specialization_reads,
+                              std::pair<uint64_t, uint64_t>{0x2000u, 144u}) !=
+                snapshot.specialization_reads.end(),
+        "resident image heap lost its slot mapping, typed kinds or read dependency");
+  auto &program = fixture->program;
+  ApplyResourceSpecialization(program, specialization);
+  ShaderComputeInputInfo compute{};
+  CollectShaderInfo(program, {.compute = &compute});
+  Check(program.info.uses_image_heap && program.info.images.size() == 3u &&
+            program.info.images[0].indirect_resources == std::vector<uint32_t>({0u, 1u, 2u}) &&
+            std::ranges::all_of(program.info.images, &ImageResource::heap),
+        "applied heap kinds lost their root or heap flag");
+  heap.kinds.clear();
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 1u && !specialization.images[0].heap &&
+            specialization.images[0].indirect_root == ImageResource::NoIndirectImage,
+        "a resident heap without kinds did not read as one null image");
+  heap.accept = false;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            heap.requests.size() == 3u && memory.watched_reads == 1u &&
+            snapshot.images.size() == 2u && !specialization.images[0].heap &&
+            snapshot.images[1].dwords == descriptor,
+        "a declined heap was not materialized entry by entry");
+}
+
+void TestImageHeapKinds() {
+  using Format = Libs::Graphics::Prospero::BufferFormat;
+  using Type = Libs::Graphics::Prospero::ImageType;
+  ImageResource root;
+  root.resource_class = ImageResourceClass::Sampled;
+  root.dimension = Decoder::ImageDimension::Dim2DArray;
+  root.source = 3u;
+  const auto descriptor = [](Format format, Type type) {
+    DescriptorValue value{.dword_count = 8u};
+    value.dwords[0] = 0x20u;
+    value.dwords[1] = static_cast<uint32_t>(format) << 20u;
+    value.dwords[2] = 3u | (3u << 14u);
+    value.dwords[3] = Libs::Graphics::DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(type) << 28u);
+    return value;
+  };
+  const auto kind_of = [&](Format format, Type type) {
+    auto value = descriptor(format, type);
+    return ImageHeapKind(root, value);
+  };
+  const auto float_kind = kind_of(Format::k32_32_32_32Float, Type::kColor2DArray);
+  const auto uint_kind = kind_of(Format::k32UInt, Type::kColor2DArray);
+  const auto cube_kind = kind_of(Format::k32_32_32_32Float, Type::kCube);
+  auto volume = descriptor(Format::k32_32_32_32Float, Type::kColor3D);
+  Check(float_kind != 0u && uint_kind != 0u && cube_kind != 0u && float_kind != uint_kind &&
+            float_kind != cube_kind && kind_of(Format::kInvalid, Type::kColor2DArray) == 0u &&
+            ImageHeapKind(root, volume) == 0u &&
+            std::ranges::all_of(volume.dwords, [](uint32_t word) { return word == 0u; }),
+        "heap kinds did not separate typed entries or null mismatched ones");
+  const auto resource = ImageHeapResource(root, uint_kind);
+  const auto cube_resource = ImageHeapResource(root, cube_kind);
+  auto other = root;
+  other.source = 9u;
+  Check(resource.numeric_class == Libs::Graphics::Prospero::TextureNumericClass::Uint &&
+            !resource.cube && cube_resource.cube &&
+            cube_resource.numeric_class == Libs::Graphics::Prospero::TextureNumericClass::Float &&
+            resource.resource_class == ImageResourceClass::Sampled && resource.read &&
+            ImageHeapResource(root, 0u) == ImageHeapResource(other, 0u),
+        "heap kind resources lost their type or kept root identity");
+  root.depth_compare = true;
+  Check(kind_of(Format::k32UInt, Type::kColor2DArray) == 0u,
+        "depth comparison accepted an integer heap entry");
+}
+
 void TestBoundedImageViewEligibility() {
   using Type = Libs::Graphics::Prospero::ImageType;
   auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u);
@@ -8796,6 +8918,8 @@ int main() {
     Run("dynamic storage mips", TestDynamicStorageMipTracking);
     Run("invariant indirect images", [] { TestInvariantIndirectImageMaterialization(true); });
     Run("unbounded material image keys", [] { TestInvariantIndirectImageMaterialization(false); });
+    Run("resident image heap", TestResidentImageHeap);
+    Run("image heap kinds", TestImageHeapKinds);
     Run("bounded image view eligibility", TestBoundedImageViewEligibility);
     Run("exact unfiltered image candidates", TestExactUnfilteredImageCandidates);
     Run("waterfall image table", TestWaterfallImageTable);

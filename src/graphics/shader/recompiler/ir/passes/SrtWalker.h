@@ -13,6 +13,33 @@ class Value;
 using SrtMemoryReader = bool (*)(void* userdata, uint64_t address, std::span<uint32_t> values);
 using SrtMemoryRangeValidator = bool (*)(void* userdata, uint64_t address, uint64_t size);
 
+// Image descriptors at base + first + k * step, k < count, within size bytes that a sampled
+// root selects by GPU-computed byte offset. The host keeps them resident instead of
+// materializing them.
+struct ImageHeapRequest {
+	uint64_t             base  = 0;
+	uint64_t             size  = 0;
+	uint64_t             step  = 0;
+	uint64_t             first = 0;
+	uint64_t             count = 0;
+	const ImageResource* root  = nullptr;
+};
+
+struct ImageHeapView {
+	uint64_t                         slots      = 0; // Device address of one slot per heap dword.
+	uint32_t                         slot_count = 0; // Keys past it select a trailing null slot.
+	std::span<const DescriptorValue> kinds; // One representative descriptor per kind.
+};
+
+class ImageHeapSource {
+public:
+	// False when the host does not keep the table resident.
+	virtual bool Acquire(const ImageHeapRequest& request, ImageHeapView& view) = 0;
+
+protected:
+	~ImageHeapSource() = default;
+};
+
 struct SrtRuntime {
 	std::span<const uint32_t> user_data;
 	uint64_t                  shader_base                = 0;
@@ -22,6 +49,7 @@ struct SrtRuntime {
 	SrtMemoryRangeValidator   validate_memory_range      = nullptr;
 	std::span<const uint32_t> workgroup_counts;
 	uint64_t                  indirect_args_address = 0;
+	ImageHeapSource*          image_heap            = nullptr;
 };
 
 class SrtReadCapture {

@@ -700,6 +700,21 @@ auto EmitImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t resul
 	    image.indirect_resources.size() < 2u) {
 		ctx.Fail(inst, "has no indirect image runtime mapping");
 	}
+	if (image.heap) {
+		const auto entry = EmitImageHeapEntry(state, key, image.indirect_mapping_offset);
+		const auto kinds = static_cast<uint32_t>(image.indirect_resources.size()) - 1u;
+		// One kind leaves every slot word a bare element.
+		if (kinds == 1u) return emit(image.indirect_resources[1], entry);
+		const auto element = Binary(state, spv::OpBitwiseAnd, TypeU32(state), entry,
+		                            ConstantU32(state, (1u << IR::ImageHeapKindShift) - 1u));
+		const auto EmitKind = [&](uint32_t kind) {
+			return emit(image.indirect_resources[kind + 1u], element);
+		};
+		return EmitIndexSwitch(state,
+		                       Binary(state, spv::OpShiftRightLogical, TypeU32(state), entry,
+		                              ConstantU32(state, IR::ImageHeapKindShift)),
+		                       kinds, result_type, EmitKind);
+	}
 	const auto selected = EmitIndirectResourceIndex(
 	    state, key, image.indirect_mapping_offset, image.indirect_search_iterations, 0u);
 	const auto SameType = [&](uint32_t lhs, uint32_t rhs) {
@@ -879,14 +894,19 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	}
 	if (op == IR::ValueOpcode::ImageQueryLod) {
 		state.builder.RequireCapability(spv::CapabilityImageQuery);
-		const auto dimension = image.dimension;
-		const auto sampled = MakeSampledImage(state, mem.resource,
-		                                     LoadSamplerDescriptor(state, mem.sampler));
-		const auto lod       = state.builder.AllocateId();
-		state.builder.AddFunction(
-		    spv::OpImageQueryLod, TypeF32Vector(state, 2), lod, sampled,
-		    CoordF32(ctx, mem, *address, 0, ImageDimensionInfoFor(dimension).spatial_components,
-		             image.cube));
+		const auto sampler = LoadSamplerDescriptor(state, mem.sampler);
+		const auto lod = EmitImageAccess(ctx, inst, TypeF32Vector(state, 2),
+		    [&](uint32_t resource, uint32_t array_index) {
+			    const auto& candidate = state.program.info.images[resource];
+			    const auto query = state.builder.AllocateId();
+			    state.builder.AddFunction(
+			        spv::OpImageQueryLod, TypeF32Vector(state, 2), query,
+			        MakeSampledImage(state, resource, sampler, 0u, array_index),
+			        CoordF32(ctx, mem, *address, 0,
+			                 ImageDimensionInfoFor(candidate.dimension).spatial_components,
+			                 candidate.cube));
+			    return query;
+		    });
 		uint32_t values[4] = {ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0),
 		                      ConstantU32(state, 0)};
 		for (uint32_t index = 0; index < 2u; index++) {

@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 
+#include <atomic>
 #include <compare>
 #include <limits>
 #include <optional>
@@ -71,6 +72,7 @@ public:
 	void MarkCpuDirty() {
 		m_cpu_dirty       = true;
 		m_maybe_cpu_dirty = false;
+		HeapChanged();
 	}
 
 	[[nodiscard]] bool IsCpuDirty() const { return m_cpu_dirty || m_maybe_cpu_dirty; }
@@ -80,6 +82,7 @@ public:
 		if (!IsCpuDirty()) {
 			m_maybe_cpu_hash  = HashGuestEdges();
 			m_maybe_cpu_dirty = true;
+			HeapChanged();
 		}
 	}
 	[[nodiscard]] bool ResolveMaybeCpuHash(uint64_t hash) {
@@ -104,7 +107,10 @@ public:
 	void               ClearGpuModified() noexcept { m_gpu_modified = false; }
 
 	[[nodiscard]] bool IsBufferModified() const noexcept { return m_buffer_modified; }
-	void               MarkBufferModified() noexcept { m_buffer_modified = true; }
+	void               MarkBufferModified() noexcept {
+		m_buffer_modified = true;
+		HeapChanged();
+	}
 	void               ClearBufferModified() noexcept { m_buffer_modified = false; }
 
 	[[nodiscard]] bool Overlaps(uint64_t address, uint64_t size,
@@ -120,6 +126,19 @@ public:
 		return backing.image == nullptr ? 0 : Common::AlignUp(info.data.size, 1024);
 	}
 	[[nodiscard]] uint64_t HashGuestEdges() const;
+	[[nodiscard]] vk::ImageLayout ReadLayout() const noexcept {
+		return info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
+		                      : vk::ImageLayout::eShaderReadOnlyOptimal;
+	}
+	// Resident image heaps sample an image without rediscovering it until one changes its
+	// contents, tracking, identity or layout.
+	void HeapChanged() const noexcept {
+		if (heap_refs.load(std::memory_order_relaxed) != 0u) {
+			heap_epoch.fetch_add(1u, std::memory_order_relaxed);
+		}
+	}
+
+	static inline std::atomic<uint64_t> heap_epoch {0};
 
 	ImageInfo        info;
 	VulkanImage      backing;
@@ -137,6 +156,8 @@ public:
 	ImageSubresourceRange stencil_subresources;
 	uint64_t         tick_accessed_last = 0;
 	size_t           lru_id             = 0;
+	// Resident image heap elements that select this image.
+	std::atomic<uint32_t> heap_refs {0};
 
 private:
 	friend struct ImageTestAccess;
