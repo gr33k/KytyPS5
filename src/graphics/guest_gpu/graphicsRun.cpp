@@ -30,6 +30,7 @@
 #include <mutex>
 #include <semaphore>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -38,21 +39,6 @@ static thread_local CommandProcessor* g_current_processor = nullptr;
 static thread_local Pm4Execution*     g_current_execution = nullptr;
 static thread_local bool              g_gpu_thread        = false;
 static thread_local GuestGpu*         g_gpu_state         = nullptr;
-
-struct DrawIndirectArgs {
-	uint32_t vertex_count_per_instance;
-	uint32_t instance_count;
-	uint32_t start_vertex_location;
-	uint32_t start_instance_location;
-};
-
-struct DrawIndexedIndirectArgs {
-	uint32_t index_count_per_instance;
-	uint32_t instance_count;
-	uint32_t start_index_location;
-	uint32_t base_vertex_location;
-	uint32_t start_instance_location;
-};
 
 static bool GraphicsRunDebugDumpEnabled() {
 	return Config::GraphicsDebugDumpEnabled() &&
@@ -103,6 +89,12 @@ void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
 	EXIT_IF(!m_accepting);
 	m_commands.push_back(std::move(command));
 	m_pending_commands.fetch_add(1, std::memory_order_release);
+	m_work_available.Signal();
+}
+
+void GuestGpu::Wake() {
+	Common::LockGuard lock(m_queue_mutex);
+	m_wake_pending = true;
 	m_work_available.Signal();
 }
 
@@ -206,6 +198,7 @@ void CommandProcessor::Reset() {
 	m_index_buffer_size                = 0;
 	m_index_base_addr                  = 0;
 	m_num_instances                    = 1;
+	m_num_instances_addr               = 0;
 	m_predicate_skip                   = false;
 	m_user_data_marker                 = HW::UserSgprType::Unknown;
 	m_draw_indirect_args_base_addr     = 0;
@@ -481,7 +474,10 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					// A wake that came before this wait must not be lost.
+					if (!std::exchange(gpu->m_wake_pending, false)) {
+						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					}
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -790,7 +786,16 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 		num_instances = 1;
 	}
 
-	m_num_instances = num_instances;
+	m_num_instances      = num_instances;
+	m_num_instances_addr = 0;
+}
+
+uint32_t CommandProcessor::NumInstances() {
+	if (m_num_instances_addr != 0) {
+		m_num_instances      = *reinterpret_cast<const uint32_t*>(m_num_instances_addr);
+		m_num_instances_addr = 0;
+	}
+	return m_num_instances;
 }
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
@@ -847,16 +852,12 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
-		args.instance_count = m_num_instances;
-	}
-	if (GraphicsRunDebugDumpEnabled() && (args.base_vertex != 0 || args.first_instance != 0)) {
-		LOGF("\t draw indexed offsets: base_vertex = %" PRId32 ", first_instance = %" PRIu32 "\n",
-		     args.base_vertex, args.first_instance);
+		args.instance_count = NumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
 }
 
-void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count) {
+const void* CommandProcessor::IndexAddress(uint32_t first_index) const {
 	uint64_t index_size = 0;
 	switch (m_index_type_and_size) {
 		case 0: index_size = 2; break;
@@ -864,11 +865,11 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 		case 2: index_size = 1; break;
 		default: EXIT("unknown index_type_and_size: %u\n", m_index_type_and_size);
 	}
+	return reinterpret_cast<const void*>(m_index_base_addr + first_index * index_size);
+}
 
-	auto* index_addr = reinterpret_cast<const void*>(
-	    m_index_base_addr + static_cast<uint64_t>(index_offset) * index_size);
-
-	DrawIndex({.index_count = index_count, .index_addr = index_addr});
+void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count) {
+	DrawIndex({.index_count = index_count, .index_addr = IndexAddress(index_offset)});
 }
 
 static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters registers,
@@ -889,7 +890,8 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, IndirectDrawRegisters registers,
                                     uint32_t draw_initiator, bool indexed) {
-	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
+	const auto args_size =
+	    indexed ? sizeof(vk::DrawIndexedIndirectCommand) : sizeof(vk::DrawIndirectCommand);
 	DrawIndirectMulti(data_offset, 1, nullptr, args_size, registers, draw_initiator, indexed);
 }
 
@@ -899,77 +901,65 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          uint32_t draw_initiator, bool indexed) {
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != (indexed ? 0u : 2u));
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
+	// The guest records match Vulkan's indirect commands byte for byte.
+	EXIT_NOT_IMPLEMENTED((stride_in_bytes & 3u) != 0 ||
+	                     stride_in_bytes < (indexed ? sizeof(vk::DrawIndexedIndirectCommand)
+	                                                : sizeof(vk::DrawIndirectCommand)));
 
-	uint32_t draw_count = max_count_or_count;
-	if (count_addr != nullptr) {
-		draw_count = *count_addr;
-		if (draw_count > max_count_or_count) {
-			draw_count = max_count_or_count;
-		}
-	}
-
+	const auto draw_count = count_addr == nullptr
+	                            ? max_count_or_count
+	                            : std::min(uint32_t {*count_addr}, max_count_or_count);
 	if (draw_count == 0) {
 		return;
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
 
-	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
-	EXIT_NOT_IMPLEMENTED(stride_in_bytes < args_size);
-
-	uint64_t index_size = 0;
-	if (indexed) {
-		switch (m_index_type_and_size) {
-			case 0: index_size = 2; break;
-			case 1: index_size = 4; break;
-			case 2: index_size = 1; break;
-			default: EXIT("unknown index_type_and_size: %u\n", m_index_type_and_size);
-		}
+	auto&      executor  = m_renderer.GetRenderExecutor();
+	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
+	// NUM_INSTANCES keeps the last draw's instance count.
+	m_num_instances_addr = args_addr + static_cast<uint64_t>(draw_count - 1) * stride_in_bytes +
+	                       offsetof(vk::DrawIndirectCommand, instanceCount);
+	// With no SGPRs to patch, the GPU reads the records if the shaders allow. Shaders apply
+	// the records' offsets only through those SGPRs; Vulkan applies them, which matches
+	// while they are zero.
+	const DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
+	if (registers.vertex_offset == Pm4::SH_NOP && registers.instance_offset == Pm4::SH_NOP &&
+	    registers.index_offset == Pm4::SH_NOP && (!indexed || m_index_buffer_size != 0) &&
+	    (indexed ? executor.DrawIndex(m_submit_id, CurrentBuffer(),
+	                                  {.index_count         = m_index_buffer_size,
+	                                   .index_addr          = IndexAddress(0),
+	                                   .index_type_and_size = m_index_type_and_size,
+	                                   .indirect            = records})
+	             : executor.DrawAuto(m_submit_id, CurrentBuffer(), {.indirect = records}))) {
+		return;
 	}
 
+	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
 	for (uint32_t i = 0; i < draw_count; i++) {
-		const auto args_addr = m_draw_indirect_args_base_addr + data_offset +
-		                       static_cast<uint64_t>(i) * stride_in_bytes;
-
+		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
 		if (!indexed) {
-			auto* args = reinterpret_cast<const DrawIndirectArgs*>(args_addr);
-			PatchIndirectDrawOffsets(*this, registers, args->start_vertex_location,
-			                         args->start_instance_location, 0);
-			m_num_instances = args->instance_count;
-			DrawIndexAuto({.vertex_count   = args->vertex_count_per_instance,
-			               .instance_count = args->instance_count,
-			               .first_vertex   = args->start_vertex_location,
-			               .first_instance = args->start_instance_location,
-			               .offset_source  = DrawOffsetSource::IndirectArgs});
+			const auto& args = *reinterpret_cast<const vk::DrawIndirectCommand*>(addr);
+			PatchIndirectDrawOffsets(*this, registers, args.firstVertex, args.firstInstance, 0);
+			executor.DrawAuto(m_submit_id, CurrentBuffer(),
+			                  {.vertex_count   = args.vertexCount,
+			                   .instance_count = args.instanceCount,
+			                   .first_vertex   = args.firstVertex,
+			                   .first_instance = args.firstInstance,
+			                   .offset_source  = DrawOffsetSource::IndirectArgs});
 			continue;
 		}
 
-		auto* args = reinterpret_cast<const DrawIndexedIndirectArgs*>(args_addr);
-		PatchIndirectDrawOffsets(*this, registers, args->base_vertex_location,
-		                         args->start_instance_location, args->start_index_location);
-
-		auto* index_addr = reinterpret_cast<const void*>(
-		    m_index_base_addr + static_cast<uint64_t>(args->start_index_location) * index_size);
-
-		const uint32_t index_count =
-		    (m_index_buffer_size != 0
-		         ? std::min(args->index_count_per_instance, m_index_buffer_size)
-		         : args->index_count_per_instance);
-		if (GraphicsRunDebugDumpEnabled() && index_count != args->index_count_per_instance) {
-			static std::atomic<uint32_t> log_count {0};
-			if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-				LOGF("\t DrawIndexIndirectMulti: clamped index_count from %" PRIu32 " to %" PRIu32
-				     " using INDEX_BUFFER_SIZE\n",
-				     args->index_count_per_instance, index_count);
-			}
-		}
-
-		m_num_instances = args->instance_count;
-		DrawIndex({.index_count    = index_count,
-		           .index_addr     = index_addr,
-		           .instance_count = args->instance_count,
-		           .base_vertex    = static_cast<int32_t>(args->base_vertex_location),
-		           .first_instance = args->start_instance_location,
-		           .offset_source  = DrawOffsetSource::IndirectArgs});
+		const auto& args = *reinterpret_cast<const vk::DrawIndexedIndirectCommand*>(addr);
+		PatchIndirectDrawOffsets(*this, registers, static_cast<uint32_t>(args.vertexOffset),
+		                         args.firstInstance, args.firstIndex);
+		executor.DrawIndex(m_submit_id, CurrentBuffer(),
+		                   {.index_count         = std::min(args.indexCount, max_indices),
+		                    .index_addr          = IndexAddress(args.firstIndex),
+		                    .instance_count      = args.instanceCount,
+		                    .index_type_and_size = m_index_type_and_size,
+		                    .base_vertex         = args.vertexOffset,
+		                    .first_instance      = args.firstInstance,
+		                    .offset_source       = DrawOffsetSource::IndirectArgs});
 	}
 }
 
@@ -1018,16 +1008,17 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	if (args.instance_count == 0) {
-		args.instance_count = m_num_instances;
+		args.instance_count = NumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
-	BufferFlush();
-
-	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
-	                                      static_cast<int>(display_buffer_index));
+	// The SDK stalls only this command processor, not the host command lane or other queues.
+	if (!m_renderer.GetVideoOut().IsSafeForRendering(static_cast<int>(video_out_handle),
+	                                                 static_cast<int>(display_buffer_index))) {
+		SuspendPm4();
+	}
 }
 
 template <typename T>

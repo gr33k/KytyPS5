@@ -339,8 +339,9 @@ uint32_t MakeSampledImage(EmitterState& state, uint32_t resource, uint32_t sampl
                           uint32_t mip = 0, uint32_t array_index = 0,
                           bool sampler_dynamic = false);
 
+// sample is 0 (no id) for single-sampled images.
 void EmitStorageImageWrite(EmitterState& state, uint32_t resource, uint32_t mip_lod, uint32_t coord,
-                           uint32_t texel, uint32_t array_index);
+                           uint32_t texel, uint32_t array_index, uint32_t sample);
 
 spv::ExecutionModel ExecutionModelForStage(ShaderType stage);
 

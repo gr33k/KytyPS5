@@ -76,6 +76,7 @@ public slots:
 
 	void open_game_folder();
 	void remove_save_data();
+	void compress_game();
 	void filter_configurations(const QString& text);
 	void SetGridView(bool grid);
 	void SetGridSize(int width);

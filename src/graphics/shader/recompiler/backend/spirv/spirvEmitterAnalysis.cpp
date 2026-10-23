@@ -121,6 +121,9 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 		EXIT("invalid image resource class");
 	}
 	const auto& info = ImageDimensionInfoFor(image.dimension);
+	if (sampled == 2 && info.multisampled != 0u) {
+		state.builder.RequireCapability(spv::CapabilityStorageImageMultisample);
+	}
 	const auto  scalar_type =
 	    image.atomic64 ? TypeU64(state) : ImageScalarType(state, image.numeric_class);
 	return state.builder.Type(spv::OpTypeImage, scalar_type,
@@ -213,15 +216,20 @@ uint32_t ImageDescriptorPointer(EmitterState& state, uint32_t resource, uint32_t
 }
 
 void EmitStorageImageWrite(EmitterState& state, uint32_t resource, uint32_t mip_lod, uint32_t coord,
-                           uint32_t texel, uint32_t array_index) {
+                           uint32_t texel, uint32_t array_index, uint32_t sample) {
 	const auto& image = state.program.info.images.at(resource);
 	EXIT_IF(image.resource_class != IR::ImageResourceClass::Storage);
 	if (!image.atomic) {
 		state.builder.RequireCapability(spv::CapabilityStorageImageWriteWithoutFormat);
 	}
 	const auto EmitWrite = [&](uint32_t mip) {
-		state.builder.AddFunction(spv::OpImageWrite, LoadImageDescriptor(state, resource, mip, array_index),
-		                          coord, texel);
+		const auto descriptor = LoadImageDescriptor(state, resource, mip, array_index);
+		if (sample == 0u) {
+			state.builder.AddFunction(spv::OpImageWrite, descriptor, coord, texel);
+		} else {
+			state.builder.AddFunction(spv::OpImageWrite, descriptor, coord, texel,
+			                          spv::ImageOperandsSampleMask, sample);
+		}
 	};
 	if (image.mip_mode != IR::ImageMipMode::Dynamic) {
 		EmitWrite(0);

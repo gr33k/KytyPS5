@@ -99,6 +99,7 @@ ShaderRecompiler::CompileOptions MakeCompileOptions(ShaderType stage) {
   ShaderRecompiler::CompileOptions options;
   options.stage = stage;
   options.user_data = user_data;
+  options.emit_debug_info = true; // Checks find variables and functions by OpName.
   switch (stage) {
   case ShaderType::Vertex:
     options.input_info.vertex = &vertex;
@@ -402,6 +403,11 @@ SpirvMetrics MeasureSpirv(const std::vector<uint32_t> &binary) {
     const uint32_t word_count = word >> 16u;
     if (word_count == 0 || i + word_count > binary.size()) {
       break;
+    }
+    if (opcode == spv::OpName || opcode == spv::OpString || opcode == spv::OpLine) {
+      metrics.words -= word_count; // Budgets measure the module without debug info.
+      i += word_count;
+      continue;
     }
     metrics.instructions++;
     switch (opcode) {
@@ -6899,6 +6905,50 @@ void TestCustomVintrpMovTranslation() {
   CheckSpirvBinaryValidates(mixed_linear_result.spirv);
 }
 
+void TestVop3F16InterpolationTranslation() {
+  // v_interp_p1ll_f16 v21, v0, attr0.w high; v_interp_p2_f16 v14, v1, attr0.w, v21 high
+  // v_interp_p1ll_f16 v15, v0, attr0.z;      v_interp_p2_f16 v14, v1, attr0.z, v15 (op_sel[3])
+  const uint32_t shader[] = {
+      EncodeVop3Word0(0x342, 21),    EncodeVop3Word1(0x1c0, 256 + 0, 0),
+      EncodeVop3Word0(0x35a, 14),    EncodeVop3Word1(0x1c0, 256 + 1, 256 + 21),
+      EncodeVop3Word0(0x342, 15),    EncodeVop3Word1(0x080, 256 + 0, 0),
+      EncodeVop3Word0(0x35a, 14, 8), EncodeVop3Word1(0x080, 256 + 1, 256 + 15),
+      EncodeExp0(0x00, 0x1),         EncodeExp1(14, 0, 0, 0),
+      0xbf810000u,
+  };
+  ShaderPixelInputInfo ps_info{};
+  ps_info.input_num = 1;
+  SetIdentityInterpolatorSettings(&ps_info);
+  auto options = MakeCompileOptions(ShaderType::Pixel);
+  options.input_info.pixel = &ps_info;
+  options.dump_ir = true;
+
+  auto result = RecompileForTest(shader, options);
+  Check(result.ir_dump.find("GetAttributeF16 0x00000000, 0x00000003, 0x00000001") !=
+            std::string::npos,
+        "v_interp_p2_f16 did not read the high f16 of attr0.w");
+  Check(result.ir_dump.find("GetAttributeF16 0x00000000, 0x00000002, 0x00000000") !=
+            std::string::npos,
+        "v_interp_p2_f16 did not read the low f16 of attr0.z");
+  Check(result.decoded_dump.find("v14.sdwa(sel=5") != std::string::npos,
+        "v_interp_p2_f16 op_sel[3] did not write the high half of v14");
+  Check(SpirvHasDecorationValueWithDecoration(result.spirv, 30u, 0u, 5285u),
+        "f16 interpolation input was not per-vertex");
+  Check(SpirvExtInstCount(result.spirv, 62u) == 6u,
+        "f16 interpolation did not unpack each of the three vertices per read");
+  Check(SpirvInstructionOpcodeCount(result.spirv, 133u) == 6u,
+        "f16 interpolation did not blend three barycentric weights per read");
+  CheckSpirvBinaryValidates(result.spirv);
+
+  ps_info.interpolator_settings[0] = 0x00000400u;
+  auto flat_result = RecompileForTest(shader, options);
+  Check(SpirvExtInstCount(flat_result.spirv, 62u) == 2u &&
+            !SpirvContainsCapability(flat_result.spirv, 5284u) &&
+            SpirvHasDecorationValueWithDecoration(flat_result.spirv, 30u, 0u, 14u),
+        "flat f16 interpolation did not unpack only the flat provoking value");
+  CheckSpirvBinaryValidates(flat_result.spirv);
+}
+
 void TestPerspectiveCentroidInputs() {
   constexpr std::array cases{std::array{4u, UINT32_MAX, 0u},
                              std::array{5u, UINT32_MAX, 2u},
@@ -10377,7 +10427,7 @@ void TestNewShaderRecompilerPlanningOnlyLoads() {
   ir.Emit(IR::ValueOpcode::ReferenceU32, {read});
   program.shader_info_complete = false;
   IR::CollectShaderInfo(program, options.input_info);
-  const auto spirv = Spirv::EmitProgram(program, options.input_info);
+  const auto spirv = Spirv::EmitProgram(program, options.input_info, 0, {}, true);
   CheckSpirvBinaryValidates(spirv);
   Check(spirv == result.spirv,
         "planning-only loads or references emitted GPU operands/instructions");
@@ -11123,6 +11173,7 @@ void TestMeshExportStorage() {
   options.stage = ShaderType::Mesh;
   options.input_info.vertex = &input;
   options.user_data = user_data;
+  options.emit_debug_info = true; // The checks find push data by its OpName.
   struct Case {
     uint32_t subgroup_size, push_data_start;
     bool split;
@@ -14375,7 +14426,8 @@ void TestNewShaderRecompilerNativeBindingPlan() {
   const auto bindings = result.program.bindings;
   result.program.bindings = {};
   result.program.info.buffers[0].descriptor_index = UINT32_MAX;
-  Check(ShaderRecompiler::Spirv::EmitProgram(result.program, options.input_info) == result.spirv &&
+  Check(ShaderRecompiler::Spirv::EmitProgram(result.program, options.input_info, 0, {}, true) ==
+                result.spirv &&
             result.program.bindings == bindings &&
             result.program.info.buffers[0].descriptor_index == 0,
         "repeated emission did not rebuild descriptor slots deterministically");
@@ -16091,6 +16143,40 @@ void TestCapturedBufferStoreFormatD16HiXDecode() {
         "captured BUFFER_STORE_FORMAT_D16_HI_X lost its high half, index, or coherence flags");
 }
 
+void TestCapturedBufferLoadD16XyzwDecode() {
+  namespace Decoder = ShaderRecompiler::Decoder;
+  const uint32_t code[] = {0xe20c2000u, 0x8001100cu};
+  Decoder::Instruction inst;
+  Decoder::DecodeInstruction(code, 0, inst);
+  Check(inst.opcode == Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XYZW &&
+            inst.word_count == 2 && inst.data_dwords == 2 && inst.data_bits == 16 &&
+            inst.data_components == 4 && inst.formatted && !inst.typed,
+        "captured D16 XYZW load lost its four components in two packed VGPRs");
+  Check(inst.dst.kind == Decoder::OperandKind::Vgpr && inst.dst.reg == 16 &&
+            inst.dst.sdwa_sel == 6 &&
+            inst.src0.kind == Decoder::OperandKind::Vgpr && inst.src0.reg == 12 &&
+            inst.src1.kind == Decoder::OperandKind::Sgpr && inst.src1.reg == 4 &&
+            inst.idxen && !inst.offen,
+        "captured D16 XYZW load lost its full destination VGPRs or index");
+}
+
+void TestCapturedBufferLoadD16XyDecode() {
+  namespace Decoder = ShaderRecompiler::Decoder;
+  const uint32_t code[] = {0xe2042000u, 0x80090600u};
+  Decoder::Instruction inst;
+  Decoder::DecodeInstruction(code, 0, inst);
+  Check(inst.opcode == Decoder::Opcode::BUFFER_LOAD_FORMAT_D16_XY &&
+            inst.word_count == 2 && inst.data_dwords == 1 && inst.data_bits == 16 &&
+            inst.data_components == 2 && inst.formatted && !inst.typed,
+        "captured D16 XY load lost its two components in one packed VGPR");
+  Check(inst.dst.kind == Decoder::OperandKind::Vgpr && inst.dst.reg == 6 &&
+            inst.dst.sdwa_sel == 6 &&
+            inst.src0.kind == Decoder::OperandKind::Vgpr && inst.src0.reg == 0 &&
+            inst.src1.kind == Decoder::OperandKind::Sgpr && inst.src1.reg == 36 &&
+            inst.idxen && !inst.offen,
+        "captured D16 XY load lost its destination VGPR or index");
+}
+
 void TestCapturedBufferStoreD16XyzwDecode() {
   namespace Decoder = ShaderRecompiler::Decoder;
   const uint32_t code[] = {0xe21c6000u, 0x8002000eu};
@@ -16412,11 +16498,15 @@ void TestRepeatedExportsHaveOneInterface() {
 void CheckSpirvBlockSourceMapping(TestCompileResult &result) {
   using namespace ShaderRecompiler;
   const auto options = MakeCompileOptions(ShaderType::Compute);
-  Check(SpirvInstructionOpcodeCount(result.spirv, spv::OpString) == 0 &&
-            SpirvInstructionOpcodeCount(result.spirv, spv::OpLine) == 0,
-        "default emission unexpectedly contains source mapping");
+  const auto plain = Spirv::EmitProgram(result.program, options.input_info);
+  Check(SpirvInstructionOpcodeCount(plain, spv::OpString) == 0 &&
+            SpirvInstructionOpcodeCount(plain, spv::OpLine) == 0 &&
+            SpirvInstructionOpcodeCount(plain, spv::OpName) == 0,
+        "default emission unexpectedly contains debug info");
   const auto mapped =
       Spirv::EmitProgram(result.program, options.input_info, 0, {}, true);
+  Check(SpirvInstructionOpcodeCount(mapped, spv::OpName) != 0,
+        "debug emission omitted names");
   CheckSpirvBinaryValidates(mapped);
   uint32_t source = 0;
   uint32_t label = 0;
@@ -16445,7 +16535,7 @@ void CheckSpirvBlockSourceMapping(TestCompileResult &result) {
   }
   Check(source != 0 && lines >= result.program.blocks.size(),
         "debug emission omitted native block source mapping");
-  Check(Spirv::EmitProgram(result.program, options.input_info) == result.spirv,
+  Check(Spirv::EmitProgram(result.program, options.input_info) == plain,
         "debug re-emission changed the default binary");
 }
 
@@ -16897,6 +16987,7 @@ int main() {
   TestNewShaderRecompilerNativeBindingPlan();
   TestNewShaderRecompilerStageInputInfo();
   TestCustomVintrpMovTranslation();
+  TestVop3F16InterpolationTranslation();
   TestPerspectiveCentroidInputs();
   TestPerspectiveSampleInputs();
   TestGraphicsCreateInterpolantMapping();
@@ -16907,6 +16998,8 @@ int main() {
   TestCapturedBufferLoadUbyteD16Decode();
   TestCapturedBufferStoreShortD16HiDecode();
   TestCapturedBufferStoreFormatD16HiXDecode();
+  TestCapturedBufferLoadD16XyDecode();
+  TestCapturedBufferLoadD16XyzwDecode();
   TestCapturedBufferStoreD16XyzwDecode();
   TestNewShaderRecompilerUnsupportedMemoryDecode();
 

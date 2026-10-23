@@ -996,7 +996,12 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 				return SpecializationFail("FMASK requires a direct image load");
 			}
 		}
-		image.conversion_format = ImageConversionFormat(format);
+		// See ReadsDepthBits; raw loads only, since filtering would blend the codes.
+		const bool depth_bits =
+		    !storage && base.unfiltered_access_only && format == Prospero::BufferFormat::k16UInt &&
+		    static_cast<Prospero::TileMode>((descriptor.dwords[3] >> 20u) & 0x1fu) ==
+		        Prospero::TileMode::kDepth;
+		image.conversion_format = depth_bits ? format : ImageConversionFormat(format);
 		if (storage || image.conversion_format != Prospero::BufferFormat::kInvalid) {
 			image.shader_swizzle = DescriptorImageSwizzle(descriptor);
 		}
@@ -1004,7 +1009,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		const bool raw_sint_storage = raw_sint_format != Prospero::BufferFormat::kInvalid;
 		if (raw_sint_format == Prospero::BufferFormat::k16UInt) image.conversion_format = format;
 		image.numeric_class = Prospero::SampledTextureNumericClass(
-		    Prospero::RemapTextureFormat(format));
+		    depth_bits ? Prospero::BufferFormat::k16UNorm : Prospero::RemapTextureFormat(format));
 		if (!storage && format == Prospero::BufferFormat::k11_11_10UNorm) {
 			if (image.indirect_root != ImageResource::NoIndirectImage) {
 				return SpecializationFail("packed UNorm sampling requires a direct image");
