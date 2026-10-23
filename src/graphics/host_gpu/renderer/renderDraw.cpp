@@ -1367,11 +1367,11 @@ bool ExpandStripDrawToList(std::vector<uint32_t>& out, CommandBuffer& buffer,
 			}
 		}
 	} else {
-		if (emit.first_vertex > UINT32_MAX - count) {
+		if (emit.vertex_offset > UINT32_MAX - count) {
 			return false;
 		}
 		for (uint32_t i = 0; i < count; i++) {
-			src.push_back(emit.first_vertex + i);
+			src.push_back(emit.vertex_offset + i);
 		}
 	}
 
