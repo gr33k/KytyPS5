@@ -698,7 +698,16 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		                         .buffer_format != Prospero::BufferFormat::k32UInt);
 	}
 	if (mesh_active) {
-		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
+		if (!m_graphics.mesh_shader_enabled) {
+			static std::atomic_bool warned = false;
+			if (!warned.exchange(true, std::memory_order_relaxed)) {
+				Log::WriteToConsoleAndLog(fmt::format(
+				    "Warning: skipping mesh draws because the host does not support mesh shaders "
+				    "(shader 0x{:016x}).\n",
+				    vertex_params[0].hash));
+			}
+			return;
+		}
 		auto& mesh              = vertex_info[0].mesh;
 		mesh.host_subgroup_size = m_graphics.subgroup_size;
 		const auto& limits      = m_graphics.mesh_shader_properties;
