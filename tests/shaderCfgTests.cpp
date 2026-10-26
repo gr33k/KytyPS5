@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -24,13 +25,13 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
-#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/SsaRewrite.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "libs/agc.h"
 #include "spirv-tools/libspirv.hpp"
 #include "xxhash.h"
+#include "SrtWalkerTestMemory.h"
 
 #include <algorithm>
 #include <array>
@@ -135,8 +136,7 @@ struct TestCompileResult {
 TestCompileResult RecompileForTest(
     std::span<const uint32_t> code,
     const ShaderRecompiler::CompileOptions &options,
-    ShaderRecompiler::IR::SrtMemoryReader read_memory = nullptr,
-    void *read_memory_data = nullptr, uint32_t push_data_start_dword = 0) {
+    uint32_t push_data_start_dword = 0) {
   auto translated = ShaderRecompiler::TranslateProgram(code, options);
   auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   ShaderRecompiler::IR::ResourceSnapshot resources;
@@ -144,8 +144,6 @@ TestCompileResult RecompileForTest(
   const ShaderRecompiler::IR::SrtRuntime runtime{
       .user_data = options.user_data,
       .shader_base = reinterpret_cast<uint64_t>(code.data()),
-      .read_memory = read_memory,
-      .userdata = read_memory_data,
       .read_specialization_memory = ReadHostTestMemory,
   };
   Check(ShaderRecompiler::IR::MaterializeResources(
@@ -166,10 +164,10 @@ void CompilePixelRuntime(const ShaderParams &params,
 
   options.input_info.pixel = &input_info;
   auto result = RecompileForTest(params.code, options);
-  static std::deque<ShaderRecompiler::IR::CompiledShaderInfo> programs;
+  static std::deque<ShaderModule> modules;
   static std::deque<ShaderRecompiler::IR::ResourceSnapshot> resources;
-  programs.push_back(std::move(result.program).TakeCompiledInfo());
-  input_info.stage.program = &programs.back();
+  modules.push_back({.info = std::move(result.program).TakeCompiledInfo()});
+  input_info.stage.module = &modules.back();
   resources.push_back(std::move(result.resources));
   input_info.stage.resources = &resources.back();
 }
@@ -1160,7 +1158,7 @@ void TestNativeShaderResourceDependencies() {
   set_buffer(0, 0x1000, 16, 3);
   set_buffer(1, 0x1800, 4, 7);
   set_buffer(2, 0x2000, 0, 64);
-  const ShaderRecompiler::IR::CompiledShaderInfo compiled{
+  const ShaderModule compiled{.info = {
       .stage = program.stage,
       .shader_hash = program.shader_hash,
       .wave_size = program.wave_size,
@@ -1169,8 +1167,8 @@ void TestNativeShaderResourceDependencies() {
       .scratch_dwords = program.scratch_dwords,
       .info = program.info,
       .bindings = program.bindings,
-  };
-  ShaderStageRuntime runtime{.program = &compiled, .resources = &resources};
+  }};
+  ShaderStageRuntime runtime{.module = &compiled, .resources = &resources};
   Check(HasShaderBufferWrites(runtime),
         "graphics/compute write predicate lost nonempty written buffers");
   set_buffer(0, 0, 16, 3);
@@ -1588,11 +1586,6 @@ void SetImageTestFormat(std::array<uint32_t, 64> *data, uint32_t srsrc,
   (*data)[format_dword] = static_cast<uint32_t>(format) << 20u;
 }
 
-bool ReadZeroTestMemory(void *, uint64_t, std::span<uint32_t> values) {
-  std::ranges::fill(values, 0u);
-  return true;
-}
-
 constexpr uint32_t EncodeVop2(uint32_t opcode, uint32_t dst, uint32_t src0,
                               uint32_t src1) {
   return ((opcode & 0x3fu) << 25u) | ((dst & 0xffu) << 17u) |
@@ -1854,6 +1847,31 @@ void TestShaderStageBarriers() {
       "SPIR-V barrier does not use workgroup acquire-release memory semantics");
   CheckSpirvBinaryValidates(result.spirv);
 
+  // s_barrier also acquires other waves' buffer and image stores.
+  const auto acquires = [](std::span<const uint32_t> code,
+                           const ShaderRecompiler::CompileOptions &options) {
+    const auto result = RecompileForTest(code, options);
+    CheckSpirvBinaryValidates(result.spirv);
+    // AcquireRelease | UniformMemory | WorkgroupMemory | ImageMemory.
+    return DisassembleSpirvBinary(result.spirv).find(
+               "OpControlBarrier %uint_2 %uint_2 %uint_2376") != std::string::npos;
+  };
+  const uint32_t buffer_store[] = {
+      EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(1, 0, 0), // buffer_store_dword
+      EncodeSopp(0x0a), EncodeSopp(0x01),
+  };
+  Check(acquires(buffer_store, MakeCompileOptions(ShaderType::Compute)),
+        "s_barrier after buffer stores does not acquire buffer memory");
+  const uint32_t image_store[] = {
+      EncodeMimg0(0x08, 0xf), EncodeMimg1(20, 0, 0, 4), // image_store
+      EncodeSopp(0x0a), EncodeSopp(0x01),
+  };
+  const auto image_user_data = ImageTestUserData();
+  auto image_options = MakeCompileOptions(ShaderType::Compute);
+  image_options.user_data = image_user_data;
+  Check(acquires(image_store, image_options),
+        "s_barrier after image stores does not acquire image memory");
+
   const auto vertex_result =
       RecompileForTest(shader, MakeCompileOptions(ShaderType::Vertex));
   CheckSpirvBinaryValidates(vertex_result.spirv);
@@ -1914,6 +1932,13 @@ void TestVertexBufferGrouping() {
               input.resources[2].Base48() == input.buffers[0].addr,
           "a later lower-address attribute or changed table left stale vertex offsets");
   }
+  // The vertex table metadata is parsed when the shader is mapped.
+  user_data.direct_resource_count = 0;
+  (void)PrepareProgram(regs, HW::Context{}, HW::UserConfig{}, input);
+  Check(input.fetch_attrib_reg == 2, "a draw reread the vertex metadata of a mapped shader");
+  ShaderMapUserData(regs.es_regs.data_addr, mapped);
+  (void)PrepareProgram(regs, HW::Context{}, HW::UserConfig{}, input);
+  Check(!input.fetch_embedded, "remapping a shader kept its previous vertex metadata");
 }
 
 void TestNggVertexEntryState() {
@@ -5475,7 +5500,8 @@ void TestNewShaderRecompilerMemoryFamilyTranslation() {
   options.dump_ir = true;
   options.user_data = user_data;
 
-  auto result = RecompileForTest(shader, options, ReadZeroTestMemory);
+  FakeGuestMemory zero_memory;
+  auto result = RecompileForTest(shader, options);
   Check((result.decoded_dump.find("s_load_dword") != std::string::npos),
         "new decoder did not decode SMEM dword load");
   Check((result.decoded_dump.find("s_buffer_load_dword") != std::string::npos),
@@ -7530,7 +7556,7 @@ void TestNewShaderRecompilerMubufFormatTranslation() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
-void TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly() {
+void TestNewShaderRecompilerFormattedStoreUsesRuntimeBindingSizeOnly() {
   const uint32_t shader[] = {
       EncodeMubuf0(0x04),
       EncodeMubuf1(0, 0, 1), // buffer_store_format_x
@@ -7557,8 +7583,9 @@ void TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly() {
   CheckSpirvBinaryValidates(result.spirv);
 
   const auto source = DisassembleSpirvBinary(result.spirv);
-  Check((source.find("OpArrayLength") != std::string::npos),
-        "formatted store SPIR-V lacks runtime storage-buffer bounds check");
+  Check(source.find("OpULessThan") != std::string::npos &&
+            source.find("OpArrayLength") == std::string::npos,
+        "formatted store SPIR-V lacks a bounds check against its pushed binding size");
   Check(
       !SpirvSourceHasInstructionUsing(source, "OpULessThan", "%uint_5"),
       "formatted store SPIR-V baked descriptor NumRecords into a store guard");
@@ -9290,7 +9317,7 @@ void TestSharedReturnPreservesDescriptorDominance() {
   user_data[29] = static_cast<uint32_t>(address >> 32u);
   auto options = MakeCompileOptions(ShaderType::Pixel);
   options.user_data = user_data;
-  auto result = RecompileForTest(shader, options, ReadHostTestMemory);
+  auto result = RecompileForTest(shader, options);
   Check(!result.program.dispatcher_fallback &&
             result.resources.buffers.size() == 1u &&
             result.resources.buffers[0].dwords[0] == 0x2000u,
@@ -9350,7 +9377,7 @@ void TestNestedSelectionPreservesDescriptorSources() {
     auto options = MakeCompileOptions(ShaderType::Compute);
     options.user_data_base = 8;
     options.user_data = user_data;
-    const auto result = RecompileForTest(shader, options, ReadHostTestMemory);
+    const auto result = RecompileForTest(shader, options);
     Check(!result.program.dispatcher_fallback && result.resources.buffers.size() == 4u,
           "nested descriptor selection lost its structured resource bindings");
     for (size_t i = 0; i < result.program.info.buffers.size(); ++i) {
@@ -9426,7 +9453,7 @@ void TestSharedExitPreservesNativeDescriptorSources() {
     user_data[2] = arm;
     auto options = MakeCompileOptions(ShaderType::Pixel);
     options.user_data = user_data;
-    const auto result = RecompileForTest(shader, options, ReadHostTestMemory);
+    const auto result = RecompileForTest(shader, options);
     Check(!result.program.dispatcher_fallback && result.resources.buffers.size() == 2u,
           "shared-exit descriptor selection lost its structured resource bindings");
     for (size_t i = 0; i < result.program.info.buffers.size(); ++i) {
@@ -9472,7 +9499,7 @@ void TestNativeScalarReadDescriptorPlanning() {
     user_data[8] = mode;
     auto options = MakeCompileOptions(ShaderType::Pixel);
     options.user_data = user_data;
-    const auto result = RecompileForTest(shader, options, ReadHostTestMemory);
+    const auto result = RecompileForTest(shader, options);
     const auto expected = mode == 2u ? table : std::array<uint32_t, 4>{};
     Check(!result.program.dispatcher_fallback && result.resources.buffers.size() == 1u &&
               std::ranges::equal(result.resources.flattened_srt, expected),
@@ -9574,7 +9601,7 @@ void TestNativeGuardedSamplerSource(bool inline_constants) {
     auto options = MakeCompileOptions(ShaderType::Pixel);
     options.user_data_base = 8;
     options.user_data = user_data;
-    const auto result = RecompileForTest(code, options, ReadHostTestMemory);
+    const auto result = RecompileForTest(code, options);
     const auto expected = mode == 2u ? sampler : std::array<uint32_t, 4>{};
     Check(!result.program.dispatcher_fallback && result.resources.samplers.size() == 1u &&
               result.resources.samplers[0].dword_count == expected.size() &&
@@ -9617,6 +9644,28 @@ void TestNativeConstantSamplerSelection() {
   Check((first == 0x92u && second == 0u) || (first == 0u && second == 0x92u),
         "native sampler selection lost either reachable constant state");
   CheckSpirvBinaryValidates(result.spirv);
+}
+
+void TestPackedZeroHighSamplerTableKey() {
+  // s_pack_ll_b32_b16 with a zero high lane zero-extends a GPU-selected table key, so the
+  // sampler table stays bounded to 64Ki records.
+  const uint32_t shader[] = {
+      EncodeMubuf0(0x0c, 0, true), EncodeMubuf1(1, 3, 0), EncodeSopp(0x0c, 0),
+      EncodeVop1(0x02, 28, 257), EncodeSop2(0x32, 29, 28, 128),
+      EncodeSop2(0x1e, 30, 29, 132),
+      EncodeSmem0(0x0a, 24, 4), 30u << 25u, EncodeSopp(0x0c, 0),
+      EncodeMimg0(0x20, 0x1), EncodeMimg1(0, 4, 6, 2),
+      EncodeExp0(0x00, 0x1), EncodeExp1(0, 0, 0, 0),
+      EncodeSopp(0x01),
+  };
+  auto options = MakeCompileOptions(ShaderType::Pixel);
+  options.user_data = ImageTestUserData();
+  const auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+  const auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+  const auto& indirect =
+      plan.descriptor_sources[plan.info.samplers.at(0).source].indirect_descriptor;
+  Check(indirect && indirect->table_stride == 16u && indirect->table_maximum == 0xffffu,
+        "a zero-extended sampler table key lost its 16-bit bound");
 }
 
 void TestBoundedMaterialBufferStores(bool scalar_key) {
@@ -9682,8 +9731,7 @@ void TestBoundedMaterialBufferStores(bool scalar_key) {
   ShaderRecompiler::IR::ResourceSnapshot snapshot;
   ShaderRecompiler::IR::ResourceSpecialization specialization;
   const ShaderRecompiler::IR::SrtRuntime runtime{
-      .user_data = user_data, .read_memory = ReadHostTestMemory,
-      .read_specialization_memory = ReadHostTestMemory};
+      .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
   const auto materialize = [&] {
     return ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization);
   };
@@ -9768,7 +9816,7 @@ void TestNativeDescriptorProvenanceKeepsGpuSelection() {
   options.input_info.compute = &input_info;
   options.user_data = user_data;
   for (const auto &shader : {selected, partial, loop}) {
-    const auto result = RecompileForTest(shader, options, ReadHostTestMemory);
+    const auto result = RecompileForTest(shader, options);
     Check(result.program.info.uses_dma && result.program.info.buffers.size() == 1u &&
               result.program.info.buffers[0].written,
           "GPU-selected scalar descriptor was materialized as a host binding");
@@ -10683,19 +10731,18 @@ void TestNewShaderRecompilerBufferLoadsGuardedByExec() {
   const auto source = DisassembleSpirvBinary(result.spirv);
   const auto exec_branch =
       source.find("OpBranchConditional", 0);
-  const auto array_length =
-      source.find("OpArrayLength", 0);
-  const auto bounds_branch = source.find("OpBranchConditional", array_length);
+  const auto bounds = source.find("OpULessThan", 0);
+  const auto bounds_branch = source.find("OpBranchConditional", bounds);
   const auto element_access = source.find("OpAccessChain %_ptr_StorageBuffer_uint", 0);
   Check(exec_branch != std::string::npos,
         "buffer load SPIR-V lacks EXEC guard branch");
-  Check(array_length != std::string::npos,
-        "buffer load SPIR-V lacks storage buffer array-length bounds check");
+  Check(bounds != std::string::npos,
+        "buffer load SPIR-V lacks storage buffer bounds check");
   Check(bounds_branch != std::string::npos,
         "buffer load SPIR-V lacks storage buffer bounds branch");
   Check(element_access != std::string::npos,
         "buffer load SPIR-V lacks storage element access");
-  Check(exec_branch < array_length,
+  Check(exec_branch < bounds,
         "buffer load bounds check was emitted outside EXEC guard");
   Check(bounds_branch < element_access,
         "buffer load storage element pointer was formed before bounds guard");
@@ -10728,13 +10775,12 @@ void TestNewShaderRecompilerBufferAtomicsGuardedByBounds() {
     CheckSpirvBinaryValidates(result.spirv);
 
     const auto source = DisassembleSpirvBinary(result.spirv);
-    const auto array_length =
-        source.find("OpArrayLength", 0);
-    const auto bounds_branch = source.find("OpBranchConditional", array_length);
+    const auto bounds = source.find("OpULessThan", 0);
+    const auto bounds_branch = source.find("OpBranchConditional", bounds);
     const auto atomic = source.find(test.spirv, 0);
     const auto memory_barrier =
         source.find("OpMemoryBarrier", atomic);
-    Check(array_length != std::string::npos &&
+    Check(bounds != std::string::npos &&
               bounds_branch != std::string::npos &&
               atomic != std::string::npos &&
               memory_barrier != std::string::npos,
@@ -10783,14 +10829,13 @@ void TestCapturedBufferAtomicsX2() {
           "64-bit buffer atomic storage view does not use eight-byte elements");
     Check(CountSourceOccurrences(source, "Aliased") == 2u,
           "both storage-buffer views must declare that they alias");
-    const auto array_length =
-        source.find("OpArrayLength", 0);
-    const auto bounds_branch = source.find("OpBranchConditional", array_length);
+    const auto bounds = source.find("OpULessThan", 0);
+    const auto bounds_branch = source.find("OpBranchConditional", bounds);
     const auto atomic =
         source.find(test.spirv_name, 0);
     const auto memory_barrier =
         source.find("OpMemoryBarrier", atomic);
-    Check(array_length != std::string::npos &&
+    Check(bounds != std::string::npos &&
               bounds_branch != std::string::npos &&
               atomic != std::string::npos && bounds_branch < atomic,
           "64-bit buffer atomic was not guarded by storage-buffer bounds");
@@ -10885,11 +10930,10 @@ void TestGraphicsComputeGetreg() {
   ShaderMappedData mapped{};
   mapped.code_size_bytes = sizeof(shader);
   ShaderMapUserData(regs.cs_regs.data_addr, mapped);
-  HW::ShaderRegisters sh{};
   ShaderComputeInputInfo graphics{}, async{};
   async.async_compute = true;
-  (void)PrepareProgram(regs, sh, graphics);
-  (void)PrepareProgram(regs, sh, async);
+  (void)PrepareProgram(regs, graphics);
+  (void)PrepareProgram(regs, async);
   Check(!graphics.async_compute && async.async_compute &&
             MakeStageStaticKey(graphics) != MakeStageStaticKey(async) &&
             MakeStageStaticKey(graphics).size() == MakeStageStaticKey(async).size(),
@@ -10931,7 +10975,7 @@ void TestMemoryFedScalarLeafCall() {
   struct Memory {
     std::array<uint32_t, 128> words{};
     uint64_t end = base + 0x10c;
-    bool clean = true;
+    bool readable = true;
   } memory;
   std::copy_n(std::array{0xe0040060u, 0x0010000fu, 8u, 0x5204u}.begin(),
               4, memory.words.begin());
@@ -10942,13 +10986,14 @@ void TestMemoryFedScalarLeafCall() {
   memory.words[66] = EncodeSop1(0x21, 125, 14);
   const auto read = [](void *data, uint64_t address, std::span<uint32_t> out) {
     const auto& m = *static_cast<Memory*>(data);
-    if (!m.clean || address < base || address > m.end || out.size_bytes() > m.end - address)
+    if (!m.readable || address < base || address > m.end || out.size_bytes() > m.end - address)
       return false;
     std::memcpy(out.data(), reinterpret_cast<const uint8_t*>(m.words.data()) + address - base,
                 out.size_bytes());
     return true;
   };
-  IR::SrtRuntime runtime{.read_memory = read, .userdata = &memory, .read_specialization_memory = read};
+  FakeGuestMemory fake(read, &memory);
+  IR::SrtRuntime runtime{.userdata = &memory, .read_specialization_memory = read};
   const auto options = MakeCompileOptions(ShaderType::Compute);
   const uint32_t gpu_callable[] = {EncodeVop1(0x02, 4, 256),
       EncodeSmem0(0x09, 14, 0), 4u << 25u, EncodeSop1(0x21, 14, 14), EncodeSopp(0x01)};
@@ -11032,14 +11077,14 @@ void TestMemoryFedScalarLeafCall() {
   Check(source.revision == 3 && source.reads.back().second == 8,
         "shorter exact-boundary leaf was not decoded after a failed old-span read");
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
-  memory.clean = false;
+  memory.readable = false;
   ExpectFatal([&] { (void)RefreshShaderSource(source, runtime); },
               "unreadable call dependencies reused stale linked code");
-  memory.clean = true;
-  auto ordinary = runtime;
-  ordinary.read_specialization_memory = nullptr;
-  ExpectFatal([&] { (void)RefreshShaderSource(source, ordinary); },
-              "call target query accepted an ordinary non-strict memory reader");
+  memory.readable = true;
+  auto no_reader = runtime;
+  no_reader.read_specialization_memory = nullptr;
+  ExpectFatal([&] { (void)RefreshShaderSource(source, no_reader); },
+              "leaf code was linked without a specialization memory reader");
   std::vector<uint32_t> escaping(std::begin(shader), std::end(shader) - 1);
   escaping.insert(escaping.end(), {EncodeVop1(0x01, 1, 14),
       EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(1, 0, 0), EncodeSopp(0x01)});
@@ -11055,9 +11100,10 @@ void TestMemoryFedScalarLeafCall() {
       EncodeSMovB32(15, 129), EncodeSop2(0x0f, 14, 128, 128),
       EncodeSop1(0x21, 14, 14), EncodeSopp(0x01)};
   auto pair_source = PrepareShaderSource(high_writer, options);
-  IR::SrtWalker pair_walker(pair_source.call_targets, runtime);
+  std::vector<uint32_t> flat;
   uint32_t high = 1;
-  Check(pair_walker.Evaluate(pair_source.calls.front().target[1], high) && high == 0,
+  Check(IR::WalkSrt(pair_source.call_targets, runtime, flat, nullptr) &&
+            IR::WalkedValue(pair_source.call_targets, pair_source.calls.front().target[1], high) && high == 0,
         "scalar pair producer used a stale preceding high-half definition");
   const uint32_t joined[] = {
       EncodeSopp(0x04, 2), EncodeSMovB32(14, 129), EncodeSopp(0x02, 1),
@@ -11068,6 +11114,18 @@ void TestMemoryFedScalarLeafCall() {
   ExpectFatal([&] { (void)PrepareShaderSource(multiple, options); },
               "a native return pair was accepted as a later call target");
 #endif
+  // A lane read and a wave32 lane mask write one SGPR, so neither s13 writer defines s14.
+  for (const auto& [wave_size, writer] : {std::pair{64u, 0x360u}, std::pair{32u, 0xc2u}}) {
+    const uint32_t neighbor[] = {EncodeVop3Word0(writer, 13), EncodeVop3Word1(256, 128, 0),
+                                 EncodeSop1(0x21, 14, 14), EncodeSopp(0x01)};
+    auto neighbor_options = options;
+    neighbor_options.wave_size = wave_size;
+    const auto neighbor_source = PrepareShaderSource(neighbor, neighbor_options);
+    const auto* target = neighbor_source.calls.front().target[0].TryInstruction();
+    Check(target != nullptr && target->GetOpcode() == IR::ValueOpcode::GetUserData &&
+              IR::RegIndex(target->Arg(0).ScalarRegister()) == 14u,
+          "a single-SGPR vector write was taken as the next SGPR's call-target definition");
+  }
 }
 
 void TestNewShaderRecompilerSetpcBranch() {
@@ -11203,7 +11261,7 @@ void TestMeshExportStorage() {
     options.back_code = split ? std::span{back} : std::span<const uint32_t>{};
     const auto result = RecompileForTest(
         split ? std::span{front} : std::span<const uint32_t>{monolithic},
-        options, nullptr, nullptr, push_data_start);
+        options, push_data_start);
     CheckSpirvBinaryValidates(result.spirv);
     const auto &layout = result.program.bindings;
     Check(layout.UsesPushData() == (push_data_start == PushData::MeshDrawDwordCount) &&
@@ -11227,6 +11285,8 @@ void TestMeshExportStorage() {
               !SpirvSourceHasInstructionUsing(source, "OpAccessChain",
                                               "vsharp %uint_0 %uint_4294967295"),
           "mesh draw prefix was lost or spilled shader data wrapped into push constants");
+    Check(SpirvSourceHasInstructionUsing(source, "OpBitFieldUExtract", "%uint_10 %uint_9"),
+          "NGG primitive vertex indices must be 9 bits; bit 9 of each field is the edge flag");
     const auto &binary = result.spirv;
     for (const auto builtin : {3u, 4u}) {
       auto expected = builtin == 3u ? std::vector<uint32_t>{0, 3}
@@ -11349,13 +11409,11 @@ void TestMergedShaderUserDataSnapshot() {
   const auto plan = IR::ExtractResourcePlan(program);
   for (const auto *params : {&first, &second}) {
     const auto user_data = std::span(params->user_data).first(params->user_data_count);
-    const IR::SrtRuntime runtime{.user_data = user_data,
-                                 .read_memory = ReadHostTestMemory};
-    IR::SrtWalker walker(plan, runtime);
+    const IR::SrtRuntime runtime{.user_data = user_data};
     IR::DescriptorValue front_descriptor, back_descriptor;
     const auto &table = params == &first ? first_table : second_table;
-    Check(walker.EvaluateDescriptor(program.info.buffers[0].source, front_descriptor) &&
-              walker.EvaluateDescriptor(program.info.buffers[1].source, back_descriptor) &&
+    Check(EvaluateSrtDescriptor(plan, runtime, program.info.buffers[0].source, front_descriptor) &&
+              EvaluateSrtDescriptor(plan, runtime, program.info.buffers[1].source, back_descriptor) &&
               std::equal(user_data.begin() + 8, user_data.end(),
                          front_descriptor.dwords.begin()) &&
               std::equal(table.begin(), table.end(), back_descriptor.dwords.begin()),
@@ -11796,7 +11854,7 @@ void TestMeshInputAssembly() {
     options.user_data_count = 0;
     options.input_info.vertex = &input;
     auto program = Frontend::TranslateProgram(decoded, graph, options);
-    const uint32_t draw[] = {test.count, test.base_vertex, 7, test.width,
+    const uint32_t draw[] = {test.count, test.base_vertex, test.width,
                              test.address_low, 0x12};
     Inst *load = nullptr;
     for (auto &inst : *program.blocks.front()) {
@@ -11841,7 +11899,7 @@ void TestMeshInputAssembly() {
     Check(sgprs[2] == test.group_info && sgprs[3] == test.wave_info &&
               vgprs[0] == ((test.first << 2) | (test.second << 18)) &&
               vgprs[1] == test.third * 4 && vgprs[5] == test.vertex_id &&
-              vgprs[test.fast_launch ? 6 : 8] == 9u,
+              vgprs[test.fast_launch ? 6 : 8] == 2u,
           "mesh prolog changed input assembly, wave counts, vertex ID, or instance ID");
   }
 }
@@ -13668,6 +13726,34 @@ void TestNewShaderRecompilerPerInvocationMasksWithoutMirrors() {
     }
   }
 
+  // The wave32 live mask projects to the entry predicate, and VCC keeps its compare predicate
+  // after WQM.
+  const uint32_t live_mask_shader[] = {
+      EncodeSop1(0x03, 0, 126),      // s_mov_b32 s0, exec_lo
+      EncodeSop2(0x0e, 126, 126, 0), // s_and_b32 exec_lo, exec_lo, s0
+      EncodeVop1(0x01, 0, 242),      // v_mov_b32 v0, 1.0
+      EncodeExp0(0x00, 0x1), EncodeExp1(0, 0, 0, 0),
+      EncodeSopp(0x01),
+  };
+  const uint32_t wqm_vcc_shader[] = {
+      EncodeSop1(0x09, 126, 126),  // s_wqm_b32 exec_lo, exec_lo
+      EncodeVop2(0x23, 0, 193, 1), // v_mbcnt_lo_u32_b32 v0, -1, v1
+      EncodeVopc(0xc1, 129, 0),    // v_cmp_lt_u32 vcc_lo, 1, v0
+      EncodeVop2(0x01, 2, 128, 0), // v_cndmask_b32 v2, 0, v0, vcc_lo
+      EncodeExp0(0x00, 0x1), EncodeExp1(2, 2, 2, 2),
+      EncodeSopp(0x01),
+  };
+  auto wave32_pixel_options = MakeCompileOptions(ShaderType::Pixel);
+  wave32_pixel_options.wave_size = 32u;
+  for (const std::span<const uint32_t> shader : {std::span<const uint32_t>(live_mask_shader),
+                                                 std::span<const uint32_t>(wqm_vcc_shader)}) {
+    const auto pixel_result = RecompileForTest(shader, wave32_pixel_options);
+    CheckSpirvBinaryValidates(pixel_result.spirv);
+    Check(DisassembleSpirvBinary(pixel_result.spirv).find("OpGroupNonUniformBallot") ==
+              std::string::npos,
+          "wave32 pixel mask rebuilt a known predicate from a ballot");
+  }
+
   const uint32_t local_shader[] = {
       EncodeVopc(0xc1, 5 + 256, 8),    // v_cmp_lt_u32 vcc, v5, v8
       EncodeSop2(0x0f, 2, 126, 106),   // s_and_b64 s[2:3], exec, vcc
@@ -13782,6 +13868,7 @@ void TestNewShaderRecompilerExpPixelOutputs() {
 
   ShaderPixelInputInfo uint16_info;
   uint16_info.target_output_mode[0] = 7;
+  uint16_info.target_uint_mask = 1;
   options.input_info.pixel = &uint16_info;
   auto uint16_result = RecompileForTest(shader, options);
   const auto uint16_source = DisassembleSpirvBinary(uint16_result.spirv);
@@ -13795,6 +13882,18 @@ void TestNewShaderRecompilerExpPixelOutputs() {
   Check(!SpirvContainsExtInst(uint16_result.spirv, 62),
         "compressed UINT16 MRT export was incorrectly decoded as FP16");
   CheckSpirvBinaryValidates(uint16_result.spirv);
+
+  ShaderPixelInputInfo sint16_info;
+  sint16_info.target_output_mode[0] = 8;
+  sint16_info.target_sint_mask = 1;
+  options.input_info.pixel = &sint16_info;
+  auto sint16_result = RecompileForTest(shader, options);
+  const auto sint16_source = DisassembleSpirvBinary(sint16_result.spirv);
+  Check(sint16_source.find("OpVariable %_ptr_Output_v4int Output") != std::string::npos &&
+            CountSourceOccurrences(sint16_source, "OpBitFieldSExtract") == 4u &&
+            !SpirvContainsExtInst(sint16_result.spirv, 62),
+        "compressed SINT16 MRT export did not sign-extend into a signed output");
+  CheckSpirvBinaryValidates(sint16_result.spirv);
 
   ShaderPixelInputInfo unorm16_info;
   unorm16_info.target_output_mode[0] = 5;
@@ -13823,6 +13922,7 @@ void TestNewShaderRecompilerExpPixelOutputs() {
 
   ShaderPixelInputInfo uint_info;
   uint_info.target_output_mode[0] = 7;
+  uint_info.target_uint_mask = 1;
   options.input_info.pixel = &uint_info;
   auto partial_uint_result =
       RecompileForTest(partial_shader, options);
@@ -13848,6 +13948,15 @@ void TestNewShaderRecompilerExpPixelOutputs() {
                                    "OpBitFieldUExtract") == 2u,
         "compressed UINT16 BA-only export did not read and unpack VSRC1");
   CheckSpirvBinaryValidates(compressed_ba_result.spirv);
+
+  // 32-bit exports keep their raw bits in a UINT target's integer output.
+  uint_info.target_output_mode[0] = 9;
+  auto raw_uint_result = RecompileForTest(partial_shader, options);
+  const auto raw_uint_source = DisassembleSpirvBinary(raw_uint_result.spirv);
+  Check(raw_uint_source.find("OpVariable %_ptr_Output_v4uint Output") != std::string::npos &&
+            raw_uint_source.find("OpBitcast %v4float") == std::string::npos,
+        "32-bit MRT export to a UINT target did not use an unsigned integer output");
+  CheckSpirvBinaryValidates(raw_uint_result.spirv);
 
   unorm16_info.target_output_mode[0] = 5;
   options.input_info.pixel = &unorm16_info;
@@ -13889,7 +13998,7 @@ void TestAutomaticObjectPrimitiveId() {
             PushData::GraphicsDrawDwords(true, false) == PushData::MeshDrawDwordCount,
         "graphics draw data reserved an incorrect prefix");
   for (const uint32_t start : {prefix, PushData::DwordCount}) {
-    const auto result = RecompileForTest(shader, options, nullptr, nullptr, start);
+    const auto result = RecompileForTest(shader, options, start);
     Check(result.program.bindings.UsesPushData() == (start == prefix),
           "object ID changed shader-data push/spill selection");
     Check(std::ranges::any_of(result.program.info.outputs, [](const StageOutput& output) {
@@ -13906,7 +14015,7 @@ void TestAutomaticObjectPrimitiveId() {
   }
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
   pixel.target_shader_mask = 0xf0000000u;
-  ExpectFatal([&] { (void)RecompileForTest(shader, options, nullptr, nullptr, prefix); },
+  ExpectFatal([&] { (void)RecompileForTest(shader, options, prefix); },
               "automatic RT7 silently overlapped an explicit MRT7 export");
 #endif
 }
@@ -14554,33 +14663,6 @@ void CheckFlattenedReadSlots(const ShaderRecompiler::IR::Program &program,
   }
 }
 
-bool ReadSrtHostDword(void *, uint64_t address, std::span<uint32_t> values) {
-  if (address == 0 || values.empty()) {
-    return false;
-  }
-  std::memcpy(values.data(), reinterpret_cast<const void *>(address), values.size_bytes());
-  return true;
-}
-
-struct SrtHostRange {
-  const uint32_t *data;
-  size_t count;
-};
-
-bool ReadSrtHostRangeDword(void *userdata, uint64_t address, std::span<uint32_t> values) {
-  const auto *range = static_cast<const SrtHostRange *>(userdata);
-  if (range == nullptr || range->data == nullptr || range->count == 0 || values.empty()) {
-    return false;
-  }
-  const auto base = reinterpret_cast<uint64_t>(range->data);
-  const auto size = range->count * sizeof(uint32_t);
-  if (address < base || values.size_bytes() > size || address - base > size - values.size_bytes()) {
-    return false;
-  }
-  std::memcpy(values.data(), reinterpret_cast<const void *>(address), values.size_bytes());
-  return true;
-}
-
 void TestTypedDescriptorRealWideMoveTranslation() {
   const uint32_t shader[] = {
       EncodeSop1(0x04, 0, 20), // s_mov_b64 s[0:1], s[20:21]
@@ -14646,7 +14728,7 @@ void TestComputeImageFill() {
   options.input_info.compute = &compute;
   options.user_data = userdata;
   enum class Mutation { None, Offset, WrongAxis, VaryingValue, Predicate, ExtraStore, A16 };
-  const auto Run = [&](Mutation mutation, bool clean = true) {
+  const auto Run = [&](Mutation mutation) {
     auto translated = ShaderRecompiler::TranslateProgram(shader, options);
     auto &program = translated.program;
     for (auto *block : program.blocks) {
@@ -14683,13 +14765,11 @@ void TestComputeImageFill() {
     auto plan = ExtractResourcePlan(program);
     ResourceSnapshot snapshot;
     ResourceSpecialization specialization;
-    Check(MaterializeResources(plan,
-              {.user_data = userdata, .read_memory = ReadHostTestMemory,
-               .read_specialization_memory = clean ? ReadHostTestMemory : nullptr},
-              snapshot, specialization),
+    // The fill value is a walker load, so it needs no specialization memory reader.
+    Check(MaterializeResources(plan, {.user_data = userdata}, snapshot, specialization),
           "captured stencil clear did not materialize");
     const auto &fill = snapshot.uniform_fill;
-    const bool expected = mutation == Mutation::None && clean;
+    const bool expected = mutation == Mutation::None;
     Check((fill.kind == UniformFillKind::Image) == expected,
           "image fill proof accepted an unsafe store or missed the captured clear");
     if (expected) {
@@ -14699,7 +14779,6 @@ void TestComputeImageFill() {
     }
   };
   Run(Mutation::None);
-  Run(Mutation::None, false);
   for (const auto mutation : {Mutation::Offset, Mutation::WrongAxis, Mutation::VaryingValue,
                               Mutation::Predicate, Mutation::ExtraStore, Mutation::A16})
     Run(mutation);
@@ -14900,27 +14979,22 @@ void TestGpuProducedWritableDescriptor() {
         "native GPU-built writable descriptor acquired an unnecessary alias proof");
   struct Reads {
     std::array<uint32_t, 3> header{0x26c0u, 0u, 151u};
-    uint32_t ordinary = 0;
-    uint32_t strict = 0;
+    uint32_t count = 0;
   } reads;
-  const SrtRuntime runtime{
-      .user_data = user_data,
-      .read_memory = +[](void *data, uint64_t address, std::span<uint32_t> words) {
-        if (words.size() != 1) return false;
+  FakeGuestMemory fake(+[](void *data, uint64_t address, std::span<uint32_t> words) {
         auto &reads = *static_cast<Reads *>(data);
-        const uint32_t index = address == 0x300315028ull ? 0u
-                             : address == 0x30031502cull ? 1u
-                             : address == 0x300315074ull ? 2u : 3u;
-        if (index == 3u) return false;
-        ++reads.ordinary;
+        uint32_t index = 0;
+        switch (address) {
+        case 0x300315028ull: index = 0u; break;
+        case 0x30031502cull: index = 1u; break;
+        case 0x300315074ull: index = 2u; break;
+        default: return false;
+        }
+        ++reads.count;
         words[0] = reads.header[index];
         return true;
-      },
-      .userdata = &reads,
-      .read_specialization_memory = +[](void *data, uint64_t, std::span<uint32_t>) {
-        ++static_cast<Reads *>(data)->strict;
-        return false; // Current GPU bytes are available only through the ordinary reader.
-      }};
+      }, &reads);
+  const SrtRuntime runtime{.user_data = user_data};
   ResourceSnapshot snapshot;
   ResourceSpecialization specialization;
   const auto check = [&](uint32_t low, uint32_t high, uint32_t count, uint32_t reads_expected) {
@@ -14931,8 +15005,7 @@ void TestGpuProducedWritableDescriptor() {
               snapshot.buffers[0].dwords[1] == high &&
               snapshot.buffers[0].dwords[2] == count &&
               snapshot.buffers[0].dwords[3] == 0x16204u &&
-              snapshot.specialization_reads.empty() && reads.strict == 0 &&
-              reads.ordinary == reads_expected,
+              snapshot.specialization_reads.empty() && reads.count == reads_expected,
           "GPU-produced descriptor lost current scalar data or repeated its reads");
   };
   check(0x003176c0u, 0x00800003u, 151u, 3u);
@@ -14994,25 +15067,29 @@ void TestUniformSelectedWritableDescriptor() {
   auto plan = ExtractResourcePlan(translated.program);
   Check(plan.info.buffers.size() == 1 && plan.info.buffers[0].written,
         "uniform address selection lost its writable buffer");
-  const auto read = +[](void *data, uint64_t address, std::span<uint32_t> words) {
-    const bool alternate = *static_cast<uint32_t *>(data) == 0;
-    if (words.size() != 1) return false;
+  // An unavailable read would complete as zero, so the reader counts them.
+  struct Memory { const uint32_t *flag; uint32_t unavailable = 0; } memory{&user_data[2]};
+  FakeGuestMemory fake(+[](void *data, uint64_t address, std::span<uint32_t> words) {
+    auto &memory = *static_cast<Memory *>(data);
+    const bool alternate = *memory.flag == 0;
+    bool available = false;
     switch (address) {
-    case 0x1040: words[0] = 8u; return alternate;
-    case 0x1044: words[0] = 1u; return alternate;
-    case 0x1080: words[0] = 3u; return !alternate;
-    case 0x109c: words[0] = 2u; return !alternate;
-    case 0x1084: words[0] = 10u; return true;
-    default: return false;
+    case 0x1040: words[0] = 8u; available = alternate; break;
+    case 0x1044: words[0] = 1u; available = alternate; break;
+    case 0x1080: words[0] = 3u; available = !alternate; break;
+    case 0x109c: words[0] = 2u; available = !alternate; break;
+    case 0x1084: words[0] = 10u; available = true; break;
+    default: break;
     }
-  };
-  const SrtRuntime runtime{.user_data = user_data, .read_memory = read,
-                           .userdata = &user_data[2], .read_specialization_memory = read};
+    memory.unavailable += !available;
+    return available;
+  }, &memory);
+  const SrtRuntime runtime{.user_data = user_data};
   ResourceSnapshot snapshot;
   ResourceSpecialization specialization;
   for (const uint32_t flag : {1u, 0u, 1u}) {
     user_data[2] = flag;
-    Check(MaterializeResources(plan, runtime, snapshot, specialization),
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) && memory.unavailable == 0,
           "uniform selection evaluated an unavailable untaken scalar source");
     const auto &descriptor = snapshot.buffers[0].dwords;
     Check(descriptor[0] == (flag ? 0xe0u : 4u) &&
@@ -15042,18 +15119,16 @@ void TestUniformSelectedDescriptorLoadAddress() {
   Check(plan.srt_reads.size() == 4u && plan.info.buffers.size() == 1u &&
             plan.info.buffers[0].written && !plan.capture_specialization_reads,
         "conditional scalar address duplicated or detached descriptor reads");
-  const auto read = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+  FakeGuestMemory fake(+[](void *data, uint64_t address, std::span<uint32_t> words) {
     const auto flag = *static_cast<uint32_t *>(data);
     const uint64_t base = flag ? 0x2000u : 0x1000u;
     const std::array<uint32_t, 4> descriptor{0x3000u + flag * 0x1000u,
                                             4u << 16u, 16u, 0x16204u};
-    if (words.size() != 1u || address < base || address >= base + 16u ||
-        (address & 3u) != 0u) return false;
+    if (address < base || address >= base + 16u || (address & 3u) != 0u) return false;
     words[0] = descriptor[(address - base) / 4u];
     return true;
-  };
-  const SrtRuntime runtime{.user_data = user_data, .read_memory = read,
-                           .userdata = &user_data[0]};
+  }, &user_data[0]);
+  const SrtRuntime runtime{.user_data = user_data};
   ResourceSnapshot snapshot;
   ResourceSpecialization specialization;
   for (const uint32_t flag : {0u, 1u, 0u}) {
@@ -15123,7 +15198,7 @@ void TestBoundedScalarMaterialImageKeys() {
     uint32_t stride = 160;
     uint32_t records = 409;
     uint64_t unavailable = 0;
-    bool clean = true;
+    bool readable = true;
     bool mixed = false;
     bool same_key = false;
     uint32_t key_reads = 0;
@@ -15131,7 +15206,7 @@ void TestBoundedScalarMaterialImageKeys() {
   } memory;
   const auto read = +[](void *data, uint64_t address, std::span<uint32_t> words) {
     auto &m = *static_cast<Memory *>(data);
-    if (!m.clean || (m.unavailable >= address &&
+    if (!m.readable || (m.unavailable >= address &&
         m.unavailable - address < words.size_bytes())) return false;
     if (words.size() == 1 && address >= 0x10a0u && address < 0x10c0u) {
       const uint32_t descriptors[] = {0x2000u, m.stride << 16u, m.records, 0x5204u,
@@ -15166,6 +15241,7 @@ void TestBoundedScalarMaterialImageKeys() {
     }
     return false;
   };
+  FakeGuestMemory fake(read, &memory);
   const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
                            .read_specialization_memory = read};
   ResourceSnapshot snapshot;
@@ -15203,9 +15279,11 @@ void TestBoundedScalarMaterialImageKeys() {
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
             memory.key_reads == 0 && memory.images == 0 && snapshot.images.size() == 2,
         "empty scalar material loop retained image probes");
-  memory = {.clean = false};
-  Check(!MaterializeResources(plan, runtime, snapshot, specialization),
-        "dirty scalar material proof was accepted");
+  // Unreadable descriptor and count reads are zero, which leaves the loop empty.
+  memory = {.readable = false};
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            memory.key_reads == 0 && memory.images == 0 && snapshot.images.size() == 2,
+        "unreadable scalar material count did not read as zero");
   for (const uint64_t unavailable : {0x2094u, 0x211cu}) {
     memory = {.unavailable = unavailable};
     Check(!MaterializeResources(plan, runtime, snapshot, specialization),
@@ -15283,12 +15361,14 @@ void TestTypedDescriptorRealCarryAndScalarLoads() {
   std::array<uint32_t, 64> carry_user_data{};
   const uint64_t shader_base = 0x00000012fffffffbull;
   const uint64_t expected_pc = shader_base + 5u;
-  ShaderRecompiler::IR::SrtRuntime carry_runtime{carry_user_data, shader_base,
-                                                 nullptr, nullptr};
-  ShaderRecompiler::IR::DescriptorValue carry_value;
-  Check(ShaderRecompiler::IR::SrtWalker(ShaderRecompiler::IR::ExtractResourcePlan(carry_ir), carry_runtime).EvaluateDescriptor(carry_source_index, carry_value) &&
-            carry_value.dwords[0] == static_cast<uint32_t>(expected_pc) &&
-            carry_value.dwords[1] == static_cast<uint32_t>(expected_pc >> 32u),
+  const ShaderRecompiler::IR::SrtRuntime carry_runtime{carry_user_data, shader_base};
+  auto carry_plan = ShaderRecompiler::IR::ExtractResourcePlan(carry_ir);
+  const auto &carry_words = carry_plan.descriptor_sources[carry_source_index].dwords;
+  uint32_t carry_low = 0, carry_high = 0;
+  Check(EvaluateSrtValue(carry_plan, carry_runtime, carry_words[0], carry_low) &&
+            EvaluateSrtValue(carry_plan, carry_runtime, carry_words[1], carry_high) &&
+            carry_low == static_cast<uint32_t>(expected_pc) &&
+            carry_high == static_cast<uint32_t>(expected_pc >> 32u),
         "S_GETPC shader-base or add/addc carry evaluation was incorrect");
 
   const uint32_t load_shader[] = {
@@ -15350,19 +15430,21 @@ void TestTypedDescriptorRealCarryAndScalarLoads() {
   BuildTypedPlan(inline_sampler_shader,
                  static_cast<uint32_t>(std::size(inline_sampler_shader)),
                  inline_sampler_ir);
+  // The walk also reads the sampled image's user-data descriptor.
+  auto user_data = ImageTestUserData();
   ShaderRecompiler::IR::DescriptorValue sampler;
-  ShaderRecompiler::IR::SrtRuntime runtime;
+  const ShaderRecompiler::IR::SrtRuntime runtime{user_data};
   Check(inline_sampler_ir.info.samplers.size() == 1 &&
             TypedDescriptorSource(inline_sampler_ir,
                                   inline_sampler_ir.info.samplers[0].source) !=
                 nullptr &&
-            ShaderRecompiler::IR::SrtWalker(ShaderRecompiler::IR::ExtractResourcePlan(inline_sampler_ir), runtime).EvaluateDescriptor(inline_sampler_ir.info.samplers[0].source, sampler) &&
+            EvaluateSrtDescriptor(ShaderRecompiler::IR::ExtractResourcePlan(inline_sampler_ir), runtime,
+                                  inline_sampler_ir.info.samplers[0].source, sampler) &&
             sampler.dwords[0] == 0 && sampler.dwords[1] == 0x00fff000u &&
             sampler.dwords[2] == 0x09500000u && sampler.dwords[3] == 0,
         "real inline sampler construction was unresolved or evaluated "
         "incorrectly");
 
-  auto user_data = ImageTestUserData();
   auto options = MakeCompileOptions(ShaderType::Pixel);
   options.user_data = user_data;
   auto result = RecompileForTest(inline_sampler_shader, options);
@@ -15390,9 +15472,8 @@ void TestSrtWalkerRealSmemTranslation() {
   user_data[8] = static_cast<uint32_t>(address);
   user_data[9] = static_cast<uint32_t>(address >> 32u);
   std::vector<uint32_t> flat;
-  const ShaderRecompiler::IR::SrtRuntime runtime{user_data, 0, ReadSrtHostDword,
-                                                 nullptr};
-  const auto walked = ShaderRecompiler::IR::SrtWalker(ShaderRecompiler::IR::ExtractResourcePlan(ir), runtime).RefreshFlatBuffer(flat);
+  const ShaderRecompiler::IR::SrtRuntime runtime{user_data};
+  const auto walked = ShaderRecompiler::IR::WalkSrt(ShaderRecompiler::IR::ExtractResourcePlan(ir), runtime, flat, nullptr);
   Check(walked, "SRT walk failed");
   Check(flat.size() == table.size() &&
             std::equal(flat.begin(), flat.end(), table.begin()),
@@ -15418,10 +15499,9 @@ void TestSrtWalkerVccBaseTranslation() {
   const auto address = reinterpret_cast<uint64_t>(table.data());
   user_data[27] = static_cast<uint32_t>(address);
   user_data[28] = static_cast<uint32_t>(address >> 32u);
-  const ShaderRecompiler::IR::SrtRuntime runtime{user_data, 0, ReadSrtHostDword,
-                                                 nullptr};
+  const ShaderRecompiler::IR::SrtRuntime runtime{user_data};
   std::vector<uint32_t> flat;
-  Check(ShaderRecompiler::IR::SrtWalker(ShaderRecompiler::IR::ExtractResourcePlan(ir), runtime).RefreshFlatBuffer(flat), "SRT walk failed");
+  Check(ShaderRecompiler::IR::WalkSrt(ShaderRecompiler::IR::ExtractResourcePlan(ir), runtime, flat, nullptr), "SRT walk failed");
   Check(flat.size() == table.size() &&
             std::equal(flat.begin(), flat.end(), table.begin()),
         "typed SSA lost an SMEM base copied through VCC");
@@ -15447,17 +15527,16 @@ void TestSrtWalkerRealSBufferTranslation() {
   user_data[9] = static_cast<uint32_t>(address >> 32u);
   user_data[10] = sizeof(table);
   std::vector<uint32_t> flat;
-  const ShaderRecompiler::IR::SrtRuntime runtime{user_data, 0, ReadSrtHostDword,
-                                                 nullptr};
+  const ShaderRecompiler::IR::SrtRuntime runtime{user_data};
   const auto plan = ShaderRecompiler::IR::ExtractResourcePlan(ir);
-  const auto walked = ShaderRecompiler::IR::SrtWalker(plan, runtime).RefreshFlatBuffer(flat);
+  const auto walked = ShaderRecompiler::IR::WalkSrt(plan, runtime, flat, nullptr);
   Check(walked, "SRT walk failed");
   Check(flat.size() == 4 &&
             std::equal(flat.begin(), flat.end(), table.begin()),
         "real S_BUFFER_LOAD walk did not align offset components independently");
 
   user_data[10] = 3 * sizeof(uint32_t);
-  const auto bounds_walked = ShaderRecompiler::IR::SrtWalker(plan, runtime).RefreshFlatBuffer(flat);
+  const auto bounds_walked = ShaderRecompiler::IR::WalkSrt(plan, runtime, flat, nullptr);
   Check(bounds_walked && flat == std::vector<uint32_t>{table[0], table[1], table[2], 0u},
         "real S_BUFFER_LOAD walk did not zero only the out-of-bounds DWORD");
   CheckFlattenedReadSlots(
@@ -15473,7 +15552,7 @@ void TestSrtWalkerRealSBufferTranslation() {
                  static_cast<uint32_t>(std::size(negative_shader)),
                  negative_ir);
   user_data[10] = sizeof(table);
-  Check(!ShaderRecompiler::IR::SrtWalker(ShaderRecompiler::IR::ExtractResourcePlan(negative_ir), runtime).RefreshFlatBuffer(flat),
+  Check(!ShaderRecompiler::IR::WalkSrt(ShaderRecompiler::IR::ExtractResourcePlan(negative_ir), runtime, flat, nullptr),
         "real S_BUFFER_LOAD walk accepted a negative immediate");
 }
 
@@ -15508,11 +15587,9 @@ void TestScalarMemorySourcesCapturedBeforeWrites() {
     if (opcode == 0x0a) {
       user_data[base + 2u] = sizeof(table);
     }
-    SrtHostRange range{table.data(), table.size()};
-    const ShaderRecompiler::IR::SrtRuntime runtime{
-        user_data, 0, ReadSrtHostRangeDword, &range};
+    const ShaderRecompiler::IR::SrtRuntime runtime{user_data};
     std::vector<uint32_t> flat;
-    Check(ShaderRecompiler::IR::SrtWalker(ShaderRecompiler::IR::ExtractResourcePlan(ir), runtime).RefreshFlatBuffer(flat), "SRT walk failed");
+    Check(ShaderRecompiler::IR::WalkSrt(ShaderRecompiler::IR::ExtractResourcePlan(ir), runtime, flat, nullptr), "SRT walk failed");
     Check(flat.size() == table.size() &&
               std::equal(flat.begin(), flat.end(), table.begin()),
           "overlapping scalar-memory load did not capture its sources before "
@@ -15887,13 +15964,12 @@ void TestComputeLdsAllocationIdentity() {
   ShaderMappedData mapped{};
   mapped.code_size_bytes = sizeof(shader);
   ShaderMapUserData(regs.cs_regs.data_addr, mapped);
-  HW::ShaderRegisters sh{};
 
   const auto compile = [&](uint16_t encoded_lds_size,
                            uint32_t expected_dwords) {
     regs.cs_regs.lds_size = encoded_lds_size;
     ShaderComputeInputInfo input_info{};
-    const auto params = PrepareProgram(regs, sh, input_info);
+    const auto params = PrepareProgram(regs, input_info);
     Check(input_info.lds_size_dwords == expected_dwords,
           "COMPUTE_PGM_RSRC2 LDS allocation units were not decoded");
     auto options = MakeCompileOptions(ShaderType::Compute);
@@ -15959,7 +16035,7 @@ void TestComputeLdsAllocationIdentity() {
   ShaderMapUserData(regs.cs_regs.data_addr, mapped);
   regs.cs_regs.lds_size = decode_lds_field(lds_896_rsrc2);
   ShaderComputeInputInfo scratch_info{};
-  const auto scratch_params = PrepareProgram(regs, sh, scratch_info);
+  const auto scratch_params = PrepareProgram(regs, scratch_info);
   Check(scratch_info.scratch_size_dwords == 7,
         "AGC per-thread scratch size was not propagated");
   auto scratch_options = MakeCompileOptions(ShaderType::Compute);
@@ -16025,8 +16101,8 @@ void TestPixelProgramCacheBindingIdentity() {
         first_params.hash == XXH3_64bits(shader.data(), shader.size_bytes()) &&
             first_params.hash == second_params.hash &&
             first_key == MakeStageStaticKey(second_info) &&
-            first_info.stage.program != nullptr &&
-            second_info.stage.program != nullptr,
+            first_info.stage.module != nullptr &&
+            second_info.stage.module != nullptr,
         "pixel program matching did not preserve an identical source/static identity");
     return std::pair {first_params.hash, first_key};
   };
@@ -16072,7 +16148,7 @@ void TestGraphicsPushConstantPlacement() {
 
   constexpr uint32_t PushDataStart = 7;
   auto placed =
-      RecompileForTest(shader, options, nullptr, nullptr, PushDataStart);
+      RecompileForTest(shader, options, PushDataStart);
   Check(placed.program.bindings.UsesPushData() &&
             placed.program.bindings.push_data_start_dword == PushDataStart &&
             placed.program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] == 0,
@@ -16081,7 +16157,7 @@ void TestGraphicsPushConstantPlacement() {
         "SPIR-V push-data block did not use the canonical zero base");
   CheckSpirvBinaryValidates(placed.spirv);
 
-  auto exact = RecompileForTest(shader, options, nullptr, nullptr, 28);
+  auto exact = RecompileForTest(shader, options, 28);
   Check(exact.program.bindings.UsesPushData() &&
             exact.program.bindings.push_data_start_dword == 28 &&
             exact.program.bindings.ShaderDataDwords() == 4,
@@ -16091,8 +16167,8 @@ void TestGraphicsPushConstantPlacement() {
   Check(cursor == 32, "exact-fit shader data advanced the cursor incorrectly");
   CheckSpirvBinaryValidates(exact.spirv);
 
-  auto spill = RecompileForTest(shader, options, nullptr, nullptr, 29);
-  auto full = RecompileForTest(shader, options, nullptr, nullptr, 32);
+  auto spill = RecompileForTest(shader, options, 29);
+  auto full = RecompileForTest(shader, options, 32);
   Check(!spill.program.bindings.UsesPushData() &&
             spill.program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] == 1 &&
             spill.program.bindings == full.program.bindings && spill.spirv == full.spirv,
@@ -16642,7 +16718,6 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
                                     .variables = 2,
                                     .loads = 9,
                                     .stores = 4,
-                                    .array_lengths = 2,
                                     .phis = 5,
                                     .labels = 34,
                                     .selection_merges = 10,
@@ -16843,7 +16918,7 @@ int main() {
   TestNewShaderRecompilerNativeWideBufferIr();
   TestNewShaderRecompilerScalarB64LaneTranslation();
   TestNewShaderRecompilerMubufFormatTranslation();
-  TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly();
+  TestNewShaderRecompilerFormattedStoreUsesRuntimeBindingSizeOnly();
   TestNewShaderRecompilerTypedBufferTranslation();
   TestNewShaderRecompilerDsReadWrite2Translation();
   TestNewShaderRecompilerDsWideAndAtomicTranslation();
@@ -16916,6 +16991,7 @@ int main() {
   TestNativeGuardedSamplerSource(false);
   TestNativeGuardedSamplerSource(true);
   TestNativeConstantSamplerSelection();
+  TestPackedZeroHighSamplerTableKey();
   for (const bool scalar_key : {false, true}) TestBoundedMaterialBufferStores(scalar_key);
   TestNativeDescriptorProvenanceKeepsGpuSelection();
   TestCfgSiblingSharedExit();

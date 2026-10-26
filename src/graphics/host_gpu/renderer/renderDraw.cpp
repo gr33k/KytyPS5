@@ -1,8 +1,6 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
 
 #include "common/assert.h"
-
-#include <chrono>
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -19,7 +17,6 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
-#include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -61,7 +58,7 @@ std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 	}
 
 	EXIT_IF(!vs_input_info.stage);
-	const auto& program   = *vs_input_info.stage.program;
+	const auto& program   = vs_input_info.stage.module->info;
 	const auto& resources = *vs_input_info.stage.resources;
 	if (index_offset == 0 &&
 	    program.info.vertex_offset_sgpr >= static_cast<int32_t>(program.user_data_base)) {
@@ -82,12 +79,18 @@ std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 	return {vertex_offset, instance_offset};
 }
 
-static std::atomic<uint32_t> g_draw_state_log_count   = 0;
+// ---------------------------------------------------------------------------
+// GTA trilogy composite override
+//
+// The Definitive Edition titles build their frame in a large linear HDR scene
+// target, then run a composite pass into a video-out buffer. When the guest's
+// composite samples a stale/empty texture the screen shows a flat or black
+// image, so that pass samples the freshest rendered scene target instead.
+// ---------------------------------------------------------------------------
 
 // Guest video-out / scanout buffers live at 0x8fc.... in the 40-bit guest
 // address space. The top twelve bits identify them; shifting by 32 is wrong
-// because that yields 0x8f for 0x8fc0000000, so the buffer used to slip
-// through every "skip the video-out target" check.
+// because that yields 0x8f for 0x8fc0000000.
 static constexpr uint64_t kVideoOutAddressMask = 0xFFF0000000ull;
 static constexpr uint64_t kVideoOutAddressBase = 0x8FC0000000ull;
 
@@ -95,10 +98,6 @@ static constexpr uint64_t kVideoOutAddressBase = 0x8FC0000000ull;
 	return (address & kVideoOutAddressMask) == kVideoOutAddressBase;
 }
 
-// Scene-target tracking for the composite override: remember every display-
-// shaped guest colour target that was actually written, together with its
-// format and backing image. The composite then prefers the freshest HDR scene
-// target over the LDR composite-source target (which is often never filled).
 static std::mutex g_scene_target_mutex {};
 struct SceneTargetStats {
 	uint32_t   draws    = 0;
@@ -116,12 +115,6 @@ static std::atomic<uint64_t> g_composite_source_addr {0};
 
 // See render.h: lets the presenter know what a video-out buffer currently holds.
 std::atomic<uint64_t> g_composite_override_tick {0};
-// Tonemap input images learned from the tonemap draw, shared with the compute
-// path so we can find which dispatches (if any) write them.
-namespace KytySceneDiag {
-std::atomic<uint64_t> exposure_addr {0};
-std::atomic<uint64_t> lut_addr {0};
-} // namespace KytySceneDiag
 
 [[nodiscard]] static bool IsHdrSceneFormat(vk::Format format) {
 	switch (format) {
@@ -180,12 +173,6 @@ struct SceneTargetPick {
 	return best;
 }
 
-[[nodiscard]] static SceneTargetStats SceneTargetStatsFor(uint64_t address) {
-	std::lock_guard<std::mutex> lock {g_scene_target_mutex};
-	const auto                  it = g_scene_target_draws.find(address);
-	return it == g_scene_target_draws.end() ? SceneTargetStats {} : it->second;
-}
-
 static void NoteSceneTargetWrite(uint64_t address, const vk::Extent2D& extent,
                                  ImageId image_id, vk::Format format) {
 	// Only large, display-shaped colour targets qualify as scene targets. Skip
@@ -209,32 +196,16 @@ static void NoteSceneTargetWrite(uint64_t address, const vk::Extent2D& extent,
 	stats.last_seq = ++g_scene_target_seq;
 	static std::atomic_uint new_logged {0};
 	if (stats.draws == 1 && new_logged.fetch_add(1, std::memory_order_relaxed) < 100) {
-		LOGF("SceneTargetNew: addr=0x%010" PRIx64 " ext=%ux%u fmt=%s id=%u/%u\n", address,
-		     extent.width, extent.height, vk::to_string(format).c_str(),
-		     image_id.index, image_id.generation);
+		LOGF("SceneTargetNew: addr=0x%010" PRIx64 " ext=%ux%u fmt=%s id=%u\n", address,
+		     extent.width, extent.height, vk::to_string(format).c_str(), image_id.index);
 	}
 }
 
-
+static std::atomic<uint32_t> g_draw_state_log_count   = 0;
 static std::atomic<uint32_t> g_draw_input_log_count   = 0;
 static std::atomic<uint32_t> g_mrt_state_log_count    = 0;
 
 static std::atomic<uint32_t> g_framebuffer_skip_log_count = 0;
-
-// Always-on draw census: indexed vs auto draws, silent skip reasons, and the
-// last completed draw's target. Cheap (one log per 1000 completed draws) so
-// real-game runs stay at full speed while remaining diagnosable.
-static std::atomic<uint64_t> g_census_index_calls   = 0;
-static std::atomic<uint64_t> g_census_auto_calls    = 0;
-static std::atomic<uint64_t> g_census_empty         = 0;
-static std::atomic<uint64_t> g_census_resolved      = 0;
-static std::atomic<uint64_t> g_census_no_vs         = 0;
-static std::atomic<uint64_t> g_census_topology_fail = 0;
-static std::atomic<uint64_t> g_census_state_fail    = 0;
-static std::atomic<uint64_t> g_census_rectlist_skip = 0;
-static std::atomic<uint64_t> g_census_mesh_skip      = 0;
-static std::atomic<uint64_t> g_census_pipeline_null = 0;
-static std::atomic<uint64_t> g_census_complete      = 0;
 
 static float ConvertPolygonOffsetConstantFactor(float guest_factor, const HW::PolyOffset& offset,
                                                 vk::Format host_depth_format) {
@@ -339,19 +310,8 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 		return;
 	}
 
-	// Always log draws into the screen/video-out region so the final composite
-	// (scene -> present buffer) can be diagnosed regardless of sample rate.
-	const bool screen_target = IsVideoOutAddress(color.desc.info.data.address);
 	auto log_id = g_draw_state_log_count.fetch_add(1);
-	// Log the first draws (boot) under the full debug dump, or periodic samples
-	// when only the lightweight sample switch is on: the first 192 only ever
-	// show loading/menu draws, never the 3D scene, so a black world cannot be
-	// diagnosed from them.
-	if (graphics_debug_dump_enabled()) {
-		if (log_id >= 192u && !screen_target) {
-			return;
-		}
-	} else if (!screen_target && !((log_id % 20000u) == 0u && log_id < 20000u * 200u)) {
+	if (log_id >= 192) {
 		return;
 	}
 
@@ -360,7 +320,7 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	const auto& dc             = ctx.GetDepthControl();
 	const auto& vp             = ctx.GetScreenViewport();
 	const auto& vp0            = vp.viewports[0];
-	const auto& ps_resources   = ps_input_info.stage.program->info;
+	const auto& ps_resources   = ps_input_info.stage.module->info.info;
 	const auto  sampled_images = std::count_if(
 	    ps_resources.images.begin(), ps_resources.images.end(), [](const auto& image) {
 		    return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled;
@@ -374,8 +334,7 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	    " extent=%ux%u prim=%u index_count=%u flags=0x%08" PRIx32 " color_mask=0x%08" PRIx32
 	    " cc_mode=%u cc_op=0x%02x"
 	    " blend=%s src=%u dst=%u comb=%u ps_tex=%d sampled=%d storage=%d ps_kill=%s target_mode0=%u"
-	    " depth_test=%s depth_write=%s depth_func=%u depth_clear=%s depth_bound=%s"
-	    " depth_cmp=%u depth_clear_val=%.2f viewport=(%.1f,%.1f %.1fx%.1f) "
+	    " depth_test=%s depth_write=%s depth_func=%u depth_clear=%s viewport=(%.1f,%.1f %.1fx%.1f) "
 	    "scissor=(%d,%d)-(%d,%d)\n",
 	    log_id, buffer.GetContext().GetGpu().GetFrameNum(), draw_name, RenderColorTypeName(color),
 	    color.desc.info.data.address, extent.width, extent.height,
@@ -386,9 +345,7 @@ static void LogDrawTargetState(const char* draw_name, const RenderColorInfo& col
 	    static_cast<int>(ps_resources.images.size() - sampled_images),
 	    ps_input_info.ps_pixel_kill_enable ? "true" : "false", ps_input_info.target_output_mode[0],
 	    dc.z_enable ? "true" : "false", dc.z_write_enable ? "true" : "false", dc.zfunc,
-	    depth.depth_clear_enable ? "true" : "false", depth.image_id ? "true" : "false",
-	    static_cast<uint32_t>(depth.depth_compare_op),
-	    static_cast<double>(depth.depth_clear_value), vp0.xoffset - vp0.xscale,
+	    depth.depth_clear_enable ? "true" : "false", vp0.xoffset - vp0.xscale,
 	    vp0.yoffset - vp0.yscale, vp0.xscale * 2.0f, vp0.yscale * 2.0f, sc.left, sc.top, sc.right,
 	    sc.bottom);
 
@@ -478,17 +435,15 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 	}
 }
 
-
 static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState& dynamic_state,
                                        const ShaderVertexInputInfo& vs_input_info,
                                        const RenderDepthInfo& depth, const RenderState& rendering) {
-
 	KYTY_PROFILER_FUNCTION();
 
 	const auto& ctx = buffer.GetRegisters();
 	const auto&        vp  = ctx.GetScreenViewport();
 	const vk::Extent2D framebuffer_extent {rendering.width, rendering.height};
-	const auto& outputs = vs_input_info.stage.program->info.outputs;
+	const auto& outputs = vs_input_info.stage.module->info.info.outputs;
 	const bool  indexed_viewports =
 	    std::any_of(outputs.begin(), outputs.end(), [](const auto& output) {
 		    return output.kind == ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
@@ -586,13 +541,11 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 	// MoltenVK has no VK_EXT_color_write_enable; the pipeline is created without the
 	// eColorWriteEnableEXT dynamic state and relies on the static colorWriteMask instead.
 #else
-
 	vk::Bool32 enable[RENDER_COLOR_ATTACHMENTS_MAX] = {};
 	for (uint32_t slot = 0; slot < rendering.num_color_attachments; slot++) {
 		enable[slot] = rendering.color_attachments[slot].image_view != nullptr;
 	}
 	dynamic_state.SetColorWriteEnables(std::span {enable}.first(rendering.num_color_attachments));
-
 #endif
 }
 
@@ -601,22 +554,6 @@ static bool DrawHasValidVertexShader(const HW::Shader& sh_ctx) {
 	const auto& vs = sh_ctx.GetVs();
 	return vs.es_regs.data_addr != 0;
 }
-
-static bool PixelShaderHasDepthOrCoverageSideEffects(const HW::ShaderRegisters& sh_regs) {
-	const auto& db = sh_regs.db_shader_control;
-	return db.shader_kill_enable || db.shader_z_export_enable || db.shader_mask_export_enable ||
-	       db.shader_dual_export_enable || db.shader_execute_on_noop || sh_regs.AlphaToMask();
-}
-
-struct DrawRenderState {
-	RenderDepthInfo       depth_info;
-	RenderColorInfo       color_info[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	uint32_t              color_count                              = 0;
-	bool                  ps_active                                = true;
-	std::array<ShaderVertexInputInfo, 3> vertex_info;
-	ShaderPixelInputInfo  ps_input_info;
-	PipelineCache::GraphicsPrograms programs;
-};
 
 struct DrawCallInfo {
 	CommandBufferDebugOp debug_op       = CommandBufferDebugOp::DrawIndex;
@@ -643,9 +580,8 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 	for (uint32_t i = 0; i < color_count; i++) {
 		auto& target = colors[i];
 		EXIT_IF(!target.image_id);
-		const auto owner = cache.m_slot_images.try_get(target.image_id);
-		if (owner == nullptr || (!owner->registered && !owner->info.data.Empty()) ||
-		    owner->binding.needs_rebind) {
+		const auto& owner = cache.m_slot_images[target.image_id];
+		if ((!owner.registered && !owner.info.data.Empty()) || owner.binding.needs_rebind) {
 			EXIT("color target changed after render-state discovery\n");
 		}
 		const auto image_view = cache.FindRenderTarget(target.image_id, target.desc);
@@ -674,8 +610,8 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		attachment.image_layout = layout;
 	}
 	if (depth.image_id) {
-		const auto owner = cache.m_slot_images.try_get(depth.image_id);
-		if (owner == nullptr || !owner->registered || owner->binding.needs_rebind) {
+		const auto& owner = cache.m_slot_images[depth.image_id];
+		if (!owner.registered || owner.binding.needs_rebind) {
 			EXIT("depth target changed after render-state discovery\n");
 		}
 		const auto  image_view = cache.FindDepthTarget(depth.image_id, depth.desc);
@@ -710,15 +646,9 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 			}
 		}
 		if (feedback_aspects && !m_context.GetGraphics().attachment_feedback_loop_enabled) {
-			// No host feedback-loop support (e.g. older AMD drivers): fall back to
-			// General layout and continue. Sampling a depth attachment that is
-			// also bound for writing is racy without the extension, so depth
-			// reads in these draws may be stale; that beats aborting the game.
-			static std::atomic_uint feedback_log = 0;
-			if (feedback_log.fetch_add(1, std::memory_order_relaxed) < 4) {
-				LOGF("Render: depth feedback loop unsupported by host; continuing "
-				     "with General layout (aspects=0x%x)\n",
-				     static_cast<uint32_t>(feedback_aspects));
+			static std::atomic_bool logged = false;
+			if (!logged.exchange(true, std::memory_order_relaxed)) {
+				std::printf("depth attachment feedback loop is not supported by the host\n");
 			}
 		}
 		auto layout = depth_attachment_layout(depth);
@@ -765,23 +695,6 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 	        state.width == std::numeric_limits<uint32_t>::max() ||
 	        state.height == std::numeric_limits<uint32_t>::max());
 	return state;
-}
-
-static uint32_t DrawColorOutputMask(const HW::Context& ctx) {
-	const auto& sh_regs     = ctx.GetShaderRegisters();
-	const auto  write_mask  = ctx.GetRenderTargetMask() & sh_regs.m_cbShaderMask;
-	uint32_t    output_mask = ctx.HasObjectPrimitiveIdOutput() ? 1u << 7u : 0;
-	for (uint32_t index = 0; index < RENDER_COLOR_ATTACHMENTS_MAX; index++) {
-		const auto slot = ShaderPixelExportTarget(sh_regs.m_cbShaderMask, index);
-		if (slot >= RENDER_COLOR_ATTACHMENTS_MAX) {
-			break;
-		}
-		if (sh_regs.target_output_mode[index] != 0 &&
-		    render_target_mask_slot(write_mask, slot) != 0) {
-			output_mask |= 1u << slot;
-		}
-	}
-	return output_mask;
 }
 
 enum class CbColorMode : uint8_t {
@@ -1048,67 +961,24 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	return false;
 }
 
-static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
-                           uint32_t color_output_mask, DrawRenderState& state) {
-	auto& ctx    = buffer.GetRegisters();
-	auto& sh_ctx = buffer.GetShaders();
-
-	const auto& vertex_shader_info = sh_ctx.GetVs();
-	const auto& pixel_shader_info  = sh_ctx.GetPs();
-	const auto& shader_regs        = ctx.GetShaderRegisters();
-
-	state.programs      = {};
-	state.ps_input_info = {};
-	std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX>
-	    target_export_mapping {};
-	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
-		const auto& rt = ctx.GetRenderTarget(slot);
-		if ((color_output_mask & (1u << slot)) != 0 && rt.base.addr != 0) {
-			target_export_mapping[slot] =
-			    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
-			                                 rt.info.channel_order)
-			        .export_mapping;
-		}
-	}
-	auto& pipeline_cache = buffer.GetContext().GetPipelineCache();
-	buffer.GetContext().GetImageHeap().BeginDraw();
-	if (draw.IsIndexed()) {
-		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
-	}
-	state.programs = pipeline_cache.GetGraphicsPrograms(
-	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info);
-}
-
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
 	                                        DrawRenderState& state) {
-	const auto& shader_regs       = buffer.GetRegisters().GetShaderRegisters();
-	const auto  color_output_mask = DrawColorOutputMask(buffer.GetRegisters());
-	state.ps_active = buffer.GetShaders().GetPs().ps_regs.data_addr != 0 &&
-	                  (color_output_mask != 0 ||
-	                   PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
-	RefreshShaders(buffer, draw, color_output_mask, state);
-	if (state.programs.skip_draw) {
-		// Unsupported shader/pipeline (logged at the skip site); the game
-		// continues without this draw. Callers count this via census_state_fail.
+	m_context.GetImageHeap().BeginDraw();
+	if (draw.IsIndexed()) {
+		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
+	}
+	m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	// Vertex programs beyond the host mesh limits or with unsupported call targets are not
+	// compiled.
+	if (state.vertex_info[0].stage.module == nullptr) {
 		return false;
 	}
-	uint32_t mrt_mask = 0;
-	if (state.ps_active) {
-		for (const auto& output: state.ps_input_info.stage.program->info.outputs) {
-			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
-			    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
-				mrt_mask |= 1u << output.location;
-			}
-		}
-	}
-	mrt_mask &= color_output_mask;
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
-		if ((mrt_mask & (1u << slot)) != 0) {
+		if ((state.mrt_mask & (1u << slot)) != 0) {
 			ResolveRenderColorTarget(buffer, state.color_info[state.color_count],
 			                         render_target_slice_offset, slot);
 			if (state.color_info[state.color_count].image_id) {
@@ -1119,10 +989,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderDepthTarget");
 	}
-	if (!ResolveRenderDepthTarget(buffer, state.depth_info)) {
-		// Unrepresentable depth/stencil state (logged at the skip site).
-		return false;
-	}
+	ResolveRenderDepthTarget(buffer, state.depth_info);
 	// TODO(PPSA09243): Vulkan passes take one sample count. Where PS5 attachments mix counts,
 	// keep those matching the raster count instead of resolving multisampled shadows.
 	const auto colors       = std::span {state.color_info, state.color_count};
@@ -1198,44 +1065,8 @@ static void CommitIndexBuffer(vk::CommandBuffer vk_buffer, const PreparedIndexBu
 static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo& draw,
 	                             const DrawRenderState& state, uint32_t index_type_and_size,
                                  const void* index_addr) {
-	// The full debug dump is extremely heavy (it also logs every CP packet), so
-	// the draw-state line has its own switch: env KYTY_DRAW_STATE_SAMPLE=1 logs
-	// one sampled line throughout the run without the rest of the dump.
-	static const bool sample_enabled = std::getenv("KYTY_DRAW_STATE_SAMPLE") != nullptr;
-	if (!graphics_debug_dump_enabled() && !sample_enabled) {
+	if (!graphics_debug_dump_enabled()) {
 		return;
-	}
-
-	// Watch draws into the composite's scene source. This finds the tonemap
-	// pass (which should fill it) and shows what it samples.
-	const uint64_t watch_addr = g_composite_source_addr.load(std::memory_order_relaxed);
-	if (watch_addr != 0 && state.color_count > 0 &&
-	    state.color_info[0].desc.info.data.address == watch_addr) {
-		static std::atomic_uint watch_logged {0};
-		if (watch_logged.fetch_add(1, std::memory_order_relaxed) < 160) {
-			LOGF("WatchDraw: frame=%d %s idx=%u indexed=%d ps=%d colors=%u depth=%d fmt=%s\n",
-			     buffer.GetContext().GetGpu().GetFrameNum(), draw.Name(), draw.index_count,
-			     draw.IsIndexed() ? 1 : 0, state.ps_active ? 1 : 0, state.color_count,
-			     state.depth_info.image_id ? 1 : 0,
-			     vk::to_string(state.color_info[0].desc.info.pixel_format).c_str());
-		}
-	}
-
-	// Watch draws into the tonemap's exposure/LUT inputs (any extent).
-	if (state.color_count > 0) {
-		const uint64_t aux_addr = state.color_info[0].desc.info.data.address;
-		const uint64_t ex_addr  = KytySceneDiag::exposure_addr.load(std::memory_order_relaxed);
-		const uint64_t lu_addr  = KytySceneDiag::lut_addr.load(std::memory_order_relaxed);
-		if (aux_addr != 0 && (aux_addr == ex_addr || aux_addr == lu_addr)) {
-			static std::atomic_uint aux_logged {0};
-			if (aux_logged.fetch_add(1, std::memory_order_relaxed) < 40) {
-				LOGF("AuxDraw: frame=%d %s idx=%u ps=%d addr=0x%010" PRIx64 " ext=%ux%u\n",
-				     buffer.GetContext().GetGpu().GetFrameNum(), draw.Name(),
-				     draw.index_count, state.ps_active ? 1 : 0, aux_addr,
-				     state.color_info[0].desc.info.extent.width,
-				     state.color_info[0].desc.info.extent.height);
-			}
-		}
 	}
 
 	if (!draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
@@ -1249,141 +1080,6 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 	LogDrawInputState(buffer, state.color_info[0], state.vertex_info[0], index_type_and_size,
 	                  draw.index_count, index_addr);
 }
-
-namespace {
-
-// AMD Windows drivers reject valid barycentric fragment pipelines with triangle
-// strips (ErrorUnknown, validation silent) while the same shaders work as lists.
-// Expand strips/fans to lists for barycentric draws on AMD hardware. Winding flips
-// preserve facing; the odd-triangle order preserves the provoking vertex convention.
-constexpr uint32_t kAmdVendorId = 0x1002u;
-
-bool PixelShaderUsesBarycentrics(const DrawRenderState& state) {
-	if (!state.ps_active) {
-		return false;
-	}
-	const auto* program = state.ps_input_info.stage.program;
-	if (program == nullptr) {
-		return false;
-	}
-	using Kind = ShaderRecompiler::IR::StageInputKind;
-	for (const auto& input: program->info.inputs) {
-		if (input.kind == Kind::BaryCoordSmooth || input.kind == Kind::BaryCoordSmoothCentroid ||
-		    input.kind == Kind::BaryCoordNoPerspective) {
-			return true;
-		}
-	}
-	return false;
-}
-
-// Expands a strip/fan index sequence into a triangle list. Returns false when the
-// draw does not need conversion or its indices cannot be read.
-bool ExpandStripDrawToList(std::vector<uint32_t>& out, CommandBuffer& buffer,
-                           vk::PrimitiveTopology topology, const DrawCallInfo& draw,
-                           const DrawEmitInfo& emit, const DrawIndexBufferSource& source,
-                           bool primitive_restart_enable, bool provoking_vtx_last) {
-	if (topology != vk::PrimitiveTopology::eTriangleStrip &&
-	    topology != vk::PrimitiveTopology::eTriangleFan) {
-		return false;
-	}
-	const bool indexed = draw.IsIndexed();
-	const uint32_t count = draw.index_count;
-	if (count < 3u || count > 0x400000u) {
-		return false;
-	}
-	const bool is_strip = topology == vk::PrimitiveTopology::eTriangleStrip;
-
-	std::vector<uint32_t> src;
-	src.reserve(count);
-	if (indexed) {
-		const uint32_t elem_bytes = (source.type == vk::IndexType::eUint32) ? 4u : 2u;
-		if (source.host_data != nullptr) {
-			const auto* bytes = static_cast<const uint8_t*>(source.host_data);
-			for (uint32_t i = 0; i < count; i++) {
-				uint32_t v = 0;
-				std::memcpy(&v, bytes + static_cast<size_t>(i) * elem_bytes, elem_bytes);
-				src.push_back(v);
-			}
-		} else {
-			const uint64_t need = static_cast<uint64_t>(count) * elem_bytes;
-			if (source.size < need) {
-				return false;
-			}
-			std::vector<uint8_t> staging(static_cast<size_t>(need));
-			// Sync GPU-written index data into CPU backing before expanding.
-			if (!Libs::LibKernel::Memory::TryReadBufferBacking(source.address, staging.data(),
-			                                                   staging.size())) {
-				return false;
-			}
-			for (uint32_t i = 0; i < count; i++) {
-				uint32_t v = 0;
-				std::memcpy(&v, staging.data() + static_cast<size_t>(i) * elem_bytes, elem_bytes);
-				src.push_back(v);
-			}
-		}
-	} else {
-		if (emit.vertex_offset > UINT32_MAX - count) {
-			return false;
-		}
-		for (uint32_t i = 0; i < count; i++) {
-			src.push_back(emit.vertex_offset + i);
-		}
-	}
-
-	const bool     use_restart = primitive_restart_enable && indexed;
-	const uint32_t restart =
-	    (source.type == vk::IndexType::eUint32) ? 0xffffffffu : 0xffffu;
-	out.clear();
-	if (!is_strip) {
-		for (uint32_t i = 2; i < count; i++) {
-			const uint32_t a = src[0], b = src[i - 1], c = src[i];
-			if (use_restart && (a == restart || b == restart || c == restart)) {
-				continue;
-			}
-			out.push_back(a);
-			out.push_back(b);
-			out.push_back(c);
-		}
-		return !out.empty();
-	}
-	uint32_t w0 = 0, w1 = 0, have = 0, pos = 0;
-	for (uint32_t i = 0; i < count; i++) {
-		const uint32_t v = src[i];
-		if (use_restart && v == restart) {
-			have = 0;
-			pos  = 0;
-			continue;
-		}
-		if (have < 2) {
-			if (have == 0) {
-				w0 = v;
-			} else {
-				w1 = v;
-			}
-			have++;
-			continue;
-		}
-		if ((pos & 1u) == 0u) {
-			out.push_back(w0);
-			out.push_back(w1);
-			out.push_back(v);
-		} else if (provoking_vtx_last) {
-			out.push_back(w1);
-			out.push_back(w0);
-			out.push_back(v);
-		} else {
-			out.push_back(w0);
-			out.push_back(v);
-			out.push_back(w1);
-		}
-		w0 = w1;
-		w1 = v;
-		pos++;
-	}
-	return !out.empty();
-}
-
-} // namespace
 
 static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_buffer,
                                const DrawCallInfo& draw, const DrawEmitInfo& emit) {
@@ -1450,7 +1146,7 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	if (depth.load_clear_aspects) {
 		m_context.GetCommandScheduler().BeginRendering(rendering);
 	}
-	auto& cache = m_context.GetTextureCache();
+	auto& cache = buffer.GetContext().GetTextureCache();
 	auto& source = cache.GetImage(depth.image_id);
 	auto& destination = cache.GetImage(color.image_id);
 	EXIT_NOT_IMPLEMENTED((source.backing.format != vk::Format::eD32Sfloat &&
@@ -1479,13 +1175,11 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	return true;
 }
 
-// Composite override: force the full-scene color target as texture[0] for draws
-// into the video-out buffer so the rendered 3D world reaches the screen instead
-// of a partial/wrong texture. The scene target address is taken from env
-// KYTY_COMPOSITE_OVERRIDE_FILE (default composite_override.txt), or auto-detected
-// as the large color render target with the most writes. Called after
-// PrepareGraphicsBindings resolved the guest bindings but before CommitBindings,
-// so the override survives to the draw.
+// Composite override: force the freshest rendered scene colour target as
+// texture[0] for draws into the video-out buffer so the 3D world reaches the
+// screen instead of a partial/empty texture. The scene target address is taken
+// from env KYTY_COMPOSITE_OVERRIDE_FILE (default composite_override.txt), or
+// auto-detected as the newest large colour render target of matching shape.
 static uint64_t CompositeOverrideAddress(uint64_t            exclude_address,
                                          const vk::Extent2D& want_extent) {
 	const char* path = std::getenv("KYTY_COMPOSITE_OVERRIDE_FILE");
@@ -1511,10 +1205,8 @@ static uint64_t CompositeOverrideAddress(uint64_t            exclude_address,
 	return PickSceneTarget(exclude_address, want_extent).address;
 }
 
-static void ApplyCompositeOverride(CommandBuffer& buffer,
-                                   const DrawRenderState& state,
-                                   const DrawCallInfo& draw,
-                                   PreparedBindings* pixel_bindings) {
+static void ApplyCompositeOverride(CommandBuffer& buffer, const DrawRenderState& state,
+                                   const DrawCallInfo& draw, PreparedBindings* pixel_bindings) {
 	// Switch for checking whether the substitute is still needed at all:
 	// KYTY_COMPOSITE_OVERRIDE=off leaves the guest's own composite untouched.
 	static const bool disabled = [] {
@@ -1537,93 +1229,33 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 	if (!IsVideoOutAddress(target_addr)) {
 		return;
 	}
-	auto&          tb        = pixel_bindings->images[0];
-	const uint64_t bound_addr = tb.desc.info.data.address;
-	const uint32_t bound_w    = tb.desc.info.extent.width;
-	const uint32_t bound_h    = tb.desc.info.extent.height;
+	auto&          tb           = pixel_bindings->images[0];
+	const uint64_t bound_addr   = tb.desc.info.data.address;
+	const uint32_t bound_w      = tb.desc.info.extent.width;
+	const uint32_t bound_h      = tb.desc.info.extent.height;
 	const auto     bound_extent = vk::Extent2D {bound_w, bound_h};
-	const uint64_t ov_addr    = CompositeOverrideAddress(bound_addr, bound_extent);
 
-	// The world composite samples an LDR scene-sized source (3360x1892 here);
-	// the HUD/UI composite is also a fullscreen quad into the same buffer but
-	// samples a 1792x1080 UI texture, and HUD elements are smaller still.
-	// Requiring a scene-sized source keeps the UI composite on its own texture.
+	// The world composite samples an LDR scene-sized source; the HUD/UI
+	// composite is also a fullscreen quad into the same buffer but samples a
+	// smaller UI texture. Requiring a scene-sized source keeps UI on its own
+	// texture.
 	const bool scene_sized = bound_w >= 2560u && bound_h >= 1400u;
 	if (scene_sized && draw.index_count <= 6u) {
-		// Remember the scene source for the draw-watch diagnostic. The world
-		// composite runs after the tonemap pass, so this value is available
-		// when the next frame's tonemap draw executes.
 		g_composite_source_addr.store(bound_addr, std::memory_order_relaxed);
 	}
-
-	// Diagnosis: log fullscreen quads and what they sample.
-	static std::atomic_uint vo_logged {0};
-	if ((draw.index_count <= 6u || scene_sized) &&
-	    vo_logged.fetch_add(1, std::memory_order_relaxed) < 400) {
-		LOGF("VoFullscreen: frame=%d target=0x%010" PRIx64 " indices=%u tex0=0x%010" PRIx64
-		     " tex0_ext=%ux%u tex0_fmt=%u scene=%d ov=0x%010" PRIx64 "\n",
-		     buffer.GetContext().GetGpu().GetFrameNum(), target_addr, draw.index_count,
-		     bound_addr, bound_w, bound_h,
-		     static_cast<uint32_t>(tb.desc.info.pixel_format), scene_sized ? 1 : 0, ov_addr);
-	}
-
 	if (draw.index_count > 6u || !scene_sized || IsVideoOutAddress(bound_addr)) {
-		static const bool diag_draws = std::getenv("KYTY_PRESENT_DIAG") != nullptr;
-		static std::atomic_uint vo_diag {0};
-		if (diag_draws && vo_diag.fetch_add(1, std::memory_order_relaxed) < 600) {
-			std::printf("VoDraw: frame=%d target=0x%010" PRIx64 " idx=%u bound=0x%010" PRIx64
-			            " ext=%ux%u scene=%d\n",
-			            buffer.GetContext().GetGpu().GetFrameNum(), target_addr, draw.index_count,
-			            bound_addr, bound_w, bound_h, scene_sized ? 1 : 0);
-			std::fflush(stdout);
-		}
 		return;
 	}
 	auto& cache = buffer.GetContext().GetTextureCache();
 
-	// Does the composite source address itself have a render-target image with
-	// a different id? That would mean the sampled texture is a stale alias and
-	// the correctly tonemapped LDR image exists separately.
-	const auto ldr_stats = SceneTargetStatsFor(bound_addr);
-	const auto pick      = PickSceneTarget(bound_addr, bound_extent);
-	const auto guest_mapping = tb.desc.view_info.mapping;
-	static std::atomic_uint pick_logged {0};
-	const unsigned          pick_n = pick_logged.fetch_add(1, std::memory_order_relaxed);
-	if (pick_n < 8 || (pick_n % 500u) == 0) {
-		LOGF("VoPick: frame=%d bound=0x%010" PRIx64 " id=%u/%u tracked_id=%u/%u"
-		     " tracked_fmt=%s tracked_draws=%u pick=0x%010" PRIx64 " pick_id=%u/%u"
-		     " pick_fmt=%s pick_seq=%" PRIu64 " map=%d,%d,%d,%d images=%zu\n",
-		     buffer.GetContext().GetGpu().GetFrameNum(), bound_addr, tb.image_id.index,
-		     tb.image_id.generation,
-		     ldr_stats.draws != 0 ? ldr_stats.image_id.index : 0u,
-		     ldr_stats.draws != 0 ? ldr_stats.image_id.generation : 0u,
-		     vk::to_string(ldr_stats.format).c_str(), ldr_stats.draws, pick.address,
-		     pick.image_id.index, pick.image_id.generation,
-		     vk::to_string(pick.format).c_str(), pick.last_seq,
-		     static_cast<int>(guest_mapping.r), static_cast<int>(guest_mapping.g),
-		     static_cast<int>(guest_mapping.b), static_cast<int>(guest_mapping.a),
-		     pixel_bindings->images.size());
-		for (size_t slot = 0; slot < pixel_bindings->images.size() && slot < 8; slot++) {
-			const auto& b = pixel_bindings->images[slot];
-			LOGF("VoPickImg[%zu]: addr=0x%010" PRIx64 " id=%u/%u ext=%ux%u fmt=%s\n", slot,
-			     b.desc.info.data.address, b.image_id.index, b.image_id.generation,
-			     b.desc.info.extent.width, b.desc.info.extent.height,
-			     vk::to_string(b.desc.info.pixel_format).c_str());
-		}
-	}
-
-	uint64_t use_addr = ov_addr;
+	const auto pick = PickSceneTarget(bound_addr, bound_extent);
+	uint64_t   use_addr = CompositeOverrideAddress(bound_addr, bound_extent);
 	if (use_addr == bound_addr) {
 		// Never sample the composite's own (usually empty) source back into it.
 		use_addr = pick.address;
 	}
 	ImageId id {};
-	if (std::getenv("KYTY_USE_LDR_TARGET") != nullptr && ldr_stats.image_id &&
-	    ldr_stats.image_id != tb.image_id) {
-		// Experiment: the tracked render-target image may hold the real
-		// tonemapped LDR frame while the sampled alias is empty.
-		id = ldr_stats.image_id;
-	} else if (use_addr != 0) {
+	if (use_addr != 0) {
 		id = cache.FindImageFromRange(use_addr, 4, false);
 	}
 	if (!id) {
@@ -1649,20 +1281,10 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 	tb.image_view = cache.FindTexture(id, scene_desc);
 	tb.desc = scene_desc;
 	g_composite_override_tick.fetch_add(1, std::memory_order_relaxed);
-	static const bool diag = std::getenv("KYTY_PRESENT_DIAG") != nullptr;
 	static std::atomic_uint logged {0};
-	if (diag && logged.fetch_add(1, std::memory_order_relaxed) < 4000) {
-		std::printf("OvFmt: seq=%llu frame=%d target=0x%010" PRIx64 " fmt=%s ext=%ux%u addr=0x%010" PRIx64 "\n",
-		            static_cast<unsigned long long>(
-		                g_composite_override_tick.load(std::memory_order_relaxed)),
-		            buffer.GetContext().GetGpu().GetFrameNum(), target_addr,
-		            vk::to_string(image.info.pixel_format).c_str(), image.info.extent.width,
-		            image.info.extent.height, image.info.data.address);
-		std::fflush(stdout);
-	}
 	if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
-		LOGF("CompositeOverride: tex0 -> 0x%010" PRIx64 " id=%u/%u ext=%ux%u fmt=%s frame=%d\n",
-		     image.info.data.address, id.index, id.generation, image.info.extent.width,
+		LOGF("CompositeOverride: tex0 -> 0x%010" PRIx64 " id=%u ext=%ux%u fmt=%s frame=%d\n",
+		     image.info.data.address, id.index, image.info.extent.width,
 		     image.info.extent.height, vk::to_string(image.info.pixel_format).c_str(),
 		     buffer.GetContext().GetGpu().GetFrameNum());
 	}
@@ -1670,28 +1292,15 @@ static void ApplyCompositeOverride(CommandBuffer& buffer,
 
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
-                                         vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
-                                         const DrawIndexBufferSource& index_source,
-	                                     bool primitive_restart_enable) {
-	// TEMP-DIAG: insane counts hang the GPU (TDR) with no other trace.
-	if (draw.index_count > 1000000u || draw.instance_count > 4096u) {
-		std::printf("SUSPICIOUS DRAW: submit=%llu indexed=%d index_count=%u instances=%u topo=%u\n",
-		            static_cast<unsigned long long>(submit_id), draw.IsIndexed() ? 1 : 0,
-		            draw.index_count, draw.instance_count, static_cast<uint32_t>(topology));
-		std::fflush(stdout);
-	}
-	if (state.programs.skip_draw) {
-		g_census_mesh_skip.fetch_add(1, std::memory_order_relaxed);
-		ResetBindings();
-		return;
-	}
-	auto& ucfg = buffer.GetUserConfig();
+                                         const DrawEmitInfo&          emit,
+                                         const DrawIndexBufferSource& index_source) {
+	auto&      ucfg                     = buffer.GetUserConfig();
+	const bool primitive_restart_enable = state.primitive_restart_enable;
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
 		return;
 	}
-	const auto vertex_stages =
-	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
-	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
+	const auto vertex_stages = state.VertexStages();
+	const bool mesh_active = state.vertex_info[0].stage.module->info.stage == ShaderType::Mesh;
 	uint32_t   mesh_groups = 0;
 	if (mesh_active) {
 		const auto& mesh = state.vertex_info[0].mesh;
@@ -1745,80 +1354,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
 	// Composite override: present the rendered 3D world instead of a wrong/black
 	// texture bound by the guest for the video-out composite pass.
-	ApplyCompositeOverride(buffer, state, draw,
-	                       m_graphics_bindings.pixel ? &*m_graphics_bindings.pixel : nullptr);
-
-	// Diagnose the pass that fills the composite's scene source (the tonemap
-	// draw). Its output is currently black; this shows which textures it reads.
-	if (m_graphics_bindings.pixel && state.color_count > 0) {
-		const uint64_t watch = g_composite_source_addr.load(std::memory_order_relaxed);
-		if (watch != 0 && state.color_info[0].desc.info.data.address == watch) {
-			static std::atomic_uint watch_bind_logged {0};
-			if (watch_bind_logged.fetch_add(1, std::memory_order_relaxed) < 80) {
-				const auto& pimages = m_graphics_bindings.pixel->images;
-				LOGF("WatchBind: frame=%d %s idx=%u ps=%d fmt=%s images=%zu\n",
-				     buffer.GetContext().GetGpu().GetFrameNum(), draw.Name(), draw.index_count,
-				     state.ps_active ? 1 : 0,
-				     vk::to_string(state.color_info[0].desc.info.pixel_format).c_str(),
-				     pimages.size());
-				for (size_t slot = 0; slot < pimages.size() && slot < 6; slot++) {
-					const auto& b = pimages[slot];
-					LOGF("WatchBindImg[%zu]: addr=0x%010" PRIx64 " id=%u/%u ext=%ux%u"
-					     " fmt=%s\n",
-					     slot, b.desc.info.data.address, b.image_id.index,
-					     b.image_id.generation, b.desc.info.extent.width,
-					     b.desc.info.extent.height,
-					     vk::to_string(b.desc.info.pixel_format).c_str());
-					if (b.desc.info.extent.width == 1 && b.desc.info.extent.height == 1) {
-						KytySceneDiag::exposure_addr.store(b.desc.info.data.address,
-						                                   std::memory_order_relaxed);
-					}
-					if (b.desc.info.extent.width == 32 && b.desc.info.extent.height == 32) {
-						KytySceneDiag::lut_addr.store(b.desc.info.data.address,
-						                              std::memory_order_relaxed);
-					}
-				}
-			}
-		}
-	}
-	// AMD Windows drivers reject valid barycentric fragment pipelines with triangle
-	// strips; the same shaders work as lists. Expand the draw on AMD hardware.
-	bool                        strip_converted      = false;
-	uint32_t                    converted_count      = 0;
-	std::vector<uint32_t>       converted_indices;
-	DrawIndexBufferSource       converted_source {};
-	const DrawIndexBufferSource* active_index_source = &index_source;
-	if (!mesh_active &&
-	    (topology == vk::PrimitiveTopology::eTriangleStrip ||
-	     topology == vk::PrimitiveTopology::eTriangleFan) &&
-	    buffer.GetGraphics().GetPhysicalDeviceProperties().vendorID == kAmdVendorId &&
-	    PixelShaderUsesBarycentrics(state)) {
-		static std::atomic_uint converted_logged = 0;
-		const bool provoking_last =
-		    buffer.GetRegisters().GetModeControl().provoking_vtx_last;
-		if (ExpandStripDrawToList(converted_indices, buffer, topology, draw, emit, index_source,
-		                          primitive_restart_enable, provoking_last)) {
-			converted_count         = static_cast<uint32_t>(converted_indices.size());
-			converted_source.host_data = converted_indices.data();
-			converted_source.size =
-			    static_cast<uint64_t>(converted_indices.size()) * sizeof(uint32_t);
-			converted_source.type            = vk::IndexType::eUint32;
-			converted_source.guest_element_size = sizeof(uint32_t);
-			active_index_source                  = &converted_source;
-			topology                             = vk::PrimitiveTopology::eTriangleList;
-			strip_converted                      = true;
-			if (converted_logged.fetch_add(1, std::memory_order_relaxed) < 2) {
-				LOGF("Render: expanded barycentric strip/fan draw to a list (%u indices)\n",
-				     converted_count);
-			}
-		}
-	}
+	ApplyCompositeOverride(buffer, state, draw, bindings.pixel ? &*bindings.pixel : nullptr);
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
-		index_binding   = PrepareIndexBuffer(buffer, *active_index_source);
+		index_binding   = PrepareIndexBuffer(buffer, index_source);
 	}
 	std::pair<Buffer*, uint64_t> args_buffer {};
 	if (emit.indirect.address != 0) {
@@ -1831,15 +1373,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
-	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
-	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
-	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
-	    state.programs);
-	if (pipeline.pipeline == nullptr) {
-		// Creation failed and was logged; skip the draw so the game continues.
-		g_census_pipeline_null.fetch_add(1, std::memory_order_relaxed);
-		return;
-	}
+	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
@@ -1856,10 +1390,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 	}
-	if (!CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages)) {
-		ResetBindings();
-		return;
-	}
+	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (!mesh_active) {
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
@@ -1874,7 +1405,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (mesh_active) {
 			draw_data = {draw.index_count,
 			             static_cast<uint32_t>(emit.vertex_offset),
-			             emit.first_instance,
 			             index_source.guest_element_size,
 			             static_cast<uint32_t>(index_source.address),
 			             static_cast<uint32_t>(index_source.address >> 32u)};
@@ -1890,7 +1420,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                        std::bit_width(planes) * 4u * sizeof(uint32_t),
 		                        buffer.GetRegisters().GetUserClipPlanes().data());
 	}
-
 
 	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
 	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
@@ -1912,6 +1441,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		m_context.GetCommandScheduler().EndRendering();
 		ShaderWriteHazardBarrier(vk_buffer, shader_write_stages);
 	}
+	LogDrawPhase(draw.Name(), "BeginRendering");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
 	}
@@ -1920,13 +1450,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
+	auto&         occlusion_queries = m_context.GetOcclusionQueries();
+	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
-	} else if (strip_converted) {
-		// AMD's barycentric-strip workaround expands the source indices on the CPU;
-		// execute that prepared list rather than falling through to the original draw.
-		vk_buffer.drawIndexed(converted_count, draw.instance_count, 0,
-		                      draw.IsIndexed() ? emit.vertex_offset : 0, emit.first_instance);
 	} else if (args_buffer.first == nullptr) {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	} else if (draw.IsIndexed()) {
@@ -1936,6 +1463,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		vk_buffer.drawIndirect(args_buffer.first->Handle(), args_buffer.second,
 		                       emit.indirect.count, emit.indirect.stride);
 	}
+	occlusion_queries.End(vk_buffer, occlusion_query);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
 
@@ -1950,33 +1478,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
-	const auto completed = g_census_complete.fetch_add(1, std::memory_order_relaxed) + 1;
-	if (completed % 10000 == 0) {
-		m_context.GetGraphics().LogMemoryBudget();
-	}
-	if (completed % 1000 == 0) {
-		const auto extent = state.color_count > 0 ? state.color_info[0].Extent() : vk::Extent2D {};
-		LOGF("RenderCensus: idx_calls=%llu auto_calls=%llu complete=%llu (idx_empty=%llu "
-		     "resolved=%llu no_vs=%llu topo_fail=%llu state_fail=%llu rectlist_skip=%llu "
-		     "mesh_skip=%llu pipeline_null=%llu) last=%s count=%u colors=%u addr=0x%010llx "
-		     "extent=%ux%u\n",
-		     static_cast<unsigned long long>(g_census_index_calls.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_auto_calls.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(completed),
-		     static_cast<unsigned long long>(g_census_empty.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_resolved.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_no_vs.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_topology_fail.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_state_fail.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_rectlist_skip.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_mesh_skip.load(std::memory_order_relaxed)),
-		     static_cast<unsigned long long>(g_census_pipeline_null.load(std::memory_order_relaxed)),
-		     draw.Name(), draw.index_count, state.color_count,
-		     static_cast<uint64_t>(state.color_count > 0
-		                               ? state.color_info[0].desc.info.data.address
-		                               : 0u),
-		     extent.width, extent.height);
-	}
 }
 
 // Vulkan offsets for a prepared draw, or nullopt when its indirect records need CPU counts, as
@@ -1988,7 +1489,7 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
                                                    uint32_t                     first_instance,
                                                    const DrawIndirectArgs&      indirect) {
 	if (indirect.address != 0) {
-		if (vs.stage.program->stage == ShaderType::Mesh ||
+		if (vs.stage.module->info.stage == ShaderType::Mesh ||
 		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy) {
 			return std::nullopt;
 		}
@@ -2008,7 +1509,6 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
-	g_census_index_calls.fetch_add(1, std::memory_order_relaxed);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -2025,7 +1525,6 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	if (ConsumeMetadataColorOperation(buffer, args.render_target_slice_offset) ||
 	    DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
-		g_census_resolved.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return true;
 	}
@@ -2055,8 +1554,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	hw_check(buffer);
 
-	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
-	if (!GetDrawTopology(ucfg, topology)) {
+	DrawRenderState state {};
+	if (!GetDrawTopology(ucfg, state.topology)) {
 		return true;
 	}
 
@@ -2077,7 +1576,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		default: EXIT("unknown index_type_and_size: %u\n", args.index_type_and_size);
 	}
 	index_source.size = static_cast<uint64_t>(args.index_count) * index_source.guest_element_size;
-	const bool primitive_restart = ResolvePrimitiveRestart(buffer, index_source);
+	state.primitive_restart_enable = ResolvePrimitiveRestart(buffer, index_source);
 
 	std::vector<uint16_t> expanded_indices;
 	if (index_source.guest_element_size == 1) {
@@ -2085,7 +1584,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		const auto* src = static_cast<const uint8_t*>(args.index_addr);
 		expanded_indices.resize(args.index_count);
 		for (uint32_t i = 0; i < args.index_count; i++) {
-			expanded_indices[i] = primitive_restart && src[i] == 0xffu ? 0xffffu : src[i];
+			expanded_indices[i] =
+			    state.primitive_restart_enable && src[i] == 0xffu ? 0xffffu : src[i];
 		}
 		index_source.host_data = expanded_indices.data();
 		index_source.size      = expanded_indices.size() * sizeof(uint16_t);
@@ -2093,9 +1593,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count,
 	                        args.instance_count, args.first_instance};
-	DrawRenderState state {};
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
-		g_census_state_fail.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return true;
 	}
@@ -2105,8 +1603,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	const auto emit = ResolveDrawEmit(ucfg, state.vertex_info[0], args.offset_source,
 	                                  args.base_vertex, args.first_instance, args.indirect);
 	if (emit) {
-		ExecutePreparedDraw(submit_id, buffer, draw, state, topology, *emit, index_source,
-		                    primitive_restart);
+		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, index_source);
 	}
 	ResetBindings();
 	return emit.has_value();
@@ -2118,7 +1615,6 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
-	g_census_auto_calls.fetch_add(1, std::memory_order_relaxed);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -2135,7 +1631,6 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	if (ConsumeMetadataColorOperation(buffer, args.render_target_slice_offset) ||
 	    DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
-		g_census_resolved.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return true;
 	}
@@ -2164,22 +1659,19 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};
 
-	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
-	if (!GetDrawTopology(ucfg, topology)) {
-		g_census_topology_fail.fetch_add(1, std::memory_order_relaxed);
+	DrawRenderState state {};
+	if (!GetDrawTopology(ucfg, state.topology)) {
 		ResetBindings();
 		return true;
 	}
-	DrawRenderState state {};
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
-		g_census_state_fail.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return true;
 	}
 
 	const bool rect_list = Prospero::IsRectList(ucfg.GetPrimType());
 	if (rect_list && state.vertex_info[0].buffers_num == 0 &&
-	    state.vertex_info[0].stage.program->param_export_mask == 0 &&
+	    state.vertex_info[0].stage.module->info.param_export_mask == 0 &&
 	    state.ps_input_info.input_num != 0) {
 		if (graphics_debug_dump_enabled()) {
 			LOGF("DrawIndexAuto: skipping rect-list draw with no VS param exports and PS inputs: "
@@ -2187,7 +1679,6 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 			     state.ps_input_info.input_num, sh_ctx.GetPs().ps_regs.data_addr,
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
-		g_census_rectlist_skip.fetch_add(1, std::memory_order_relaxed);
 		ResetBindings();
 		return true;
 	}
@@ -2197,7 +1688,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	                                  static_cast<int32_t>(args.first_vertex), args.first_instance,
 	                                  args.indirect);
 	if (emit) {
-		ExecutePreparedDraw(submit_id, buffer, draw, state, topology, *emit, {}, false);
+		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, {});
 	}
 	ResetBindings();
 	return emit.has_value();
@@ -2228,12 +1719,13 @@ bool RenderExecutor::ResolveColorTargets(CommandBuffer& buffer, uint32_t render_
 		return true;
 	}
 
-	auto& cache = m_context.GetTextureCache();
+	auto& cache = buffer.GetContext().GetTextureCache();
 	cache.MarkGpuWritten(dst.image_id);
 	auto& source      = cache.GetImage(src.image_id);
 	auto& destination = cache.GetImage(dst.image_id);
-	destination.Resolve(source, {src.guest_mip_level, 1, src.guest_array_layer, 1},
-	                    {dst.guest_mip_level, 1, dst.guest_array_layer, 1});
+	destination.Resolve(source,
+	                    {src.desc.view_info.base_level, 1, src.desc.view_info.base_layer, 1},
+	                    {dst.desc.view_info.base_level, 1, dst.desc.view_info.base_layer, 1});
 	return true;
 }
 

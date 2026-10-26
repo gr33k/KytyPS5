@@ -22,10 +22,11 @@ class RenderExecutor;
 struct ImageHeapTestAccess;
 
 // Guest image tables that shaders index by GPU-computed offsets, kept resident in one bindless
-// sampled-image array. Each view of a table owns device slot words, one per table dword, that
-// select an array element. CPU writes to a table fault in its snapshot, which each draw refreshes
-// once; a view takes the changes when a draw first acquires it. Changes to the images behind
-// elements bump Image::heap_epoch.
+// sampled-image array. A table is keyed by its base and follows its descriptor's size. Each view
+// of a table owns device slot words, one per table dword, that select an array element. CPU
+// writes to a table fault in its snapshot, which each draw refreshes once; a view takes the
+// changes when a draw first acquires it. Changes to the images behind elements bump
+// Image::heap_epoch.
 class ImageHeap final: public ShaderRecompiler::IR::ImageHeapSource {
 public:
 	ImageHeap(RenderContext& context, PageManager& page_manager);
@@ -57,9 +58,10 @@ private:
 	struct Element {
 		DescriptorValue value;
 		TextureBinding  binding;
-		uint32_t        kind  = 0;
-		uint32_t        refs  = 0; // Slots of the owning view that select it.
-		bool            stale = false;
+		uint32_t        kind   = 0;
+		uint32_t        refs   = 0; // Slots of the owning view that select it.
+		bool            stale  = false;
+		uint64_t        serial = 0; // Image::serial of binding.image_id.
 	};
 
 	struct Memory;
@@ -69,6 +71,7 @@ private:
 		uint64_t                            step  = 0;
 		uint64_t                            first = 0;
 		uint64_t                            count = 0;
+		uint64_t                            limit = 0; // Probes a key domain allows, if fewer.
 		ShaderRecompiler::IR::ImageResource profile;
 		std::vector<uint32_t>               slots; // Plus a trailing null slot.
 		std::vector<uint32_t>               kind_keys;
@@ -78,6 +81,7 @@ private:
 		std::vector<uint32_t>   released; // No slot selects them after the next upload.
 		std::vector<uint32_t>   away;     // Not yet moved to the read layout.
 		std::vector<uint32_t>   dcc;      // Color metadata clears apply on each discovery.
+		std::vector<uint32_t>   held;     // Another extent holds their address.
 		std::unique_ptr<Buffer> buffer;
 		size_t                  dirty_begin   = 0; // Slots to upload.
 		size_t                  dirty_end     = 0;
@@ -85,6 +89,7 @@ private:
 		size_t                  changed_end   = 0;
 		uint64_t                resolve_epoch = 0;
 		uint64_t                layout_epoch  = 0;
+		uint64_t                held_serial   = 0; // Image::serials when held was last retried.
 	};
 
 	struct Memory {
@@ -109,8 +114,10 @@ private:
 	uint32_t Intern(View& view, uint32_t kind, const DescriptorValue& value);
 	void     Release(View& view, uint32_t entry);
 	void     Unreference(Element& element);
+	Image*   ImageOf(const Element& element) const;
 	uint32_t Allocate();
 	void     Retire(View& view);
+	void     Resize(Memory& memory, uint64_t size);
 	void     WriteDescriptors();
 
 	RenderContext&                       m_context;

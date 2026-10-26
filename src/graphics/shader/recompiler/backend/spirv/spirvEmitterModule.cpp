@@ -595,6 +595,13 @@ void DefineInputs(EmitterState& state) {
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationFlat);
 		}
 	}
+	if (state.program.info.helper_invocation) {
+		const auto variable = DefineInterfaceVariable(state, TypeBool(state), spv::StorageClassInput,
+		                                              "gl_HelperInvocation");
+		state.helper_invocation_variable = variable;
+		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn,
+		                            spv::BuiltInHelperInvocation);
+	}
 }
 
 void DefineOutputs(EmitterState& state) {
@@ -691,13 +698,15 @@ void DefineOutputs(EmitterState& state) {
 				break;
 			case IR::StageOutputKind::Parameter:
 			case IR::StageOutputKind::Mrt: {
-				const bool uint_output =
-				    binding.kind == IR::StageOutputKind::Mrt &&
-				    state.program.stage == ShaderType::Pixel &&
-				    binding.index < std::size(state.input_info.pixel->target_output_mode) &&
-				    (state.input_info.pixel->target_output_mode[binding.index] == 7u ||
-				     (state.input_info.pixel->target_packed_unorm_mask & (1u << binding.index)) != 0u);
-				const auto type = uint_output ? TypeU32Vector(state, 4) : TypeF32Vector(state, 4);
+				auto type = TypeF32Vector(state, 4);
+				if (binding.kind == IR::StageOutputKind::Mrt &&
+				    state.program.stage == ShaderType::Pixel && binding.index < 8u) {
+					// Packed UNorm stores its encoded bits.
+					const auto bit = 1u << binding.index;
+					type = (state.input_info.pixel->target_packed_unorm_mask & bit) != 0u
+					           ? TypeU32Vector(state, 4)
+					           : MrtOutputType(state, binding.index);
+				}
 				binding.variable_id = DefineInterfaceVariable(state, type, spv::StorageClassOutput,
 				                                              binding.debug_name.c_str());
 				const bool dual_source = binding.kind == IR::StageOutputKind::Mrt &&

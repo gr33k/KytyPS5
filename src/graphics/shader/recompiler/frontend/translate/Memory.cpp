@@ -1,11 +1,9 @@
 #include "common/assert.h"
-#include "common/logging/log.h"
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
 #include "graphics/shader/recompiler/frontend/decode/ImageOps.h"
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 
 namespace Libs::Graphics::ShaderRecompiler::Frontend {
 
@@ -865,9 +863,10 @@ void Translator::DS_WRITE2(const Decoder::Instruction& inst) {
 
 void Translator::DS_APPEND_CONSUME(const Decoder::Instruction& inst, IR::ValueOpcode opcode) {
 	const auto memory = MemoryInfoFromDecoded(inst);
-	WriteOperand(inst.dst, ir.Emit(opcode,
-	                               {ReadU32(MemorySourceAt(inst, 0)), ir.GetExec()},
-	                               AddMemoryInfo(memory, inst.pc)));
+	const auto exec   = ExecMask();
+	WriteOperand(inst.dst,
+	             ir.Emit(opcode, {ReadU32(MemorySourceAt(inst, 0)), exec[0], exec[1], ir.GetExec()},
+	                     AddMemoryInfo(memory, inst.pc)));
 }
 
 void Translator::DS_ADDTID(const Decoder::Instruction& inst, bool write) {
@@ -903,10 +902,7 @@ void Translator::DS_ORDERED_COUNT(const Decoder::Instruction& inst) {
 		const auto packer = ir.BitwiseAnd(m0, IR::U32(IR::Value(0xfu)));
 		address = ir.IAdd(address, ir.ShiftLeftLogical(packer, IR::U32(IR::Value(2u))));
 	}
-	const auto exec   = ir.GetExec();
-	const auto ballot = ir.Emit(IR::ValueOpcode::Ballot, {exec});
-	const auto low = ir.CompositeExtract(ballot, 0u);
-	const auto high = ir.CompositeExtract(ballot, 1u);
+	const auto [low, high] = ExecMask();
 	const auto active = ir.INotEqual(ir.BitwiseOr(low, high), IR::U32(IR::Value(0u)));
 	const auto first = ir.Select(
 	    ir.INotEqual(low, IR::U32(IR::Value(0u))),
@@ -969,17 +965,9 @@ void Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::S_BUFFER_LOAD_DWORDX4:
 		case Decoder::Opcode::S_BUFFER_LOAD_DWORDX8:
 		case Decoder::Opcode::S_BUFFER_LOAD_DWORDX16: return S_LOAD(inst, false);
-		case Decoder::Opcode::S_MEMREALTIME: {
-			static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-			if (!warned.test_and_set(std::memory_order_relaxed)) {
-				Log::WriteToConsoleAndLog(
-				    "Warning: S_MEMREALTIME uses placeholder UINT64_MAX; real-time clock not implemented.\n");
-			}
-			for (uint32_t component = 0; component < 2; component++) {
-				WriteOperand(ScalarDestinationOperand(inst.dst, component), IR::Value(UINT32_MAX));
-			}
-			return;
-		}
+		case Decoder::Opcode::S_MEMREALTIME:
+			return WriteU32Pair(inst.dst,
+			                    ExtractU64(IR::U64(ir.Emit(IR::ValueOpcode::ReadRealtimeClock))));
 
 		case Decoder::Opcode::BUFFER_LOAD_UBYTE:
 		case Decoder::Opcode::BUFFER_LOAD_UBYTE_D16:

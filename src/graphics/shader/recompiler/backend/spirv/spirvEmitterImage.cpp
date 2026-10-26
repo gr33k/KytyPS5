@@ -77,6 +77,7 @@ ImageSampleLayout Layout(const IR::MemoryInfo& mem) {
 	layout.coord = cursor;
 	cursor += info.coordinate_components;
 	if (HasFlag(mem, Decoder::ImageSampleFlagLod)) layout.lod = cursor++;
+	if (HasFlag(mem, Decoder::ImageSampleFlagLodClamp)) layout.clamp = cursor++;
 	return layout;
 }
 
@@ -1069,7 +1070,12 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				dref_value = AddressF32(ctx, mem, *address, layout.dref);
 			}
 		}
-		std::array<uint32_t, 4> operands {};
+		// _cl clamps the computed LOD from below.
+		uint32_t min_lod = 0;
+		if (layout.clamp != NoImageComponent) {
+			min_lod = AddressF32(ctx, mem, *address, layout.clamp);
+		}
+		std::array<uint32_t, 5> operands {};
 		size_t operand_count = 0;
 		if (HasFlag(mem, Decoder::ImageSampleFlagDerivative)) {
 			operands[0] = spv::ImageOperandsGradMask;
@@ -1080,6 +1086,11 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			auto lod = ZeroF32(state);
 			if (HasFlag(mem, Decoder::ImageSampleFlagLod) && layout.lod != NoImageComponent) {
 				lod = AddressF32(ctx, mem, *address, layout.lod);
+			}
+			// SPIR-V takes MinLod only with implicit LOD or Grad.
+			if (min_lod != 0) {
+				lod     = EmitGlsl<GLSLstd450FMax, IR::Type::F32>(state, lod, min_lod);
+				min_lod = 0;
 			}
 			operands[0] = spv::ImageOperandsLodMask;
 			operands[1] = lod;
@@ -1103,6 +1114,13 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				sample_operand_count = std::max(size_t{1}, sample_operand_count);
 				sample_operands[sample_operand_count++] = PackedOffset(
 				    ctx, offset_value, candidate.dimension, sample_operands[0]);
+			}
+			// MinLod follows the offset in operand order.
+			if (min_lod != 0) {
+				state.builder.RequireCapability(spv::CapabilityMinLod);
+				sample_operand_count = std::max(size_t{1}, sample_operand_count);
+				sample_operands[0] |= spv::ImageOperandsMinLodMask;
+				sample_operands[sample_operand_count++] = min_lod;
 			}
 			const auto coord =
 			    CoordF32(ctx, mem, *address, layout.coord,

@@ -2027,7 +2027,7 @@ uint32_t* KYTY_SYSV_ABI AgcCbReleaseMem(CommandBuffer* buf, uint8_t action, uint
 	const uint32_t packet_action      = static_cast<uint32_t>(action) & 0x3fu;
 	const uint32_t packet_event_index = (action >= 0x2fu ? 6u : 5u);
 
-	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
+	cmd[0] = KYTY_PM4(8, Pm4::IT_RELEASE_MEM, 0);
 	cmd[1] = packet_action | (packet_event_index << 8u) | ((packet_gcr_cntl & 0xfffu) << 12u) |
 	         ((static_cast<uint32_t>(cache_policy) & 0x3u) << 25u);
 	cmd[2] = ((static_cast<uint32_t>(dst) & 0x3u) << 16u) |
@@ -3510,13 +3510,7 @@ int KYTY_SYSV_ABI AgcSetPacketPredication(uint32_t* packet, uint32_t predication
 int KYTY_SYSV_ABI AgcSetNop(uint32_t* packet) {
 	PRINT_NAME();
 
-	const auto size = AgcGetPacketSize(packet);
-
 	packet[0] = (packet[0] & 0xffff0003u) | (Pm4::IT_NOP << 8u);
-	// Prevent the disabled payload from being treated as an executable marker.
-	if (size > 1 && (packet[1] & 0xffff0000u) == 0x68750000u) {
-		packet[1] &= 0xffffu;
-	}
 
 	return OK;
 }
@@ -3778,27 +3772,21 @@ int KYTY_SYSV_ABI AgcQueueEndOfPipeActionPatchAddress(uint32_t*             cmd,
                                                       const volatile Label* address) {
 	PRINT_NAME();
 
-	// Not sure
-
 	AgcTrace("\t cmd     = 0x%016" PRIx64 "\n"
 	         "\t address = 0x%016" PRIx64 "\n",
 	         reinterpret_cast<uint64_t>(cmd), reinterpret_cast<uint64_t>(address));
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	auto vaddr = reinterpret_cast<uint64_t>(address);
-	auto op    = (cmd[0] >> 8u) & 0xffu;
+	if (((cmd[0] >> 8u) & 0xffu) != Pm4::IT_RELEASE_MEM) {
+		return GRAPHICS5_ERROR_INVALID_PACKET;
+	}
 
-	if ((op == Pm4::IT_NOP && KYTY_PM4_R(cmd[0]) == Pm4::R_RELEASE_MEM) ||
-	    op == Pm4::IT_RELEASE_MEM) {
-		cmd[3] = static_cast<uint32_t>(vaddr & 0xffffffffu);
-		cmd[4] = static_cast<uint32_t>((vaddr >> 32u) & 0xffffffffu);
-	} else if (op == Pm4::IT_EVENT_WRITE_EOP) {
-		cmd[2] = static_cast<uint32_t>(vaddr & 0xffffffffu);
-		cmd[3] = (cmd[3] & 0xffff0000u) | static_cast<uint32_t>((vaddr >> 32u) & 0xffffu);
-	} else {
-		EXIT("unsupported queueEndOfPipeAction packet for address patch: 0x%08" PRIx32 "\n",
-		     cmd[0]);
+	// A kSendIntCtx release has no address.
+	if (((cmd[2] >> 24u) & 0x7u) != 4u) {
+		const auto vaddr = reinterpret_cast<uint64_t>(address);
+		cmd[3]           = (cmd[3] & 0x3u) | (static_cast<uint32_t>(vaddr) & ~0x3u);
+		cmd[4]           = static_cast<uint32_t>(vaddr >> 32u);
 	}
 
 	return OK;
@@ -3813,10 +3801,7 @@ int KYTY_SYSV_ABI AgcQueueEndOfPipeActionPatchData(uint32_t* cmd, uint64_t data)
 
 	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
 
-	const auto op             = (cmd[0] >> 8u) & 0xffu;
-	const bool is_release_mem = op == Pm4::IT_RELEASE_MEM ||
-	                            (op == Pm4::IT_NOP && KYTY_PM4_R(cmd[0]) == Pm4::R_RELEASE_MEM);
-	if (!is_release_mem) {
+	if (((cmd[0] >> 8u) & 0xffu) != Pm4::IT_RELEASE_MEM) {
 		return GRAPHICS5_ERROR_INVALID_PACKET;
 	}
 
@@ -4115,7 +4100,7 @@ static TessellationDriverState g_tessellation_driver_state {};
 static void submit_dcb(uint32_t* dcb, uint32_t size_in_dwords) {
 	GraphicsDbgDumpDcb("d", size_in_dwords, dcb);
 	EXIT_IF(g_renderer == nullptr);
-	g_renderer->GetGpu().Submit(std::span {dcb, size_in_dwords}, {});
+	g_renderer->GetGpu().Submit(std::span {dcb, size_in_dwords});
 }
 
 int KYTY_SYSV_ABI AgcDriverSubmitDcb(const Packet* packet) {

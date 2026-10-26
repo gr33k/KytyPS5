@@ -72,6 +72,7 @@ struct ConfigOptions {
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
+	bool                   shader_cache_enabled        = false;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	std::filesystem::path  shader_log_folder           = "_Shaders";
@@ -88,6 +89,7 @@ struct ConfigOptions {
 	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
 	bool                   tessellation_enabled        = false;
+	bool                   occlusion_queries_enabled   = false;
 	bool                   trophy_enabled              = true;
 	uint32_t               trophy_duration_seconds     = 6;
 	bool                   perf_overlay_enabled            = false;
@@ -134,6 +136,7 @@ uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();
 
 bool                   ShaderValidationEnabled();
+bool                   ShaderCacheEnabled();
 ShaderOptimizationType GetShaderOptimizationType();
 LogDirection           GetShaderLogDirection();
 std::filesystem::path  GetShaderLogFolder();
@@ -157,6 +160,7 @@ bool ReadbackLinearImagesEnabled();
 bool ReadbackTiledImagesEnabled();
 bool SyncRawImageBuffersEnabled();
 bool TessellationEnabled();
+bool OcclusionQueriesEnabled();
 bool TrophyEnabled();
 uint32_t GetTrophyDurationSeconds();
 bool PlayGoHackEnabled();

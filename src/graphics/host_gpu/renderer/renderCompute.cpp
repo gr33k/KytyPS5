@@ -7,8 +7,6 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
-#include "libs/controller.h"
-#include "kernel/memory.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -28,15 +26,12 @@
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
-#include <cstdio>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <span>
@@ -44,12 +39,6 @@
 #include <vector>
 
 namespace Libs::Graphics {
-// Shared with renderDraw.cpp: tonemap input addresses learned from the draw.
-namespace KytySceneDiag {
-extern std::atomic<uint64_t> exposure_addr;
-extern std::atomic<uint64_t> lut_addr;
-} // namespace KytySceneDiag
-
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -64,7 +53,7 @@ static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::Descriptor
 
 bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
                                                 const CommandBuffer&          buffer) {
-	const auto& program   = *input.stage.program;
+	const auto& program   = input.stage.module->info;
 	const auto& resources = *input.stage.resources;
 	if (resources.buffers.size() != program.info.buffers.size()) {
 		EXIT("compute runtime buffer count does not match shader metadata\n");
@@ -146,7 +135,7 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
                                           CommandBuffer& command, uint32_t group_x,
                                           uint32_t group_y, uint32_t group_z, uint32_t mode) {
-	const auto& program   = *input.stage.program;
+	const auto& program   = input.stage.module->info;
 	const auto& resources = *input.stage.resources;
 	const auto& fill      = resources.uniform_fill;
 	auto&       cache     = command.GetContext().GetTextureCache();
@@ -219,7 +208,7 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
 		LOGF("GraphicsRenderDispatchDirect: compute %s shader=0x%016" PRIx64
 		     " addr=0x%016" PRIx64 " size=0x%016" PRIx64 " value=0x%08" PRIx32 "\n",
-		     image_clear ? "image clear" : "buffer fill", input.stage.program->shader_hash,
+		     image_clear ? "image clear" : "buffer fill", input.stage.module->info.shader_hash,
 		     descriptor.Base48(), size, packed_clear);
 	}
 	return true;
@@ -227,7 +216,7 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 
 static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& input,
                              PreparedBindings& bindings, uint64_t indirect_args = 0) {
-	if (input.stage.program->bindings.descriptor_counts[
+	if (input.stage.module->info.bindings.descriptor_counts[
 	        static_cast<size_t>(ShaderRecompiler::IR::DescriptorBindingKind::SharedMemory)] == 0) {
 		return;
 	}
@@ -254,167 +243,11 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
-namespace {
-// RE Engine Maiden rescue: kernel 0xdd7d9b716cfe5aba is a straight-line
-// streaming memcpy (verified in disassembly: two bounds-checked dword copies
-// per thread, no loops) that hangs some GPUs on specific post-start inputs.
-// Emulate it on the CPU so the game receives its data without executing it.
-// Matches the disassembly exactly: index = workgroup.x * 512 + lane, second
-// copy at +256, byte offsets from push dword 0 bits [0:8]/[8:16], OOB reads
-// yield 0, OOB writes are dropped. Returns false when the invocation does
-// not match the known shape (caller falls back to skipping).
-static bool EmuFail(uint32_t why, uint64_t hash, uint32_t gx, uint32_t gy, uint32_t gz,
-                    uint32_t nbufs, uint32_t nimages, uint32_t lx, uint32_t ly, uint32_t lz) {
-	static std::atomic_uint refuse_logged {0};
-	if (refuse_logged.fetch_add(1, std::memory_order_relaxed) < 40) {
-		std::printf("DispatchDirect: emu-refuse hash=0x%016llx groups=%ux%ux%u why=%u "
-		            "nb=%u ni=%u local=%ux%ux%u\n",
-		            static_cast<unsigned long long>(hash), gx, gy, gz, why, nbufs, nimages,
-		            lx, ly, lz);
-		std::fflush(stdout);
-	}
-	return false;
-}
-
-bool CpuEmulateStreamingCopy(RenderContext& context, const ShaderComputeInputInfo& input_info,
-                             const ShaderRecompiler::IR::CompiledShaderInfo& program,
-                             PreparedBindings& bindings, uint32_t gx, uint32_t gy, uint32_t gz) {
-	if (program.info.buffers.size() != 2 || gy != 1 || gz != 1) {
-		return EmuFail(1, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	if (input_info.threads_num[0] != 256 || input_info.threads_num[1] != 1 ||
-	    input_info.threads_num[2] != 1) {
-		return EmuFail(2, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	int src_i = -1, dst_i = -1;
-	for (uint32_t i = 0; i < 2; i++) {
-		if (program.info.buffers[i].written) {
-			if (dst_i >= 0) {
-				return EmuFail(3, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-			}
-			dst_i = static_cast<int>(i);
-		} else {
-			if (src_i >= 0) {
-				return EmuFail(4, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-			}
-			src_i = static_cast<int>(i);
-		}
-	}
-	if (src_i < 0 || dst_i < 0) {
-		return EmuFail(5, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	const auto& src_info = program.info.buffers[src_i];
-	const auto& dst_info = program.info.buffers[dst_i];
-	if (src_info.descriptor_index == UINT32_MAX || dst_info.descriptor_index == UINT32_MAX ||
-	    src_info.descriptor_index >= bindings.buffer_sources.size() ||
-	    dst_info.descriptor_index >= bindings.buffer_sources.size()) {
-		return EmuFail(6, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	const auto& resources = *input_info.stage.resources;
-	const auto  src_desc =
-	    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[src_i]);
-	const auto dst_desc =
-	    DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[dst_i]);
-	if (src_desc.Stride() != 4 || dst_desc.Stride() != 4) {
-		return EmuFail(7, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	if (program.bindings.push_data_start_dword ==
-	        ShaderRecompiler::IR::PushData::NoStart ||
-	    program.bindings.push_data_start_dword >= bindings.shader_data.size()) {
-		return EmuFail(8, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	const uint32_t push_dword = bindings.shader_data[program.bindings.push_data_start_dword];
-	const uint32_t off0       = push_dword & 0xFFu;
-	const uint32_t off1       = (push_dword >> 8) & 0xFFu;
-	{
-		static std::atomic_uint shape_logged {0};
-		if (shape_logged.fetch_add(1, std::memory_order_relaxed) < 2) {
-			std::printf("Dd7dShape: bufs=%zu src_di=%u dst_di=%u nsrc=%zu push_start=%u ndw=%zu "
-			            "gx=%u threads=%ux%ux%u\n",
-			            program.info.buffers.size(), src_info.descriptor_index,
-			            dst_info.descriptor_index, bindings.buffer_sources.size(),
-			            program.bindings.push_data_start_dword, bindings.shader_data.size(),
-			            gx, input_info.threads_num[0], input_info.threads_num[1],
-			            input_info.threads_num[2]);
-			std::fflush(stdout);
-		}
-	}
-	const auto&    src_range  = bindings.buffer_sources[src_info.descriptor_index];
-	const auto&    dst_range  = bindings.buffer_sources[dst_info.descriptor_index];
-	if (src_range.address == 0 || dst_range.address == 0) {
-		return EmuFail(9, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	const uint64_t src_dwords = src_range.size / 4;
-	const uint64_t dst_dwords = dst_range.size / 4;
-	if (dst_dwords == 0) {
-		return true;
-	}
-	uint64_t total = static_cast<uint64_t>(gx) * 512 + 256;
-	if (total > dst_dwords) {
-		total = dst_dwords;
-	}
-	// Upper sanity bound only; bulk copies emulate at tens of ms each.
-	if (total > (64ull << 20)) {
-		return EmuFail(10, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	if (total == 0 || total > (64ull << 20)) {
-		return total == 0;
-	}
-	// Read the source range once; holes mean the data is not resident.
-	std::vector<uint8_t> src_bytes;
-	uint64_t             src_avail_dwords = 0;
-	if (src_dwords > 0) {
-		src_bytes.resize(static_cast<size_t>(src_range.size));
-		if (!Libs::LibKernel::Memory::TryReadBufferBacking(src_range.address, src_bytes.data(),
-		                                                    src_range.size)) {
-			return EmuFail(11, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-		}
-		src_avail_dwords = src_dwords;
-	}
-	const auto*         src_words = reinterpret_cast<const uint32_t*>(src_bytes.data());
-	std::vector<uint32_t> out(static_cast<size_t>(total));
-	for (uint64_t k = 0; k < total; k++) {
-		const uint64_t read_byte = k * 4 + off0;
-		uint32_t       v         = 0;
-		// Overflow guard mirrors the shader: (byte32 < off) yields an
-		// index of 0xFFFFFFFF, which always fails the bounds check.
-		if (read_byte <= 0xFFFFFFFFull) {
-			const uint32_t b32 = static_cast<uint32_t>(read_byte);
-			if (b32 >= off0) {
-				const uint32_t w = b32 >> 2;
-				if (w < src_avail_dwords) {
-					v = src_words[w];
-				}
-			}
-		}
-		const uint64_t write_byte = k * 4 + off1;
-		if (write_byte > 0xFFFFFFFFull) {
-			continue;
-		}
-		const uint32_t d32 = static_cast<uint32_t>(write_byte);
-		if (d32 < off1) {
-			continue;
-		}
-		const uint32_t dw = d32 >> 2;
-		if (dw < dst_dwords && dw < total) {
-			out[dw] = v;
-		}
-	}
-	if (!Libs::LibKernel::Memory::TryWriteBacking(dst_range.address, out.data(),
-	                                                total * sizeof(uint32_t))) {
-		return EmuFail(12, program.shader_hash, gx, gy, gz, static_cast<uint32_t>(program.info.buffers.size()), static_cast<uint32_t>(program.info.images.size()), input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2]);
-	}
-	context.InvalidateMemory(dst_range.address, total * sizeof(uint32_t));
-	return true;
-}
-} // namespace
-
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
 	EXIT_IF(buffer.IsInvalid());
 	m_context.GetCommandScheduler().PopPendingOperations();
-	auto& ctx    = buffer.GetRegisters();
 	auto& sh_ctx = buffer.GetShaders();
 
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchDirect), submit_id,
@@ -459,7 +292,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	const auto& cs_regs = sh_ctx.GetCs();
-	const auto& sh_regs = ctx.GetShaderRegisters();
 
 	ShaderComputeInputInfo input_info {};
 	input_info.async_compute = async_compute;
@@ -478,21 +310,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 	m_context.GetImageHeap().BeginDraw();
-	const auto compute_program =
-	    m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
-	if (!compute_program) {
-		// Shader was skipped (logged at the skip site); the game continues
-		// without this dispatch.
-		ResetBindings();
-		return;
-	}
+	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
 		input_info.dispatch_threads_num[2]    = thread_group_z;
 	}
 
-	const auto& program   = *input_info.stage.program;
+	const auto& program   = input_info.stage.module->info;
 	const auto& resources = *input_info.stage.resources;
 	if (resources.specialization_reads.empty() &&
 	    (TryConsumeComputeMetaClear(input_info, buffer) ||
@@ -502,24 +327,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
-	const bool large_workgroup =
-	    (input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2] >= 512);
-	const bool                   has_sampler = !program.info.samplers.empty();
-	static std::atomic<uint32_t> dispatch_log_count {0};
-	// Always detail-log the two kernels dominating TDR death batches.
-	const bool tdr_suspect = program.shader_hash == 0xdd7d9b716cfe5abaull ||
-	                         program.shader_hash == 0x0b3ee2d73a90eeb6ull;
-	static std::atomic<uint32_t> suspect_log_count {0};
-	const bool suspect_sample =
-	    tdr_suspect && (suspect_log_count.load(std::memory_order_relaxed) < 30 ||
-	                    (submit_id % 100 == 0 && suspect_log_count.load(std::memory_order_relaxed) < 3000));
-	if (suspect_sample) {
-		suspect_log_count.fetch_add(1, std::memory_order_relaxed);
-	}
-	const bool detail_log_sample =
-	    ((large_workgroup || has_sampler) &&
-	     dispatch_log_count.fetch_add(1, std::memory_order_relaxed) < 512) ||
-	    suspect_sample;
 	if (use_thread_dimensions) {
 		const uint32_t old_x = thread_group_x;
 		const uint32_t old_y = thread_group_y;
@@ -540,12 +347,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	buffer.EndRendering();
-	auto& pipeline =
-	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
-	if (pipeline.pipeline == nullptr) {
-		// Creation failed and was logged; skip the dispatch so the game continues.
-		return;
-	}
+	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
@@ -564,90 +366,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
 
-	// Which compute kernel (if any) writes the tonemap's exposure/LUT inputs,
-	// or writes any small image (those are the likely producers)?
-	{
-		const uint64_t exposure_addr = KytySceneDiag::exposure_addr.load(std::memory_order_relaxed);
-		const uint64_t lut_addr      = KytySceneDiag::lut_addr.load(std::memory_order_relaxed);
-		for (size_t slot = 0; slot < bindings.images.size(); slot++) {
-			const auto& b = bindings.images[slot];
-			const auto  a = b.desc.info.data.address;
-			bool        written = false;
-			if (slot < program.info.images.size()) {
-				written = program.info.images[slot].written;
-			}
-			const bool small_target = b.desc.info.extent.width <= 64 && b.desc.info.extent.height <= 64;
-			const bool match = (exposure_addr != 0 && a == exposure_addr) ||
-			                   (lut_addr != 0 && a == lut_addr);
-			if (!match && !(small_target && written)) {
-				continue;
-			}
-			static std::atomic_uint logged {0};
-			if (logged.fetch_add(1, std::memory_order_relaxed) < 120) {
-				LOGF("SmallImgDispatch: hash=0x%016" PRIx64 " slot=%zu addr=0x%010" PRIx64
-				     " ext=%ux%u written=%d groups=%ux%ux%u\n",
-				     program.shader_hash, slot, a, b.desc.info.extent.width,
-				     b.desc.info.extent.height, written ? 1 : 0, thread_group_x,
-				     thread_group_y, thread_group_z);
-			}
-		}
-	}
-
 	auto              vk_buffer        = buffer.Handle();
-	// RE Engine Maiden: kernel 0xdd7d9b716cfe5aba renders menus fine but hangs
-	// the GPU in the post-start streaming scene. Once the user pressed Cross,
-	// emulate it on the CPU (exact memcpy semantics) instead of executing it;
-	// if the shape is unexpected, skip it as before.
-	// Emulate-or-skip set: straight-line streaming memcpy kernels that hang
-	// some GPUs on post-start inputs. gameStart-gated (menus stay on GPU).
-	static constexpr uint64_t kEmulateHashes[] = {
-	    0xdd7d9b716cfe5abaull, 0x784423232e8b0f83ull, 0x64642df12ff6a9c1ull,
-	    0xc279fd90007129d8ull, 0x4bc2626d395df924ull, 0xcc29312c5a7270c0ull,
-	    0x7df6760d57a05338ull, 0xff1f82d8c6a56610ull,
-	};
-	bool emulate_kernel = false;
-	for (const auto h: kEmulateHashes) {
-		if (program.shader_hash == h) {
-			emulate_kernel = true;
-			break;
-		}
-	}
-	if (emulate_kernel && Libs::Controller::GameStartPressed()) {
-		static std::atomic_uint emu_logged {0};
-		const bool             emulated = CpuEmulateStreamingCopy(
-                m_context, input_info, program, bindings, thread_group_x, thread_group_y,
-                thread_group_z);
-		// Triage escape hatch (env KYTY_EXEC_FALLBACK=1): when emulation refuses a
-		// kernel, execute it on the GPU instead of skipping so the game receives
-		// its outputs. Robust drivers tolerate kernels that hang weaker GPUs.
-		static const bool exec_fallback = std::getenv("KYTY_EXEC_FALLBACK") != nullptr;
-		const uint64_t n = emu_logged.fetch_add(1, std::memory_order_relaxed);
-		if (n < 8 || !emulated || (n % 20000) == 0) {
-			std::printf("DispatchDirect: emu %s hash=0x%016llx (groups=%ux%ux%u)%s\n",
-			            emulated ? "cpu-emulated" : (exec_fallback ? "exec-fallback" : "skipped"),
-			            static_cast<unsigned long long>(program.shader_hash),
-			            thread_group_x, thread_group_y, thread_group_z,
-			            (!emulated && exec_fallback) ? " [fallback]" : "");
-			std::fflush(stdout);
-		}
-		if (emulated || !exec_fallback) {
-			ResetBindings();
-			return;
-		}
-		// Fall through: execute the refused kernel on the GPU.
-	}
-	// One line per dispatch (printf so it lands in the run log): submit ids
-	// in submit-failure reports map back to the exact shader hash here.
-	// Placed after every skip/divert decision so only executed work logs.
-	std::printf("DispatchDirect: submit=%llu shader_hash=0x%016llx groups=%ux%ux%u mode=0x%x wave=%u\n",
-	            static_cast<unsigned long long>(submit_id),
-	            static_cast<unsigned long long>(program.shader_hash), thread_group_x,
-	            thread_group_y, thread_group_z, mode, program.wave_size);
-	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	                      std::span {&descriptor_stage, 1u})) {
-		ResetBindings();
-		return;
-	}
+	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+	               std::span {&descriptor_stage, 1u});
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =
@@ -663,7 +384,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		// while allowing the queue to execute asynchronously.
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
-	if (Config::GraphicsDebugDumpEnabled() || detail_log_sample) {
+	if (Config::GraphicsDebugDumpEnabled()) {
 		const auto sampled_images = std::count_if(
 		    program.info.images.begin(), program.info.images.end(), [](const auto& image) {
 			    return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled;
@@ -724,7 +445,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 
-
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
 	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
@@ -752,31 +472,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
-	SplitOversizedSubmit();
-}
-
-void RenderExecutor::SplitOversizedSubmit() {
-	// Batches of dozens of dispatches in one vkQueueSubmit hang some drivers
-	// (KoF XV and RE Engine fight/streaming loads TDR with only ~30 in flight);
-	// normal phases record far fewer per submit. Drain fully so the driver
-	// never holds a large batch of small dispatches.
-	// Triage knob (env KYTY_NO_SPLIT=1): skip splitting entirely.
-	static const bool no_split = std::getenv("KYTY_NO_SPLIT") != nullptr;
-	if (no_split) {
-		return;
-	}
-	static constexpr uint32_t kMaxDispatchesPerSubmit = 16;
-	if (++m_dispatches_since_submit >= kMaxDispatchesPerSubmit) {
-		m_dispatches_since_submit = 0;
-		m_context.GetCommandScheduler().FlushAndWait();
-		// Streaming loads have no frame boundaries (where GC normally runs):
-		// collect periodically so retired cache entries don't accumulate
-		// until VRAM exhausts.
-		static thread_local uint32_t gc_counter = 0;
-		if ((gc_counter++ & 15u) == 0) {
-			m_context.RunGarbageCollector();
-		}
-	}
 }
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
@@ -802,25 +497,14 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	input_info.async_compute = async_compute;
 	input_info.indirect_args_address = args_addr;
 	m_context.GetImageHeap().BeginDraw();
-	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
-	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
-	if (!compute_program) {
-		// Shader was skipped (logged at the skip site); the game continues
-		// without this dispatch.
-		ResetBindings();
-		return;
-	}
+	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
 	buffer.EndRendering();
-	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
-	if (pipeline.pipeline == nullptr) {
-		// Creation failed and was logged; skip the dispatch so the game continues.
-		return;
-	}
+	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
 	FindBuffers(std::span {&descriptor_stage, 1u});
-	const auto& program = *input_info.stage.program;
+	const auto& program = input_info.stage.module->info;
 	if (program.info.uses_dma) {
 		m_context.PrepareBda();
 	}
@@ -833,78 +517,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
-	// Log indirect counts (best effort: GPU-produced args may be stale on the
-	// CPU side, but CPU-produced args show exactly).
-	{
-		uint32_t   indirect_xyz[3] = {};
-		const auto mapped          = args_buffer->Mapped();
-		if (args_offset + sizeof(indirect_xyz) <= mapped.size()) {
-			std::memcpy(indirect_xyz, mapped.data() + args_offset, sizeof(indirect_xyz));
-		}
-			std::printf("DispatchIndirect: submit=%llu shader_hash=0x%016llx args_addr=0x%llx "
-			            "xyz=%ux%ux%u mode=0x%x buf=0x%llx+%llx mapped=%zu\n",
-			            static_cast<unsigned long long>(submit_id),
-			            static_cast<unsigned long long>(program.shader_hash),
-			            static_cast<unsigned long long>(args_addr), indirect_xyz[0], indirect_xyz[1],
-			            indirect_xyz[2], mode,
-			            static_cast<unsigned long long>(args_buffer->CpuAddress()),
-			            static_cast<unsigned long long>(args_buffer->Size()), mapped.size());
-		std::fflush(stdout);
-		// CPU-visible garbage counts hang the GPU (TDR) with no other trace;
-		// skip instead of hanging. Legit dispatches stay far below this.
-		if (mapped.size() == 0 || args_offset + sizeof(indirect_xyz) > mapped.size()) {
-			// Device-local arguments cannot be read by the CPU, but the GPU reads
-			// them itself when the dispatch is submitted indirectly, and they are
-			// the game's own counts, so there is nothing here for us to bound.
-			// Skipping them (as an earlier drain-and-validate did) removed every
-			// GPU-driven dispatch: the scene-building pipeline runs through
-			// exactly these kernels, so the world stayed black. Dispatch indirect
-			// and log, bounded, that this path is taken.
-			//
-			// Triage knob (env KYTY_SKIP_DEVICE_LOCAL_INDIRECT=1): restore the
-			// old skip if dispatching these ever hangs the GPU again.
-			static const bool skip_device_local =
-			    std::getenv("KYTY_SKIP_DEVICE_LOCAL_INDIRECT") != nullptr;
-			if (skip_device_local) {
-				ResetBindings();
-				return;
-			}
-			static std::atomic_uint device_local_log_count {0};
-			if (device_local_log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-				std::printf("DispatchIndirect: device-local args, dispatch indirect "
-				            "submit=%llu shader_hash=0x%016llx args_addr=0x%llx\n",
-				            static_cast<unsigned long long>(submit_id),
-				            static_cast<unsigned long long>(program.shader_hash),
-				            static_cast<unsigned long long>(args_addr));
-				std::fflush(stdout);
-			}
-		}
-		if (mapped.size() > 0) {
-			const uint64_t total = static_cast<uint64_t>(indirect_xyz[0]) * indirect_xyz[1] *
-			                       indirect_xyz[2];
-			if (total > (1ull << 24)) {
-				std::printf("SKIP insane indirect: submit=%llu shader_hash=0x%016llx "
-				            "xyz=%ux%ux%u\n",
-				            static_cast<unsigned long long>(submit_id),
-				            static_cast<unsigned long long>(program.shader_hash),
-				            indirect_xyz[0], indirect_xyz[1], indirect_xyz[2]);
-				std::fflush(stdout);
-				ResetBindings();
-				return;
-			}
-		}
-	}
 	RebindBuffers(bindings);
-	if (program.shader_hash == 0xdd7d9b716cfe5abaull &&
-	    Libs::Controller::GameStartPressed()) {
-		ResetBindings();
-		return;
-	}
-	if (!CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	                      std::span {&descriptor_stage, 1u})) {
-		ResetBindings();
-		return;
-	}
+	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+	               std::span {&descriptor_stage, 1u});
 	const auto vk_buffer = buffer.Handle();
 	const bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage) ||
@@ -928,7 +543,6 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
-	SplitOversizedSubmit();
 }
 
 } // namespace Libs::Graphics

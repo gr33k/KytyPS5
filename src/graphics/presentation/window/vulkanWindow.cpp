@@ -24,6 +24,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
@@ -272,6 +273,7 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 #if !defined(__APPLE__)
 		check_feature(device_features2.features.depthClamp, "depthClamp");
 #endif
+
 		check_feature(features12.samplerMirrorClampToEdge, "samplerMirrorClampToEdge",
 		              required_features12.samplerMirrorClampToEdge);
 		check_feature(features11.storageBuffer16BitAccess, "storageBuffer16BitAccess",
@@ -335,6 +337,7 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 
 		check_feature(device_features2.features.shaderImageGatherExtended,
 		              "shaderImageGatherExtended");
+		check_feature(device_features2.features.shaderResourceMinLod, "shaderResourceMinLod");
 
 		check_feature(device_features2.features.independentBlend, "independentBlend");
 		check_feature(device_features2.features.tessellationShader, "tessellationShader");
@@ -498,19 +501,19 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		provoking_vertex.pNext = supported_features2.pNext;
 		supported_features2.pNext = &provoking_vertex;
 	}
-	const bool list_restart_extension = HasExtension(
-	    device_extensions, VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
-	vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT supported_list_restart {};
-	if (list_restart_extension) {
-		supported_list_restart.pNext = supported_features2.pNext;
-		supported_features2.pNext     = &supported_list_restart;
-	}
 	const bool maintenance8_extension =
 	    HasExtension(device_extensions, VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
 	vk::PhysicalDeviceMaintenance8FeaturesKHR maintenance8 {};
 	if (maintenance8_extension) {
 		maintenance8.pNext = supported_features2.pNext;
 		supported_features2.pNext = &maintenance8;
+	}
+	const bool shader_clock_extension =
+	    HasExtension(device_extensions, VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
+	vk::PhysicalDeviceShaderClockFeaturesKHR shader_clock {};
+	if (shader_clock_extension) {
+		shader_clock.pNext = supported_features2.pNext;
+		supported_features2.pNext = &shader_clock;
 	}
 	const bool image_atomic_int64_extension =
 	    HasExtension(device_extensions, VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME);
@@ -531,7 +534,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR supported_barycentric {};
 	if (barycentric_extension) {
 		supported_barycentric.pNext = supported_features2.pNext;
-	supported_features2.pNext   = &supported_barycentric;
+		supported_features2.pNext   = &supported_barycentric;
 	}
 	physical_device.getFeatures2(&supported_features2);
 	const bool barycentric_supported =
@@ -542,11 +545,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		    "Some games may render incorrectly or crash.\n");
 	}
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
-	graphics.fragment_barycentric_enabled =
-	    barycentric_extension && supported_barycentric.fragmentShaderBarycentric == VK_TRUE;
-	if (!graphics.fragment_barycentric_enabled) {
-		LOGF("fragmentShaderBarycentric is not supported; barycentric draws will be skipped\n");
-	}
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported_features12.shaderSharedInt64Atomics;
@@ -567,8 +565,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		    workgroup_layout.workgroupMemoryExplicitLayout != VK_FALSE));
 	}
 	graphics.mesh_shader_enabled = mesh_extension && supported_mesh.meshShader;
-	graphics.topology_list_restart_enabled =
-	    list_restart_extension && supported_list_restart.primitiveTopologyListRestart;
 
 	vk::PhysicalDeviceSubgroupSizeControlProperties subgroup_size_control {};
 
@@ -601,15 +597,16 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	     static_cast<vk::ShaderStageFlags::MaskType>(graphics.required_subgroup_size_stages),
 	     graphics.compute_subgroup_size_control_enabled ? "true" : "false",
 	     graphics.SupportsComputeWave64() ? "true" : "false");
-	std::printf("Vulkan subgroup: default=%u min=%u max=%u size_control=%s wave64=%s\n",
-	            graphics.subgroup_size, graphics.min_subgroup_size, graphics.max_subgroup_size,
-	            graphics.compute_subgroup_size_control_enabled ? "true" : "false",
-	            graphics.SupportsComputeWave64() ? "true" : "false");
 	graphics.provoking_vertex_last_enabled = provoking_extension && provoking_vertex.provokingVertexLast;
 	graphics.attachment_feedback_loop_enabled =
 	    feedback_extensions && feedback_layout.attachmentFeedbackLoopLayout &&
 	    feedback_dynamic.attachmentFeedbackLoopDynamicState;
 	graphics.maintenance8_enabled = maintenance8_extension && maintenance8.maintenance8;
+	// The device clock ticks at timestampPeriod nanoseconds.
+	if (shader_clock_extension && shader_clock.shaderDeviceClock) {
+		graphics.device_clock_period_ps = static_cast<uint32_t>(
+		    std::lround(graphics.physical_device_properties.limits.timestampPeriod * 1000.0f));
+	}
 	graphics.conditional_rendering_enabled =
 	    conditional_rendering_extension && conditional_rendering.conditionalRendering;
 	LOGF("Vulkan maintenance8 support: %s\n",
@@ -640,6 +637,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.shaderStorageImageMultisample        =
 	    supported_features2.features.shaderStorageImageMultisample;
 	device_features.shaderImageGatherExtended            = VK_TRUE;
+	device_features.shaderResourceMinLod                 = VK_TRUE;
 	device_features.independentBlend                     = VK_TRUE;
 	device_features.dualSrcBlend                         = VK_TRUE;
 	device_features.tessellationShader                   = VK_TRUE;
@@ -659,6 +657,16 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		    vk::SampleCountFlagBits::e1;
 	}
 	graphics.sample_rate_shading_enabled                 = true;
+	// Occlusion queries reset their queries from the host and count samples exactly where they can.
+	graphics.occlusion_queries_enabled =
+	    Config::OcclusionQueriesEnabled() && supported_features12.hostQueryReset;
+	graphics.occlusion_query_precise_enabled =
+	    graphics.occlusion_queries_enabled && supported_features2.features.occlusionQueryPrecise;
+	features12.hostQueryReset             = graphics.occlusion_queries_enabled;
+	device_features.occlusionQueryPrecise = graphics.occlusion_query_precise_enabled;
+	LOGF("Vulkan occlusion queries: %s, precise: %s\n",
+	     graphics.occlusion_queries_enabled ? "true" : "false",
+	     graphics.occlusion_query_precise_enabled ? "true" : "false");
 	device_features.shaderInt64 = VK_TRUE;
 	device_features.shaderFloat64 =
 	    supported_features2.features.shaderFloat64 &&
@@ -710,12 +718,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		provoking_vertex.transformFeedbackPreservesProvokingVertex = VK_FALSE;
 		create_info.pNext = &provoking_vertex;
 	}
-	vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT list_restart_features {};
-	if (graphics.topology_list_restart_enabled) {
-		list_restart_features.primitiveTopologyListRestart = VK_TRUE;
-		list_restart_features.pNext = const_cast<void*>(create_info.pNext);
-		create_info.pNext           = &list_restart_features;
-	}
 	if (graphics.shader_image_int64_atomics_enabled) {
 		image_atomic_int64.pNext = const_cast<void*>(create_info.pNext);
 		image_atomic_int64.sparseImageInt64Atomics = VK_FALSE;
@@ -725,9 +727,22 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		maintenance8.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext = &maintenance8;
 	}
+	if (graphics.device_clock_period_ps != 0u) {
+		shader_clock.pNext = const_cast<void*>(create_info.pNext);
+		create_info.pNext = &shader_clock;
+	}
 	if (graphics.conditional_rendering_enabled) {
 		conditional_rendering.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext = &conditional_rendering;
+	}
+	// The renderer only uses the Vulkan 1.3 core dynamic states, but RADV (Mesa 26.3) creates its
+	// PS epilog cache only when this EXT feature is enabled and crashes in vkCmdDraw when a
+	// depth- or stencil-writing fragment shader needs an epilog.
+	vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT extended_dynamic_state {};
+	extended_dynamic_state.extendedDynamicState = VK_TRUE;
+	if (HasExtension(device_extensions, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME)) {
+		extended_dynamic_state.pNext = const_cast<void*>(create_info.pNext);
+		create_info.pNext = &extended_dynamic_state;
 	}
 	create_info.pQueueCreateInfos       = &queue_create_info;
 	create_info.queueCreateInfoCount    = 1;
@@ -866,33 +881,8 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
 			severity_style = Log::Color::BrightRed;
 			// Only validation errors are fatal; GENERAL-type errors can come
 			// from unrelated loader/layer issues (e.g. a broken overlay).
-		error = static_cast<bool>(message_types &
-		                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
-		// Benign timing race: the present loop can re-acquire with the same
-		// binary semaphore before the queued wait executes. Drivers tolerate
-		// it; demote so GPU-assisted runs can proceed past it.
-		if (error && callback_data->pMessageIdName != nullptr &&
-		    strcmp(callback_data->pMessageIdName,
-		           "VUID-vkAcquireNextImageKHR-semaphore-01779") == 0) {
-			severity_str = "W";
-			error        = false;
-		}
-		// GPU-assisted data races are logged above with full forensics; aborting
-		// at the first (often benign) race hides deeper issues. Let execution
-		// continue: a real hang still manifests as device loss.
-		if (error && callback_data->pMessage != nullptr &&
-		    strstr(callback_data->pMessage, "data race was detected") != nullptr) {
-			severity_str = "W";
-			error        = false;
-		}
-		// TEMP-DIAG: depth-compare sampler on a color view is a real bug, but
-		// aborting here hides the GPU hang under investigation. Demote while
-		// trapping; fix the binding properly afterwards.
-		if (error && callback_data->pMessage != nullptr &&
-		    strstr(callback_data->pMessage, "SAMPLED_IMAGE_DEPTH_COMPARISON_BIT") != nullptr) {
-			severity_str = "W";
-			error        = false;
-		}
+			error = static_cast<bool>(message_types &
+			                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
 			break;
 		default: severity_str = "?";
 	}
@@ -1124,18 +1114,16 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 			graphic_ctx.memory_budget_ext_enabled = true;
 		}
-		for (const auto* extension: {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
-		                             VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
-		                             VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
-		                             VK_KHR_MAINTENANCE_8_EXTENSION_NAME,
+		for (const auto* extension: {VK_KHR_MAINTENANCE_8_EXTENSION_NAME,
+		                             VK_KHR_SHADER_CLOCK_EXTENSION_NAME,
 		                             VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,
 		                             VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME,
 		                             VK_EXT_MESH_SHADER_EXTENSION_NAME,
-		                             VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME,
 		                             VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
 		                             VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME,
 		                             VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
-		                             VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME}) {
+		                             VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME,
+		                             VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME}) {
 			if (HasExtension(available_extensions, extension)) {
 				device_extensions.push_back(extension);
 			}
@@ -1149,19 +1137,6 @@ void WindowContext::CreateVulkan() {
 	}
 
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);
-	// TEMP-DIAG (device fault): confirm fault extension + entry point.
-	{
-		bool have_fault_ext = false;
-		for (const auto* e: device_extensions) {
-			if (std::string(e) == VK_EXT_DEVICE_FAULT_EXTENSION_NAME) {
-				have_fault_ext = true;
-				break;
-			}
-		}
-		std::printf("DeviceFaultSetup: ext=%d func=%d\n", have_fault_ext ? 1 : 0,
-		            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT != nullptr ? 1 : 0);
-		std::fflush(stdout);
-	}
 	if (graphic_ctx.device == nullptr) {
 		EXIT("Could not create device");
 	}

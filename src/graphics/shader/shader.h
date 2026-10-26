@@ -15,17 +15,6 @@
 
 namespace Libs::Graphics {
 
-namespace ShaderError {
-
-[[nodiscard]] inline bool Fail(std::string* error, std::string_view message) {
-	if (error != nullptr) {
-		error->assign(message.data(), message.size());
-	}
-	return false;
-}
-
-} // namespace ShaderError
-
 namespace HW {
 struct VertexShaderInfo;
 struct PixelShaderInfo;
@@ -45,16 +34,14 @@ enum class ShaderType {
 	TessellationEvaluation
 };
 
-namespace ShaderRecompiler::IR {
-struct CompiledShaderInfo;
-} // namespace ShaderRecompiler::IR
+struct ShaderModule;
 
 struct ShaderStageRuntime {
-	const ShaderRecompiler::IR::CompiledShaderInfo* program = nullptr;
-	const ShaderRecompiler::IR::ResourceSnapshot*   resources = nullptr;
+	const ShaderModule*                           module    = nullptr;
+	const ShaderRecompiler::IR::ResourceSnapshot* resources = nullptr;
 
 	[[nodiscard]] explicit operator bool() const {
-		return program != nullptr && resources != nullptr;
+		return module != nullptr && resources != nullptr;
 	}
 };
 
@@ -194,6 +181,9 @@ struct ShaderPixelInputInfo {
 	uint32_t                                       target_shader_mask           = UINT32_MAX;
 	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping        = {};
 	uint8_t                                        target_packed_unorm_mask      = 0;
+	// Exports to UINT and SINT targets, which take integer outputs of the same signedness.
+	uint8_t                                        target_uint_mask             = 0;
+	uint8_t                                        target_sint_mask             = 0;
 	// CB round mode per converted export: zero adds half an LSB, one truncates.
 	uint8_t                                        target_round_mode            = 0;
 	uint32_t                                       scratch_size_dwords          = 0;

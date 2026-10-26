@@ -12,13 +12,6 @@ endif()
 
 project(Kyty)
 
-# LOCAL-ONLY: plain clang.exe on Windows predefines _MSC_VER, so MSVC-isms in
-# vendored C (e.g. cpuinfo's _BitScanReverse without intrin.h) hit clang's
-# default -Werror=implicit-function-declaration. Downgrade to a warning for C.
-if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND WIN32)
-	add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-function-declaration>)
-endif()
-
 find_program(SCCACHE_PROGRAM sccache)
 find_program(CCACHE_PROGRAM ccache)
 
@@ -344,24 +337,7 @@ if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
-# Resource tracking reports unrepresentable shaders by throwing; the throw
-# originates in ResourceTracking.cpp and is caught in ShaderRecompiler.cpp,
-# so both translation units need exceptions. clang-cl disables exceptions by
-# default, so enable them explicitly instead of relying on the driver default.
-if (KYTY_CLANG_CL)
-	set_source_files_properties(
-		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
-		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ShaderRecompiler.cpp"
-		PROPERTIES COMPILE_OPTIONS "/EHsc")
-else()
-	set_source_files_properties(
-		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
-		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ShaderRecompiler.cpp"
-		PROPERTIES COMPILE_OPTIONS "-fexceptions")
-endif()
-
-set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus)
-set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader)
+set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
 
 # Linux system libraries.
 if(LINUX)
@@ -475,6 +451,11 @@ add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(lru_cache_tests PRIVATE ${inc_headers})
 
+add_executable(slot_vector_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SlotVectorTests.cpp"
+)
+target_include_directories(slot_vector_tests PRIVATE ${inc_headers})
+
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/imeCommon.cpp"
@@ -504,7 +485,7 @@ add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
 )
-target_link_libraries(resource_materialization_tests common fmt::fmt xbyak::xbyak)
+target_link_libraries(resource_materialization_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_materialization_tests PRIVATE ${inc_headers})
 
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
@@ -517,7 +498,7 @@ add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp"
 )
-target_link_libraries(resource_tracking_tests common fmt::fmt xbyak::xbyak)
+target_link_libraries(resource_tracking_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
 
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
@@ -564,6 +545,19 @@ target_include_directories(save_data_memory_tests PRIVATE ${inc_headers})
 add_executable(png_enc_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PngEncTests.cpp")
 target_link_libraries(png_enc_tests common fmt::fmt)
 target_include_directories(png_enc_tests PRIVATE ${inc_headers})
+
+add_executable(jpeg_dec_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/JpegDecTests.cpp")
+target_link_libraries(jpeg_dec_tests common fmt::fmt)
+target_include_directories(jpeg_dec_tests PRIVATE ${inc_headers})
+
+add_executable(jpeg_enc_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/JpegEncTests.cpp")
+target_link_libraries(jpeg_enc_tests common fmt::fmt)
+target_include_directories(jpeg_enc_tests PRIVATE ${inc_headers})
+
+add_executable(occlusion_queries_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/OcclusionQueriesTests.cpp")
+target_link_libraries(occlusion_queries_tests common fmt::fmt Vulkan::Headers)
+target_include_directories(occlusion_queries_tests PRIVATE ${inc_headers})
 
 add_executable(ces_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CesTests.cpp")
 target_link_libraries(ces_tests common fmt::fmt SDL3::SDL3-static)
@@ -631,14 +625,8 @@ add_kyty_full_emulator_test(virtual_memory_allocation_tests "${KYTY_TESTS_DIR}/V
 target_compile_definitions(virtual_memory_allocation_tests PRIVATE
 	KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS=1)
 
-# These tests use exceptions. clang-cl disables exceptions by default,
-# so enable them explicitly instead of relying on the driver default.
-if(KYTY_CLANG_CL)
-	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
-			virtual_memory_allocation_tests)
-		target_compile_options(${kyty_exception_test} PRIVATE /EHsc)
-	endforeach()
-else()
+# These tests use exceptions.
+if(NOT KYTY_CLANG_CL)
 	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
 			virtual_memory_allocation_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
@@ -682,6 +670,9 @@ if(BUILD_TESTING)
 	add_test(NAME host_input COMMAND $<TARGET_FILE:host_input_tests>)
 	add_test(NAME save_data_memory COMMAND $<TARGET_FILE:save_data_memory_tests>)
 	add_test(NAME png_enc COMMAND $<TARGET_FILE:png_enc_tests>)
+	add_test(NAME jpeg_dec COMMAND $<TARGET_FILE:jpeg_dec_tests>)
+	add_test(NAME jpeg_enc COMMAND $<TARGET_FILE:jpeg_enc_tests>)
+	add_test(NAME occlusion_queries COMMAND $<TARGET_FILE:occlusion_queries_tests>)
 	add_test(NAME ces COMMAND $<TARGET_FILE:ces_tests>)
 	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
@@ -708,6 +699,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-command-lane-only)
 	add_test(NAME wait_until_safe_for_rendering
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --wait-until-safe-for-rendering-only)
+	add_test(NAME pm4_flip
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --flip-only)
 	add_test(NAME depth_bits
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --depth-bits-only)
 	add_test(NAME msaa_storage
@@ -772,6 +765,9 @@ if(BUILD_TESTING)
 		host_input_tests
 		save_data_memory_tests
 		png_enc_tests
+		jpeg_dec_tests
+		jpeg_enc_tests
+		occlusion_queries_tests
 		ces_tests
 		save_data_dialog_tests
 		http_uri_parse_tests
@@ -796,9 +792,6 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 endif()
 
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
-if(WIN32)
-	target_sources(kyty_emulator PRIVATE "${KYTY_SOURCE_DIR}/emulator.rc")
-endif()
 configure_macos_guest_address_space(kyty_emulator)
 
 set(KYTY_TROPHY_UNLOCK_SOUND "${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/trophy-unlock.wav")

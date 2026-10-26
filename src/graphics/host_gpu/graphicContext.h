@@ -36,6 +36,8 @@ struct GraphicContext {
 	bool                               provoking_vertex_last_enabled         = false;
 	bool                               maintenance8_enabled                  = false;
 	bool                               conditional_rendering_enabled         = false;
+	bool                               occlusion_queries_enabled             = false;
+	bool                               occlusion_query_precise_enabled       = false;
 	bool                               supports_block_texel_view              = false;
 	bool                               topology_list_restart_enabled          = false;
 	bool                                      mesh_shader_enabled                   = false;
@@ -45,6 +47,7 @@ struct GraphicContext {
 	uint32_t                           min_subgroup_size                     = 0;
 	uint32_t                           max_subgroup_size                     = 0;
 	uint32_t                           max_push_descriptors                  = 0;
+	uint32_t                           device_clock_period_ps                = 0;
 	vk::DescriptorSetLayout            image_heap_layout                     = nullptr;
 	vk::ShaderStageFlags               required_subgroup_size_stages         = {};
 	Common::Mutex                      queue_mutex;

@@ -60,6 +60,8 @@ enum class Opcode {
 	S_FF1_I32_B64,
 	S_FLBIT_I32_B32,
 	S_FLBIT_I32_B64,
+	S_FLBIT_I32,
+	S_FLBIT_I32_I64,
 	S_BITREPLICATE_B64_B32,
 	S_QUADMASK_B64,
 	S_GETPC_B64,
@@ -765,7 +767,9 @@ enum class OperandKind {
 	M0,
 	PopsExitingWaveId,
 	SharedBase,
+	SharedLimit,
 	PrivateBase,
+	PrivateLimit,
 	Null,
 	Vgpr,
 };
