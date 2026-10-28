@@ -300,8 +300,12 @@ void TestOperandMutationLifecycle() {
   auto *source = definition.TryInstruction();
   const auto inserted = fixture.Emit(ValueOpcode::BitFieldInsert,
       {definition, definition, Value(4u), Value(4u)});
-  Check(source->UseCount() == 2, "inline operands lost distinct reverse-use indices");
-  inserted.TryInstruction()->SetArg(1, Value(3u));
+  auto *consumer = inserted.TryInstruction();
+  Check(source->Uses() == std::vector<Use>({{consumer, 0}, {consumer, 1}}),
+        "inline operands lost distinct reverse-use indices");
+  consumer->SetArg(0, definition);
+  Check(source->UseCount() == 2, "re-setting an operand to its value duplicated its use");
+  consumer->SetArg(1, Value(3u));
   Check(source->UseCount() == 1, "inline operand mutation did not detach its old use");
   source->ReplaceUsesWith(Value(0xaau));
   uint32_t result = 0;
@@ -347,6 +351,35 @@ void TestOperandMutationLifecycle() {
   Check(source->UseCount() == 0 && phi.NumPhiBlocks() == 0 && phi.NumArgs() == 1 &&
             EvaluateSrtValue(fixture.program, {}, sum, result) && result == 11,
         "Phi replacement retained incoming uses or changed the consumer value");
+}
+
+void TestReplacementKeepsUseOrder() {
+  Fixture fixture(2);
+  const auto base = fixture.Emit(ValueOpcode::IAdd32, {Value(1u), Value(2u)});
+  auto *before = fixture.Emit(ValueOpcode::IAdd32, {base, Value(3u)}).TryInstruction();
+  auto *identity = fixture.Emit(ValueOpcode::Identity, {base}).TryInstruction();
+  auto *pair = fixture.Emit(ValueOpcode::IAdd32, {Value(identity), Value(identity)}).TryInstruction();
+  auto *after = fixture.Emit(ValueOpcode::IAdd32, {Value(4u), base}).TryInstruction();
+  auto &large = fixture.program.value_storage.emplace_back(ValueOpcode::GetImageResource);
+  const auto last = large.NumArgs() - 1;
+  large.SetArg(last, Value(identity));
+  identity->ReplaceUsesWith(base, false);
+  Check(!identity->HasUses() && identity->NumArgs() == 0 && pair->Arg(0) == base &&
+            pair->Arg(1) == base && large.Arg(last) == base &&
+            base.TryInstruction()->Uses() ==
+                std::vector<Use>({{before, 0}, {after, 1}, {pair, 0}, {pair, 1}, {&large, last}}),
+        "identity removal lost or reordered the uses of its argument");
+
+  auto &phi = fixture.BlockAt(1).AppendNewInst(ValueOpcode::Phi);
+  phi.SetFlags(Type::U32);
+  phi.AddPhiOperand(&fixture.BlockAt(0), Value(after));
+  phi.AddPhiOperand(&fixture.BlockAt(1), Value(&phi));
+  auto *user = fixture.Emit(ValueOpcode::IAdd32, {Value(&phi), Value(&phi)}, 0, 1).TryInstruction();
+  phi.ReplaceUsesWith(Value(after));
+  Check(phi.GetOpcode() == ValueOpcode::Identity && phi.Arg(0) == Value(after) && !phi.HasUses() &&
+            user->Arg(0) == Value(after) && user->Arg(1) == Value(after) &&
+            after->Uses() == std::vector<Use>({{user, 0}, {user, 1}, {&phi, 0}}),
+        "self-referencing Phi replacement kept a use of itself or reordered the moved uses");
 }
 
 void TestControlDependentStandaloneLoadStaysTyped() {
@@ -512,6 +545,34 @@ void TestFloatComparisonDescriptorInputs() {
                 result.dwords[1] == (flush && index < 4 ? 1 : input.greater_equal),
             "descriptor comparison disagrees with native FP32 input mode");
     }
+  }
+}
+
+void TestSignedConversionDescriptorInputs() {
+  // 3.75 and -3.75 truncate, the largest float below 2^31 converts exactly, 2^31 and +inf
+  // saturate up, -2^31 and -1e10 saturate down, and -0.0, a denormal and both NaNs read zero.
+  constexpr std::array<std::pair<uint32_t, uint32_t>, 11> inputs = {{
+      {0x40700000u, 3u},          {0xc0700000u, 0xfffffffdu}, {0x4effffffu, 0x7fffff80u},
+      {0x4f000000u, 0x7fffffffu}, {0x7f800000u, 0x7fffffffu}, {0xcf000000u, 0x80000000u},
+      {0xd01502f9u, 0x80000000u}, {0x80000000u, 0u},          {0x00000001u, 0u},
+      {0x7fc00000u, 0u},          {0xffc00000u, 0u}}};
+  Fixture fixture;
+  const auto user = fixture.Emit(
+      ValueOpcode::GetUserData, {Value(static_cast<ScalarReg>(2))});
+  const auto converted = fixture.Emit(
+      ValueOpcode::ConvertS32F32, {fixture.Emit(ValueOpcode::BitCastF32U32, {user})});
+  Check(ValidateRuntimeValue(fixture.program, converted),
+        "signed float conversion was rejected as a runtime value");
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {converted}, .dword_count = 1});
+
+  auto plan = ExtractResourcePlan(fixture.program);
+  for (const auto [bits, expected] : inputs) {
+    const std::array user_data{bits};
+    DescriptorValue result;
+    Check(EvaluateSource(plan, {.user_data = user_data}, 0, result) &&
+              result.dwords[0] == expected,
+          "descriptor signed conversion disagrees with the native conversion");
   }
 }
 
@@ -884,10 +945,12 @@ int main() {
     TestCarryAndBitFields();
     TestInvariantAndDivergentPhi();
     TestOperandMutationLifecycle();
+    TestReplacementKeepsUseOrder();
     TestControlDependentStandaloneLoadStaysTyped();
     TestRuntime64BitDescriptorOps();
     TestUniformFirstLaneSamplerLod();
     TestFloatComparisonDescriptorInputs();
+    TestSignedConversionDescriptorInputs();
     TestSharedIntegerRuntimeDependencies();
     TestConstantBufferBounds();
     TestReadLaneElimination();

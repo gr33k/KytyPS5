@@ -124,6 +124,17 @@ struct ShaderTessellationInputInfo {
 	uint32_t output_topology       = 0;
 };
 
+// GS user-data slots an indirect draw packet writes its record's base vertex and first instance
+// to. A packet can leave both slots unused even when its record contains nonzero offsets.
+struct ShaderIndirectOffsets {
+	static constexpr uint8_t None = UINT8_MAX;
+
+	uint8_t vertex   = None;
+	uint8_t instance = None;
+
+	bool operator==(const ShaderIndirectOffsets&) const = default;
+};
+
 struct ShaderVertexInputInfo {
 	static constexpr int RES_MAX = 32;
 
@@ -146,8 +157,11 @@ struct ShaderVertexInputInfo {
 	ShaderClipSpaceTransform clip_space;
 	ShaderMeshInputInfo      mesh;
 	ShaderTessellationInputInfo tess;
-	bool                    fetch_external      = false;
-	bool                    fetch_embedded      = false;
+	ShaderIndirectOffsets   indirect_offsets;
+	// GPU-read records add Vulkan bases even when the packet patches no user SGPRs.
+	bool                    indirect_draw       = false;
+	// Attribute-table metadata enables dynamic fetch detection; loads are matched later.
+	bool                    has_dynamic_vertex_fetch = false;
 };
 
 struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {

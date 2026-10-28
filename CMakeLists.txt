@@ -407,6 +407,8 @@ add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 target_link_libraries(scalar_provenance_tests fmt::fmt xbyak::xbyak)
 target_include_directories(scalar_provenance_tests PRIVATE ${inc_headers})
 
+add_executable(build_flags_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BuildFlagsTests.cpp")
+
 add_executable(page_manager_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PageManagerTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
@@ -519,6 +521,13 @@ add_executable(ngs2_sampler_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(ngs2_sampler_tests common fmt::fmt LibAtrac9)
 target_include_directories(ngs2_sampler_tests PRIVATE ${inc_headers})
+
+add_executable(ajm_resample_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/AjmResampleTests.cpp"
+	"${KYTY_SOURCE_DIR}/loader/timer.cpp"
+)
+target_link_libraries(ajm_resample_tests common fmt::fmt FFmpeg::ffmpeg LibAtrac9 opus)
+target_include_directories(ajm_resample_tests PRIVATE ${inc_headers})
 
 add_executable(pad_haptics_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PadHapticsTests.cpp"
@@ -650,6 +659,7 @@ if(BUILD_TESTING)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
+	add_test(NAME build_flags COMMAND $<TARGET_FILE:build_flags_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
@@ -665,6 +675,7 @@ if(BUILD_TESTING)
 	add_test(NAME audio_out2_port COMMAND $<TARGET_FILE:audio_out2_port_tests>)
 	add_test(NAME audio_out_timing COMMAND $<TARGET_FILE:audio_out_timing_tests>)
 	add_test(NAME ngs2_sampler COMMAND $<TARGET_FILE:ngs2_sampler_tests>)
+	add_test(NAME ajm_resample COMMAND $<TARGET_FILE:ajm_resample_tests>)
 	add_test(NAME pad_haptics COMMAND $<TARGET_FILE:pad_haptics_tests>)
 	add_test(NAME controller_settings COMMAND $<TARGET_FILE:controller_settings_tests>)
 	add_test(NAME host_input COMMAND $<TARGET_FILE:host_input_tests>)
@@ -697,8 +708,6 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --stream-buffer-only)
 	add_test(NAME gpu_command_lane
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-command-lane-only)
-	add_test(NAME wait_until_safe_for_rendering
-		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --wait-until-safe-for-rendering-only)
 	add_test(NAME pm4_flip
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --flip-only)
 	add_test(NAME depth_bits
@@ -743,6 +752,7 @@ if(BUILD_TESTING)
 		image_page_table_tests
 		memory_tracker_tests
 		page_manager_tests
+		build_flags_tests
 		archive_file_tests
 		trophy_system_tests
 		avplayer_file_tests
@@ -760,6 +770,7 @@ if(BUILD_TESTING)
 		audio_out2_port_tests
 		audio_out_timing_tests
 		ngs2_sampler_tests
+		ajm_resample_tests
 		pad_haptics_tests
 		controller_settings_tests
 		host_input_tests
@@ -810,6 +821,19 @@ add_custom_target(kyty_touch_cursors
 	VERBATIM)
 add_dependencies(kyty_emulator kyty_touch_cursors)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/cursors" DESTINATION assets)
+
+set(KYTY_NOTO_SANS_FONTS
+	"${KYTY_NOTO_SANS_DIR}/NotoSans-Regular.ttf"
+	"${KYTY_NOTO_SANS_DIR}/NotoSans-Bold.ttf"
+	"${KYTY_NOTO_SANS_DIR}/NotoSans-Italic.ttf"
+	"${KYTY_NOTO_SANS_DIR}/NotoSans-BoldItalic.ttf")
+add_custom_target(kyty_noto_sans_fonts
+	COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kyty_emulator>/assets/fonts"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${KYTY_NOTO_SANS_FONTS}
+		"$<TARGET_FILE_DIR:kyty_emulator>/assets/fonts"
+	VERBATIM)
+add_dependencies(kyty_emulator kyty_noto_sans_fonts)
+install(FILES ${KYTY_NOTO_SANS_FONTS} DESTINATION assets/fonts)
 
 target_link_libraries(kyty_emulator ${kyty_emulator_link_libraries})
 if (WIN32)

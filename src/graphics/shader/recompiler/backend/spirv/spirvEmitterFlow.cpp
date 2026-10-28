@@ -63,7 +63,8 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 	}
 	if (kind == IR::StageInputKind::VertexIndex || kind == IR::StageInputKind::InstanceIndex ||
 	    kind == IR::StageInputKind::InvocationId || kind == IR::StageInputKind::PrimitiveId ||
-	    kind == IR::StageInputKind::Layer || kind == IR::StageInputKind::SampleId) {
+	    kind == IR::StageInputKind::Layer || kind == IR::StageInputKind::SampleId ||
+	    kind == IR::StageInputKind::BaseVertex || kind == IR::StageInputKind::BaseInstance) {
 		const auto value = state.builder.AllocateId();
 		const auto bits  = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpLoad, TypeI32(state), value, variable);

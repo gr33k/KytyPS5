@@ -331,6 +331,18 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		keys.resize(count);
 		return true;
 	};
+	// Reads the key of each record whose rank is set.
+	const auto read_ranks = [&](uint64_t base, uint64_t size, uint64_t first, uint64_t step,
+	                            uint32_t ranks) {
+		keys.reserve(std::popcount(ranks));
+		for (; ranks != 0u; ranks &= ranks - 1u) {
+			const auto offset = first + std::countr_zero(ranks) * step;
+			uint32_t key = 0;
+			if (offset > UINT32_MAX || !read_selector(base, size, offset, {&key, 1})) return false;
+			keys.push_back(key);
+		}
+		return true;
+	};
 	if (selector->rows) {
 		const auto& rows = *selector->rows;
 		DescriptorValue count_value;
@@ -377,19 +389,21 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		}
 	} else if (selector->bitset) {
 		ShaderBufferResource material;
-		std::array<uint32_t, 4> masks {};
+		std::array<uint32_t, 8> storage {};
+		const auto record_words = std::min<size_t>(selector->stride / 4u, storage.size());
+		const auto masks = std::span(storage).first(record_words);
 		uint32_t first = 0, count = 0;
 		if (!DecodeBufferDescriptor(material_value, material) ||
 		    !WalkedValue(program, indirect.selector_first, first) ||
 		    !EvaluateIndirectCount(program, indirect, runtime, count) || count != masks.size() * 32u ||
-		    selector->stride != sizeof(masks) || selector->offset != 0u ||
-		    material.Type() != 0u || material.Stride() != sizeof(masks) ||
+		    selector->stride != masks.size_bytes() || selector->offset != 0u ||
+		    material.Type() != 0u || material.Stride() != selector->stride ||
 		    material.SwizzleEnabled() || material.AddTid() || material.OutOfBounds() != 0u ||
 		    (material.Base48() & 3u) != 0u) return false;
 		if (material.Format() != Prospero::BufferFormat::kInvalid) {
 			const auto words = material.GetSize() / sizeof(uint32_t);
-			// Bitmap storage can grow with resolution while its candidate domain stays
-			// at 128 keys. Bound scratch memory, preserving each coherent read's capture.
+			// Bitmap storage can grow with resolution while its candidate domain stays at 32 keys
+			// per record word. Bound scratch memory, preserving each coherent read's capture.
 			for (uint64_t first_word = 0; first_word < words; first_word += keys.size()) {
 				keys.resize(std::min<uint64_t>(words - first_word, MaxIndirectDescriptorProbes));
 				if (!ReadScalarTable(material.Base48(), material.GetSize(), first_word * 4u,
@@ -445,12 +459,35 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		     uint64_t {first} + count > material.NumRecords())) return false;
 		const auto last = count != 0u ? uint64_t {first} + count - 1u : 0u;
 		if (last > UINT32_MAX) return false;
+		// Out-of-bounds scalar reads return zero.
 		const auto end = count != 0u ? last * step + selector->offset + 4u : 0u;
-		if (end > uint64_t {UINT32_MAX} + 1u ||
-		    (indirect.workgroup_axis == UINT32_MAX && end > size))
+		if (end > uint64_t {UINT32_MAX} + 1u) return false;
+		const auto start = uint64_t {first} * step + selector->offset;
+		if (selector->ranks) {
+			// A scan selects the ranks some word of its mask's address class sets.
+			const auto& mask = *selector->ranks;
+			DescriptorValue mask_value;
+			ShaderBufferResource masks;
+			if (count > 32u || !WalkedDescriptor(program, mask.source, mask_value) ||
+			    !DecodeBufferDescriptor(mask_value, masks)) return false;
+			// Each chunk holds whole strides of the power-of-two class, or one of its words.
+			const auto words = mask.stride / 4u;
+			const auto chunk =
+			    words <= MaxIndirectDescriptorProbes ? MaxIndirectDescriptorProbes : 1u;
+			uint32_t ranks = 0;
+			for (auto at = uint64_t {mask.offset}; at + 4u <= masks.GetSize();
+			     at += uint64_t {std::max(chunk, words)} * 4u) {
+				keys.resize(std::min<uint64_t>((masks.GetSize() - at) / 4u, chunk));
+				if (!ReadScalarTable(masks.Base48(), masks.GetSize(), at, runtime, keys))
+					return false;
+				for (size_t word = 0; word < keys.size(); word += words) ranks |= keys[word];
+			}
+			keys.clear();
+			if (count < 32u) ranks &= (1u << count) - 1u;
+			if (!read_ranks(base, size, start, step, ranks)) return false;
+		} else if (!read_keys(base, size, start, step, count)) {
 			return false;
-		if (!read_keys(base, size, uint64_t {first} * step + selector->offset, step, count))
-			return false;
+		}
 	} else if (!indirect.selector_mask.IsEmpty()) {
 		uint32_t mask = 0;
 		uint32_t count = 0;
@@ -462,18 +499,8 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		if (count < 32u) mask &= (1u << count) - 1u;
 		const auto material_base =
 		    (static_cast<uint64_t>(material_value.dwords[1]) << 32u) | material_value.dwords[0];
-		keys.reserve(std::popcount(mask));
-		while (mask != 0u) {
-			const auto index = std::countr_zero(mask);
-			const auto offset = static_cast<uint64_t>(selector->offset) +
-			                    static_cast<uint64_t>(index) * selector->stride;
-			if (offset > UINT32_MAX) return false;
-			uint32_t key = 0;
-			if (!read_selector(material_base, UINT64_MAX, static_cast<uint32_t>(offset),
-			                   {&key, 1})) return false;
-			keys.push_back(key);
-			mask &= mask - 1u;
-		}
+		if (!read_ranks(material_base, UINT64_MAX, selector->offset, selector->stride, mask))
+			return false;
 	} else if (selector->stride == 0u) {
 		ShaderBufferResource material;
 		if (!DecodeBufferDescriptor(material_value, material) ||
@@ -503,6 +530,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		if (selector->bit_offset != 0u || selector->bit_mask != UINT32_MAX || selector->maximum != UINT32_MAX)
 			for (auto& key: keys)
 				key = std::min((key >> selector->bit_offset) & selector->bit_mask, selector->maximum);
+		if (selector->excluded) std::erase(keys, *selector->excluded);
 		std::ranges::sort(keys);
 		keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
 	}
@@ -756,6 +784,12 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			std::iota(keys.begin(), keys.end(), first_key);
 			if (!keys.empty() && keys.back() < keys.front())
 				std::rotate(keys.begin(), keys.begin() + (UINT32_MAX - first_key + 1ull), keys.end());
+			if (indirect.workgroup_shift != 0u) {
+				for (auto& key: keys)
+					key = static_cast<uint32_t>(uint64_t {key} * indirect.workgroup_multiplier >>
+					                            indirect.workgroup_shift);
+				keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+			}
 		} else {
 			if (!indirect.selector_mask.IsEmpty() && table_value.dword_count != 2u) return false;
 			if (!selector_keys->resolved) {
@@ -1041,6 +1075,26 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			return dimension == Decoder::ImageDimension::Dim1D ||
 			       dimension == Decoder::ImageDimension::Dim2D;
 		};
+		// The descriptor's type selects the address layout. A 2D or 3D candidate reads the leading
+		// coordinates of an equal or larger dimension, but an array with more than one slice reads
+		// the next as its slice. Derivative, LOD, clamp and mip operands shift with the dimension.
+		const auto leading = [&](Decoder::ImageDimension dimension, const DescriptorValue& value) {
+			const bool sliced =
+			    static_cast<Prospero::ImageType>((value.dwords[3] >> 28u) & 0xfu) ==
+			        Prospero::ImageType::kColor2DArray &&
+			    (value.dwords[4] & 0x1fffu) != ((value.dwords[4] >> 16u) & 0x1fffu);
+			return !sliced &&
+			       (dimension == Decoder::ImageDimension::Dim2D || dimension == base.dimension);
+		};
+		const bool leading_coordinates = (base.dimension == Decoder::ImageDimension::Dim2D ||
+		                                  base.dimension == Decoder::ImageDimension::Dim3D) &&
+		    leading(image_class.dimension, snapshot.images[exemplar]) &&
+		    std::ranges::none_of(program.memory_info, [&](const MemoryInfo& memory) {
+			    return memory.kind == ResourceKind::Image && memory.resource == root_index &&
+			           (memory.image_has_mip || (memory.image_sample_flags &
+			               (Decoder::ImageSampleFlagLod | Decoder::ImageSampleFlagDerivative |
+			                Decoder::ImageSampleFlagLodClamp)) != 0u);
+		    });
 		for (uint32_t candidate = 0; candidate < specialization.images.size(); candidate++) {
 			auto& image = specialization.images[candidate];
 			if (image.indirect_root != root_index) {
@@ -1060,8 +1114,10 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			    base.dimension == Decoder::ImageDimension::Dim2D &&
 			    !image.cube && !image_class.cube && is_1d_or_2d(image.dimension) &&
 			    is_1d_or_2d(image_class.dimension);
+			const bool prefix_coordinates =
+			    leading_coordinates && leading(image.dimension, snapshot.images[candidate]);
 			if ((!same_coordinates && !(is_2d(image.dimension) && is_2d(image_class.dimension)) &&
-			     !unfiltered_coordinates) ||
+			     !unfiltered_coordinates && !prefix_coordinates) ||
 			    image.conversion_format != image_class.conversion_format ||
 			    (!storage_swizzle && image.shader_swizzle != image_class.shader_swizzle)) {
 				return SpecializationFail(
@@ -1164,14 +1220,16 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program, co
 				block.sources.push_back(program.info.buffers.at(memory.resource).source);
 			} else {
 				block.sources.push_back(program.info.images.at(memory.resource).source);
+				block.images.push_back(memory.resource);
 				if (image.needs_sampler) {
 					block.sources.push_back(program.info.samplers.at(memory.sampler).source);
 				}
 			}
 		}
-		std::ranges::sort(block.sources);
-		block.sources.erase(std::unique(block.sources.begin(), block.sources.end()),
-		                    block.sources.end());
+		for (auto* list: {&block.sources, &block.images}) {
+			std::ranges::sort(*list);
+			list->erase(std::unique(list->begin(), list->end()), list->end());
+		}
 	}
 	for (auto& block: blocks) block.condition = predicate(block.condition);
 	if (std::ranges::none_of(
@@ -1645,7 +1703,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 		if (source->indirect_descriptor.has_value()) {
 			snapshot.images[i] = {.dword_count = 8u};
-			if (!WalkedActive(program, image.source)) {
+			if (!WalkedActive(program, image.source) || !WalkedImageActive(program, i)) {
 				continue;
 			}
 			const auto& indirect = *source->indirect_descriptor;
@@ -1665,7 +1723,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			if (!evaluate(image.source, snapshot.images[i])) {
 				return false;
 			}
-			if (!ValidImageDescriptor(snapshot.images[i], image.r128)) {
+			// An image listed only by unreached blocks reads zero, not its source's descriptor.
+			if (!WalkedImageActive(program, i) ||
+			    !ValidImageDescriptor(snapshot.images[i], image.r128)) {
 				snapshot.images[i].dwords.fill(0);
 			}
 		}
@@ -1711,8 +1771,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 }
 
 uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value) {
-	// Mirrors BuildResourceSpecialization for sampled roots: entries it would reject, and
-	// entries that need shader-side conversion, read as null instead of failing the draw.
+	// Mirrors BuildResourceSpecialization for sampled roots: entries it would reject, entries of
+	// another dimension and entries that need shader-side conversion read as null instead of
+	// failing the draw.
 	const auto format = static_cast<Prospero::BufferFormat>((value.dwords[1] >> 20u) & 0x1ffu);
 	const auto tile = static_cast<Prospero::TileMode>((value.dwords[3] >> 20u) & 0x1fu);
 	const auto numeric_class =

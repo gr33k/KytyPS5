@@ -687,6 +687,10 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
+	if (!tess_active && !mesh_active) {
+		vertex_info[0].indirect_offsets = state.indirect_offsets;
+		vertex_info[0].indirect_draw    = state.indirect_draw;
+	}
 	if (object_primitive_id) {
 		// CxObjectIdMode: register source plus a 32-bit pipelined primitive-ID addition.
 		EXIT_NOT_IMPLEMENTED(sh.m_paClObjprimIdCntl != 2u || mesh_active || tess_active ||
@@ -1012,15 +1016,11 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	}
 	static_params.alpha_to_coverage_enable = ps_active && ctx.GetShaderRegisters().AlphaToMask();
 	const bool rect_list = Prospero::IsRectList(command.GetUserConfig().GetPrimType());
-	static_params.cull_back  = !rect_list && mc.cull_back;
-	static_params.cull_front = !rect_list && mc.cull_front;
-	static_params.face       = mc.face;
 	static_params.provoking_vtx_last = mc.provoking_vtx_last;
 	static_params.polygon_mode =
-	    ResolvePolygonMode(mc, static_params.cull_front, static_params.cull_back);
+	    ResolvePolygonMode(mc, !rect_list && mc.cull_front, !rect_list && mc.cull_back);
 	if (tessellation) {
-		static_params.patch_control_points =
-		    static_cast<uint8_t>(vs_input_info.tess.input_control_points);
+		static_params.patch_control_points = vs_input_info.tess.input_control_points;
 	} else if (!mesh && static_params.topology == vk::PrimitiveTopology::ePatchList) {
 		// Rectangle lists expand through generated tessellation stages.
 		static_params.patch_control_points = 3;

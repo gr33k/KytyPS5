@@ -53,7 +53,7 @@ std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 	                                           const ShaderVertexInputInfo& vs_input_info) {
 	auto     vertex_offset   = static_cast<int32_t>(index_offset);
 	uint32_t instance_offset = 0;
-	if (!vs_input_info.fetch_embedded) {
+	if (!vs_input_info.has_dynamic_vertex_fetch) {
 		return {vertex_offset, instance_offset};
 	}
 
@@ -525,6 +525,20 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 		    (use_front ? poly_offset.front_scale : poly_offset.back_scale) / 16.0f;
 		dynamic_state.SetDepthBias(constant_factor, poly_offset.clamp, slope_factor);
 	}
+
+	// Rect lists are drawn without culling.
+	vk::CullModeFlags cull_mode {};
+	if (!Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
+		if (mode.cull_front) {
+			cull_mode |= vk::CullModeFlagBits::eFront;
+		}
+		if (mode.cull_back) {
+			cull_mode |= vk::CullModeFlagBits::eBack;
+		}
+	}
+	dynamic_state.SetCullMode(cull_mode);
+	dynamic_state.SetFrontFace(mode.face ? vk::FrontFace::eClockwise
+	                                     : vk::FrontFace::eCounterClockwise);
 
 	dynamic_state.SetStencilTestEnabled(depth.stencil_test_enable);
 	if (depth.stencil_test_enable) {
@@ -1480,24 +1494,36 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 }
 
-// Vulkan offsets for a prepared draw, or nullopt when its indirect records need CPU counts, as
-// mesh and quad-list draws do. Indirect records carry their own offsets.
+// Vulkan offsets for a prepared draw, or nullopt when its indirect records need the CPU: mesh
+// and quad-list draws for counts, tessellation draws for the index/SGPR prolog. Indirect records
+// carry their own offsets.
 static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        ucfg,
                                                    const ShaderVertexInputInfo& vs,
                                                    DrawOffsetSource             source,
                                                    int32_t                      first_vertex,
                                                    uint32_t                     first_instance,
                                                    const DrawIndirectArgs&      indirect) {
+	if ((indirect.address != 0 || source == DrawOffsetSource::IndirectArgs) &&
+	    ucfg.GetIndexOffset() != 0) {
+		static std::once_flag warning_once;
+		std::call_once(warning_once, [&] {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "GPU: indirect draw ignores GE_INDX_OFFSET=0x{:08x}; geometry may be incorrect.\n",
+			    ucfg.GetIndexOffset()));
+		});
+	}
 	if (indirect.address != 0) {
-		if (vs.stage.module->info.stage == ShaderType::Mesh ||
-		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy) {
+		if (!vs.indirect_draw ||
+		    vs.stage.module->info.stage == ShaderType::Mesh ||
+		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy ||
+		    vs.indirect_offsets != indirect.offsets) {
 			return std::nullopt;
 		}
 		return DrawEmitInfo {.indirect = indirect};
 	}
 	if (source == DrawOffsetSource::IndirectArgs) {
 		// Native fetches consume the patched SGPRs; rewritten fetches need Vulkan offsets.
-		return vs.fetch_embedded ? DrawEmitInfo {first_vertex, first_instance} : DrawEmitInfo {};
+		return vs.has_dynamic_vertex_fetch ? DrawEmitInfo {first_vertex, first_instance} : DrawEmitInfo {};
 	}
 	const auto [vertex_offset, instance_offset] = ResolveDrawOffsets(ucfg.GetIndexOffset(), vs);
 	return DrawEmitInfo {vertex_offset + first_vertex, instance_offset};
@@ -1554,7 +1580,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	hw_check(buffer);
 
-	DrawRenderState state {};
+	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
+	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		return true;
 	}
@@ -1659,7 +1686,8 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};
 
-	DrawRenderState state {};
+	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
+	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		ResetBindings();
 		return true;

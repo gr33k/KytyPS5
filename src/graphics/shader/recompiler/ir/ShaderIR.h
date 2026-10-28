@@ -251,6 +251,8 @@ enum class StageInputKind {
 	LocalInvocationId,
 	LocalInvocationIndex,
 	GlobalInvocationId,
+	BaseVertex,
+	BaseInstance,
 	Parameter,
 };
 
@@ -572,6 +574,13 @@ struct DescriptorSource {
 
 				bool operator==(const CountedRows& other) const = default;
 			};
+			struct MaskRanks {
+				uint32_t source = UINT32_MAX;
+				uint32_t stride = 0; // Byte spacing of the mask words its load can address.
+				uint32_t offset = 0;
+
+				bool operator==(const MaskRanks& other) const = default;
+			};
 			uint32_t source = UINT32_MAX;
 			uint32_t stride = 0;
 			uint32_t offset = 0;
@@ -579,10 +588,12 @@ struct DescriptorSource {
 			uint32_t bit_offset = 0;
 			uint32_t bit_mask = UINT32_MAX;
 			bool global = false;
-			// Four DWORD bitmap words per record; set-bit ranks subtract from the last key.
+			// Four or eight DWORD bitmap words per record; set ranks subtract from the last key.
 			bool bitset = false;
 			std::optional<CountedRows> rows;
 			std::vector<std::pair<uint32_t, uint32_t>> byte_ranges;
+			std::optional<uint32_t> excluded; // A guard keeps this key from the read.
+			std::optional<MaskRanks> ranks;   // Records are the bits some mask word sets.
 
 			bool operator==(const SelectorRead& other) const = default;
 		};
@@ -606,8 +617,12 @@ struct DescriptorSource {
 		bool     indexed = false;
 		bool     signed_count = false;
 		uint32_t workgroup_axis  = UINT32_MAX;
+		// Nonzero shift: workgroup keys are (selector_first + ID) * multiplier >> shift.
+		uint32_t workgroup_multiplier = 0;
+		uint32_t workgroup_shift      = 0;
 		Value    key_count;
-		// First selector index, or first descriptor key for a direct or bitmap range.
+		// First selector index, workgroup key base, or first descriptor key for a direct or bitmap
+		// range.
 		Value                 selector_first;
 		Value    selector_mask;
 		std::vector<uint32_t> sources;
@@ -634,6 +649,7 @@ struct ResourceBlock {
 	Value                 condition;
 	std::vector<uint32_t> successors;
 	std::vector<uint32_t> sources;
+	std::vector<uint32_t> images;
 	std::vector<uint32_t> srt_reads;
 };
 

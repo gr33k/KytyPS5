@@ -1314,6 +1314,62 @@ void TestSignedStorageSpecialization() {
   }
 }
 
+// One descriptor serves a store, an atomic that a user-data condition guards, and an image no
+// block lists. Unreached, the atomic reads a zero descriptor instead of the RGBA8 format the
+// others use; reached, it rejects that format.
+void TestUnreachedImageIgnoresSharedDescriptor(bool atomic64) {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+  using Libs::Graphics::Prospero::BufferFormat;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  program.user_data_count = 2u;
+  auto &entry = AddValueBlock(program);
+  auto &guarded = AddValueBlock(program);
+  auto &done = AddValueBlock(program);
+  const auto user = [&](uint32_t index) {
+    return Value(&entry.AppendNewInst(ValueOpcode::GetUserData, {Value(ScalarReg(index))}));
+  };
+  DescriptorSource source;
+  source.dword_count = 8u;
+  source.dwords.fill(Value(0u));
+  source.dwords[0] = Value(0x100u);
+  source.dwords[1] = user(0);
+  source.dwords[3] = Value(uint32_t(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  program.descriptor_sources.push_back(source);
+  const auto dimension = Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension::Dim2D;
+  for (const bool atomic : {false, true, false})
+    program.info.images.push_back({.source = 0u, .resource_class = ImageResourceClass::Storage,
+        .dimension = dimension, .written = true, .atomic = atomic, .atomic64 = atomic && atomic64});
+  for (uint32_t image = 0; image < 2u; ++image)
+    program.memory_info.push_back({.kind = ResourceKind::Image, .resource = image});
+  entry.AppendNewInst(ValueOpcode::ImageWrite, {Value(0u), Value(0u), Value(0u), Value(true)})
+      .SetFlags(MemoryFlags{.index = 0});
+  guarded.AppendNewInst(atomic64 ? ValueOpcode::ImageAtomicUMax64 : ValueOpcode::ImageAtomicUMax32,
+                        {Value(0u), Value(0u), Value(0u), Value(true)})
+      .SetFlags(MemoryFlags{.index = 1});
+  entry.condition = Value(&entry.AppendNewInst(ValueOpcode::INotEqual32, {user(1), Value(0u)}));
+  entry.terminator.kind = TerminatorKind::ConditionalBranch;
+  entry.terminator.true_block = &guarded;
+  entry.terminator.false_block = &done;
+  guarded.terminator.kind = TerminatorKind::Branch;
+  guarded.terminator.true_block = &done;
+  done.terminator.kind = TerminatorKind::Return;
+  auto plan = Extract(program);
+  std::array<uint32_t, 2> data{uint32_t(BufferFormat::k8_8_8_8UNorm) << 20u, 0u};
+  const SrtRuntime runtime{.user_data = data};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images[0].dwords[1] == data[0] && snapshot.images[2].dwords[1] == data[0] &&
+            snapshot.images[1] == DescriptorValue{.dword_count = 8u},
+        "unreached atomic image kept the shared descriptor or an unlisted image lost it");
+  data[1] = 1u;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization),
+        "reached atomic image accepted a format its width rejects");
+}
+
 void TestIndirectImageSamplerClasses(bool mixed) {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   using Libs::Graphics::Prospero::BufferFormat;
@@ -1451,6 +1507,7 @@ int main() {
   TestEmptyScalarBufferSpecialization();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
   TestSignedStorageSpecialization();
+  for (const bool atomic64 : {false, true}) TestUnreachedImageIgnoresSharedDescriptor(atomic64);
   for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
   TestShaderCacheRecords();
   std::puts("ResourceMaterializationTests: all cases passed");

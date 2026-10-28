@@ -21,10 +21,7 @@ inline QStringList EnumToList() {
 	auto        me    = QMetaEnum::fromType<T>();
 	int         count = me.keyCount();
 	for (int i = 0; i < count; i++) {
-		auto key = QString(me.key(i));
-		ret << (key.startsWith('R') && key.size() > 2 && key.at(1).isDigit()
-		            ? key.remove('R').toLower()
-		            : key);
+		ret << QString(me.key(i));
 	}
 	return ret;
 }
@@ -32,16 +29,12 @@ inline QStringList EnumToList() {
 template <class T>
 T TextToEnum(const QString& text) {
 	auto me = QMetaEnum::fromType<T>();
-	return static_cast<T>(me.keyToValue(
-	    ((text.size() > 1 && text.at(0).isDigit()) ? 'R' + text.toUpper() : text).toUtf8().data()));
+	return static_cast<T>(me.keyToValue(text.toUtf8().constData()));
 }
 
 template <class T>
 QString EnumToText(T value) {
-	auto me  = QMetaEnum::fromType<T>();
-	auto key = QString(me.valueToKey(static_cast<int>(value)));
-	return (key.startsWith('R') && key.size() > 2 && key.at(1).isDigit() ? key.remove('R').toLower()
-	                                                                     : key);
+	return QString(QMetaEnum::fromType<T>().valueToKey(static_cast<int>(value)));
 }
 
 struct ControllerSettings {
@@ -80,13 +73,10 @@ public:
 	static constexpr int DEFAULT_CONSOLE_LANGUAGE = 1;
 	static constexpr int MAX_CONSOLE_LANGUAGE     = 29;
 
-	enum class Resolution {
-		R1280X720,
-		R1920X1080,
-		R2560X1440,
-		R3840X2160,
-	};
-	Q_ENUM(Resolution)
+	static constexpr int MIN_SCREEN_SIZE = 320;
+	static constexpr int MAX_SCREEN_SIZE = 16384;
+
+	static QString NormalizeResolution(const QString& text);
 
 	enum class ShaderOptimizationType { None, Size, Performance };
 	Q_ENUM(ShaderOptimizationType)
@@ -116,7 +106,7 @@ public:
 	// Controller preferences always come from the global configuration.
 	ControllerSettings controller;
 
-	Resolution             screen_resolution           = Resolution::R1280X720;
+	QString                screen_resolution           = QStringLiteral("1280x720");
 	QString                user_name                   = "Kyty";
 	int                    user_id                     = Config::DEFAULT_USER_ID;
 	QString                audio_input_device;
@@ -125,6 +115,7 @@ public:
 	bool                   fullscreen_enabled          = false;
 	bool                   hdr_enabled                 = false;
 	bool                   hide_cursor_enabled         = false;
+	bool                   stretch_enabled             = false;
 	bool                   readback_linear_images      = false;
 	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
@@ -167,6 +158,7 @@ public:
 		fullscreen_enabled          = other.fullscreen_enabled;
 		hdr_enabled                 = other.hdr_enabled;
 		hide_cursor_enabled         = other.hide_cursor_enabled;
+		stretch_enabled             = other.stretch_enabled;
 		readback_linear_images      = other.readback_linear_images;
 		readback_tiled_images       = other.readback_tiled_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;

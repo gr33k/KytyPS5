@@ -660,6 +660,47 @@ void TestClassicSaveParams() {
 	CHECK(params[0].mtime == nested_mtime);
 }
 
+void TestSearchSortKeys() {
+	Reset("SORTED");
+	const std::array names {DirName("alpha"), DirName("bravo"), DirName("charlie")};
+	constexpr std::array<uint64_t, 3> blocks {96, 48, 48};
+	constexpr std::array<uint32_t, 3> user_params {2, 3, 1};
+	constexpr std::array<int, 3>      hours_ahead {1, 3, 2};
+	for (size_t i = 0; i < names.size(); i++) {
+		struct SaveDataMount3 mount {};
+		mount.user_id    = 1;
+		mount.dir_name   = &names[i];
+		mount.mount_mode = 4;
+		mount.blocks     = blocks[i];
+		SaveDataMountResult result {};
+		CHECK(SaveDataMount3(&mount, &result) == OK);
+		CHECK(SaveDataSetParam(&result.mount_point, 4, &user_params[i], sizeof(user_params[i])) ==
+		      OK);
+		CHECK(SaveDataUmount2(0, &result.mount_point) == OK);
+		fs::last_write_time(fs::path("_SaveData/SORTED") / names[i].data / "sce_sys/param.bin",
+		                    fs::file_time_type::clock::now() + std::chrono::hours(hours_ahead[i]));
+	}
+	const auto search = [](SaveDataSortKey key, SaveDataSortOrder order) {
+		std::array<SceSaveDataDirName, 3> found {};
+		SaveDataDirNameSearchCond         cond {};
+		cond.user_id = 1;
+		cond.key     = key;
+		cond.order   = order;
+		SaveDataDirNameSearchResult result {};
+		result.dir_names     = found.data();
+		result.dir_names_num = found.size();
+		CHECK(SaveDataDirNameSearch(&cond, &result) == OK && result.set_num == 3);
+		return std::string(found[0].data) + " " + found[1].data + " " + found[2].data;
+	};
+	CHECK(search(SaveDataSortKey::DirName, SaveDataSortOrder::Descent) == "charlie bravo alpha");
+	CHECK(search(SaveDataSortKey::UserParam, SaveDataSortOrder::Ascent) == "charlie alpha bravo");
+	CHECK(search(SaveDataSortKey::Blocks, SaveDataSortOrder::Ascent) == "bravo charlie alpha");
+	CHECK(search(SaveDataSortKey::FreeBlocks, SaveDataSortOrder::Descent) == "alpha charlie bravo");
+	CHECK(search(SaveDataSortKey::Mtime, SaveDataSortOrder::Descent) == "bravo charlie alpha");
+	CHECK(fs::remove("_SaveData/SORTED/alpha/sce_sys/blocks.bin"));
+	CHECK(search(SaveDataSortKey::Blocks, SaveDataSortOrder::Ascent) == "alpha bravo charlie");
+}
+
 void RunChild(const fs::path& executable, const char* mode) {
 #ifdef _WIN32
 	CHECK(_spawnl(_P_WAIT, executable.string().c_str(), executable.string().c_str(), mode,
@@ -706,6 +747,7 @@ int main(int argc, char** argv) {
 	TestGuestSaveIsolation();
 	TestSaveAllocations();
 	TestClassicSaveParams();
+	TestSearchSortKeys();
 	CHECK(SaveDataTerminate() == OK);
 	fs::current_path(previous);
 	fs::remove_all(temp);

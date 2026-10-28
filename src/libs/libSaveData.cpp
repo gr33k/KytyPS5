@@ -615,7 +615,12 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 	Common::LockGuard lock(g_mount_mutex);
 	const std::string title_id = cond->title_id != nullptr ? cond->title_id->data : get_title_id();
 	const auto        root     = save_user_directory(title_id, cond->user_id);
-	std::vector<std::string> dir_list;
+	struct Found {
+		uint64_t    key = 0;
+		std::string name;
+		auto        operator<=>(const Found&) const = default;
+	};
+	std::vector<Found> dir_list;
 
 	if (Common::File::IsDirectoryExisting(root)) {
 		for (const auto& entry: Common::File::GetDirEntries(root)) {
@@ -625,22 +630,34 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 				if (cond->dir_name == nullptr || cond->dir_name->data[0] == '\0' ||
 				    dir_name_match(Common::ToLower(entry.name).c_str(),
 				                   Common::ToLower(std::string(cond->dir_name->data)).c_str())) {
-					dir_list.push_back(entry.name);
+					dir_list.push_back({.name = entry.name});
 				}
 			}
 		}
 	}
 
-	std::sort(dir_list.begin(), dir_list.end(), [](const std::string& a, const std::string& b) {
-		return std::strcmp(a.c_str(), b.c_str()) < 0;
-	});
-
-	if (cond->order == SaveDataSortOrder::Descent) {
-		std::vector<std::string> reversed;
-		for (size_t i = dir_list.size(); i > 0; i--) {
-			reversed.push_back(dir_list[i - 1]);
+	// A save whose metadata cannot be read sorts as 0.
+	for (auto& found: dir_list) {
+		const auto directory = root / found.name;
+		switch (cond->key) {
+			case SaveDataSortKey::UserParam: {
+				SaveDataParam param {};
+				read_save_param(save_param_path(directory), &param);
+				found.key = param.user_param;
+				break;
+			}
+			case SaveDataSortKey::Blocks:
+			case SaveDataSortKey::FreeBlocks: read_save_blocks(directory, &found.key); break;
+			case SaveDataSortKey::Mtime:
+				found.key = static_cast<uint64_t>(newest_save_time(directory));
+				break;
+			default: break;
 		}
-		dir_list = reversed;
+	}
+	// Directory names break ties; descending order reverses both.
+	std::sort(dir_list.begin(), dir_list.end());
+	if (cond->order == SaveDataSortOrder::Descent) {
+		std::reverse(dir_list.begin(), dir_list.end());
 	}
 
 	auto max_count =
@@ -651,9 +668,9 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 
 	for (size_t i = 0; i < max_count; i++) {
 		std::snprintf(result->dir_names[i].data, sizeof(result->dir_names[i].data), "%s",
-		              dir_list[i].c_str());
+		              dir_list[i].name.c_str());
 		if (result->params != nullptr) {
-			const int status = load_save_param(root / dir_list[i], &result->params[i]);
+			const int status = load_save_param(root / dir_list[i].name, &result->params[i]);
 			if (status != OK) {
 				return status;
 			}
@@ -661,7 +678,7 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 		if (result->infos != nullptr) {
 			auto& info = result->infos[i];
 			info = {};
-			const int status = read_save_blocks(root / dir_list[i], &info.blocks);
+			const int status = read_save_blocks(root / dir_list[i].name, &info.blocks);
 			if (status != OK) {
 				return status;
 			}

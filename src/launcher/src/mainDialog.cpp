@@ -654,7 +654,7 @@ static void AddFlag(QStringList& args, bool enabled, const char* name) {
 
 static QStringList CreateEmulatorArgs(const Configuration& info) {
 	QStringList args;
-	auto        r = EnumToText(info.screen_resolution).split('x');
+	auto        r = info.screen_resolution.split('x');
 
 	if (r.size() != 2) {
 		return {};
@@ -1033,7 +1033,7 @@ void MainDialogPrivate::ShowFailureDialog(int exitCode, QProcess::ExitStatus exi
 		} else {
 			log_size = tr("%1 MiB").arg(log_bytes / (1024 * 1024));
 		}
-		detail += tr("\n\nRan %1 • log %2").arg(elapsed, log_size);
+		detail += tr("\n\nRan %1 ï¿½ log %2").arg(elapsed, log_size);
 	}
 	QMessageBox box(QMessageBox::Warning, tr("Game failed"), reason + detail, QMessageBox::Ok,
 	                m_main_dialog);
@@ -1074,12 +1074,12 @@ void MainDialogPrivate::Update() {
 				const QString accent =
 				    m_main_dialog->palette().color(QPalette::Highlight).name();
 				status_text +=
-				    tr("   •   <span style='color:%1'>?</span> <b>%2</b> (%3) — running")
+				    tr("   ï¿½   <span style='color:%1'>?</span> <b>%2</b> (%3) ï¿½ running")
 				        .arg(accent, name, serial);
 			} else if (serial.isEmpty()) {
-				status_text += tr("   •   <b>%1</b>").arg(name);
+				status_text += tr("   ï¿½   <b>%1</b>").arg(name);
 			} else {
-				status_text += tr("   •   <b>%1</b> (%2)").arg(name, serial);
+				status_text += tr("   ï¿½   <b>%1</b> (%2)").arg(name, serial);
 			}
 		}
 		has_patches  = Cheats::IsSupportedTitleId(info.title_id);

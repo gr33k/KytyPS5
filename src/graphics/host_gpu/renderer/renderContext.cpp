@@ -147,6 +147,7 @@ void RenderContext::RunGarbageCollector() {
 		m_fault_process_pending = false;
 		m_buffer_cache.ProcessFaultBuffer();
 	}
+	m_image_heap.RunGarbageCollector();
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();
 	m_buffer_cache.RunGarbageCollector();

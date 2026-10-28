@@ -54,15 +54,12 @@ struct PipelineStaticParameters {
 	bool                       depth_clip_enable        = true;
 	vk::PrimitiveTopology      topology                 = vk::PrimitiveTopology::ePointList;
 	// 0 without tessellation, 3 for a rectangle list, else the input control points.
-	uint8_t                    patch_control_points     = 0;
+	uint32_t                   patch_control_points     = 0;
 	bool                       primitive_restart_enable = false;
 	uint32_t                   samples                  = 1;
 	bool                       sample_shading_enable    = false;
 	bool                       alpha_to_coverage_enable = false;
 	uint32_t                   color_mask[RENDER_COLOR_ATTACHMENTS_MAX]           = {};
-	bool                       cull_front                                         = false;
-	bool                       cull_back                                          = false;
-	bool                       face                                               = false;
 	bool                       provoking_vtx_last                                 = false;
 	vk::PolygonMode            polygon_mode                                       = vk::PolygonMode::eFill;
 	uint8_t                    color_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
@@ -140,6 +137,9 @@ struct DrawRenderState {
 	bool                                 ps_active                                = false;
 	std::array<ShaderVertexInputInfo, 3> vertex_info;
 	ShaderPixelInputInfo                 ps_input_info;
+	// Input: the user-data slots a GPU-read indirect draw patches.
+	ShaderIndirectOffsets                indirect_offsets;
+	bool                                 indirect_draw = false;
 
 	[[nodiscard]] std::span<const ShaderVertexInputInfo> VertexStages() const {
 		return {vertex_info.data(), vertex_info[1].stage ? 3u : 1u};

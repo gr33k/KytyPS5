@@ -815,7 +815,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	const auto& cfg = *selected_cfg;
 	Frontend::EmbeddedFetchPlan embedded_fetch;
 	if ((options.stage == ShaderType::Vertex || options.stage == ShaderType::Local) &&
-	    options.input_info.vertex->fetch_embedded) {
+	    options.input_info.vertex->has_dynamic_vertex_fetch) {
 		embedded_fetch = DetectEmbeddedVertexFetch(
 		    decoded, *options.input_info.vertex, options.user_data_base,
 		    static_cast<uint32_t>(options.user_data.size()), options.wave_size);

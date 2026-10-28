@@ -476,6 +476,8 @@ uint32_t BuiltInForInput(IR::StageInputKind kind) {
 		case IR::StageInputKind::LocalInvocationId: return spv::BuiltInLocalInvocationId;
 		case IR::StageInputKind::LocalInvocationIndex: return spv::BuiltInLocalInvocationIndex;
 		case IR::StageInputKind::GlobalInvocationId: return spv::BuiltInGlobalInvocationId;
+		case IR::StageInputKind::BaseVertex: return spv::BuiltInBaseVertex;
+		case IR::StageInputKind::BaseInstance: return spv::BuiltInBaseInstance;
 		default: return UINT32_MAX;
 	}
 }
@@ -526,7 +528,9 @@ void DefineInputs(EmitterState& state) {
 			case IR::StageInputKind::PrimitiveId:
 			case IR::StageInputKind::InstanceIndex:
 			case IR::StageInputKind::Layer:
-			case IR::StageInputKind::SampleId: type = TypeI32(state); break;
+			case IR::StageInputKind::SampleId:
+			case IR::StageInputKind::BaseVertex:
+			case IR::StageInputKind::BaseInstance: type = TypeI32(state); break;
 			case IR::StageInputKind::WorkgroupId:
 			case IR::StageInputKind::NumWorkgroups:
 			case IR::StageInputKind::LocalInvocationId:
@@ -801,6 +805,10 @@ void DefineModule(EmitterState& state) {
 	}
 	if (InputVariableForKind(state, IR::StageInputKind::SampleId) != 0) {
 		state.builder.RequireCapability(spv::CapabilitySampleRateShading);
+	}
+	if (InputVariableForKind(state, IR::StageInputKind::BaseVertex) != 0 ||
+	    InputVariableForKind(state, IR::StageInputKind::BaseInstance) != 0) {
+		state.builder.RequireCapability(spv::CapabilityDrawParameters);
 	}
 	if (state.program.info.image_gather_extended) {
 		state.builder.RequireCapability(spv::CapabilityImageGatherExtended);

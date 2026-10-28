@@ -20,7 +20,7 @@ namespace {
 
 namespace IR = ShaderRecompiler::IR;
 
-// Smaller tables are cheap to materialize on each draw and are often transient.
+// Smaller tables are often written for one draw, so they enter on a second draw of a frame.
 constexpr uint64_t MinTableBytes = 64ull * 1024ull;
 constexpr uint32_t ElementMask   = (1u << IR::ImageHeapKindShift) - 1u;
 
@@ -133,12 +133,16 @@ ImageHeap::~ImageHeap() {
 bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& result) {
 	KYTY_PROFILER_FUNCTION();
 	const auto size = request.size & ~uint64_t {3};
-	if (size < MinTableBytes || request.count == 0u || request.step == 0u ||
+	if (request.count == 0u || request.step == 0u ||
 	    ((request.base | request.first | request.step) & 3u) != 0u) {
 		return false;
 	}
 	auto memory = std::ranges::find_if(
 	    m_memories, [&](const auto& candidate) { return candidate->base == request.base; });
+	if (memory == m_memories.end() && size < MinTableBytes &&
+	    m_sightings.try_emplace(request.base, m_draw).first->second == m_draw) {
+		return false;
+	}
 	// A table follows its descriptor's size, as the first program of a draw acquires it.
 	if (memory == m_memories.end() || ((*memory)->size != size && (*memory)->draw != m_draw)) {
 		if (!m_context.IsMapped(request.base, size)) return false;
@@ -593,26 +597,42 @@ void ImageHeap::UnmapMemory(uint64_t address, uint64_t size) {
 	} else {
 		m_unmapped.push_back({address, size});
 	}
-	auto&           scheduler = m_context.GetCommandScheduler();
 	std::scoped_lock lock {m_mutex};
 	std::erase_if(m_memories, [&](const std::unique_ptr<Memory>& memory) {
 		if (address >= memory->base + memory->size || memory->base >= address + size) {
 			return false;
 		}
-		Unwatch(*memory);
-		for (auto& view: memory->views) {
-			std::erase(m_active, view.get());
-			for (const auto& [value, index]: view->elements) {
-				Unreference(m_elements[index]);
-				view->released.push_back(index);
-			}
-			Retire(*view);
-			if (scheduler.Active()) {
-				scheduler.DeferOperation([buffer = std::move(view->buffer)] {});
-			}
-		}
+		Drop(*memory);
 		return true;
 	});
+}
+
+void ImageHeap::RunGarbageCollector() {
+	// A smaller table rebuilt each frame moves to a new base. Larger ones keep their dead words.
+	std::scoped_lock lock {m_mutex};
+	std::erase_if(m_memories, [&](const std::unique_ptr<Memory>& memory) {
+		if (memory->size >= MinTableBytes || memory->draw > m_suspend_draw) return false;
+		Drop(*memory);
+		return true;
+	});
+	m_suspend_draw = m_draw;
+	m_sightings.clear();
+}
+
+void ImageHeap::Drop(Memory& memory) {
+	auto& scheduler = m_context.GetCommandScheduler();
+	Unwatch(memory);
+	for (auto& view: memory.views) {
+		std::erase(m_active, view.get());
+		for (const auto& [value, index]: view->elements) {
+			Unreference(m_elements[index]);
+			view->released.push_back(index);
+		}
+		Retire(*view);
+		if (scheduler.Active()) {
+			scheduler.DeferOperation([buffer = std::move(view->buffer)] {});
+		}
+	}
 }
 
 } // namespace Libs::Graphics

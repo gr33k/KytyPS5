@@ -291,10 +291,9 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 	const auto& metadata = data.vertex;
 
 	if (metadata.vertex_attrib_reg >= 0) {
-		info.fetch_external   = false;
-		info.fetch_embedded   = true;
-		info.fetch_attrib_reg = metadata.vertex_attrib_reg;
-		info.fetch_buffer_reg = metadata.vertex_buffer_reg;
+		info.has_dynamic_vertex_fetch = true;
+		info.fetch_attrib_reg         = metadata.vertex_attrib_reg;
+		info.fetch_buffer_reg         = metadata.vertex_buffer_reg;
 
 		const auto* attrib = reinterpret_cast<const uint32_t*>(
 		    static_cast<uint64_t>(user_sgpr.value[metadata.vertex_attrib_reg]) |
@@ -413,7 +412,7 @@ static void ShaderGetStaticInputInfoCS(const HW::ComputeShaderInfo& regs,
 void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t>& key) {
 	EXIT_IF(info.resources_num < 0 || info.resources_num > ShaderVertexInputInfo::RES_MAX);
 	key.clear();
-	key.push_back(static_cast<uint32_t>(info.fetch_embedded));
+	key.push_back(static_cast<uint32_t>(info.has_dynamic_vertex_fetch));
 	key.push_back(static_cast<uint32_t>(info.fetch_attrib_reg));
 	key.push_back(static_cast<uint32_t>(info.fetch_buffer_reg));
 	key.push_back(info.resources_num);
@@ -422,6 +421,8 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 	key.push_back(info.lds_size_dwords);
 	key.push_back(info.pa_cl_vs_out_cntl);
 	key.push_back(info.user_clip_planes);
+	key.push_back(info.indirect_offsets.vertex | (uint32_t {info.indirect_offsets.instance} << 8u) |
+	              (uint32_t {info.indirect_draw} << 16u));
 	key.push_back(static_cast<uint32_t>(info.clip_space.enabled));
 	if (info.clip_space.enabled) {
 		for (const float value: info.clip_space.scale) {
@@ -692,9 +693,7 @@ void ShaderDbgDumpInputInfo(const ShaderVertexInputInfo& info) {
 
 	LOGF("ShaderDbgDumpInputInfo()\n");
 
-	LOGF("\t fetch_external = %s\n"
-	     "\t fetch_embedded = %s\n",
-	     info.fetch_external ? "true" : "false", info.fetch_embedded ? "true" : "false");
+	LOGF("\t has_dynamic_vertex_fetch = %s\n", info.has_dynamic_vertex_fetch ? "true" : "false");
 
 	for (int i = 0; i < info.resources_num; i++) {
 		LOGF("\t input %d\n", i);
