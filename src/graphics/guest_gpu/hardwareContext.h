@@ -415,6 +415,7 @@ struct ScreenViewport {
 	int      clip_rect_right[4]                   = {};
 	int      clip_rect_bottom[4]                  = {};
 	bool     clip_rect_window_offset_enable[4]    = {};
+	bool     clip_rect_configured[4]              = {};
 };
 
 struct HsShaderResource1 {
@@ -817,10 +818,12 @@ public:
 		m_screen_viewport.clip_rect_left[rect_id]                 = left;
 		m_screen_viewport.clip_rect_top[rect_id]                  = top;
 		m_screen_viewport.clip_rect_window_offset_enable[rect_id] = window_offset_enable;
+		m_screen_viewport.clip_rect_configured[rect_id]           = true;
 	}
 	void SetClipRectBR(uint32_t rect_id, int right, int bottom) {
 		m_screen_viewport.clip_rect_right[rect_id]  = right;
 		m_screen_viewport.clip_rect_bottom[rect_id] = bottom;
+		m_screen_viewport.clip_rect_configured[rect_id] = true;
 	}
 	[[nodiscard]] const ScreenViewport& GetScreenViewport() const { return m_screen_viewport; }
 

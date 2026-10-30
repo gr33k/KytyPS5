@@ -19,6 +19,8 @@
 #include <atomic>
 #include <bit>
 
+#include <fmt/format.h>
+
 namespace Libs::Graphics {
 
 static bool DccAlphaOnMsb(const HW::ColorInfo& info) {
@@ -85,10 +87,24 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 		EXIT("unsupported render-target sample configuration: samples=%u fragments=%u\n",
 		     rt.attrib.num_samples, rt.attrib.num_fragments);
 	}
-	const uint32_t levels = rt.attrib2.num_mip_levels + 1u;
-	if (levels == 0 || levels > 16 || rt.view.current_mip_level >= levels) {
-		EXIT("unsupported render-target mip range: current=%u levels=%u\n",
-		     rt.view.current_mip_level, levels);
+	const uint32_t max_mip_level = std::max(rt.attrib2.num_mip_levels, rt.view.current_mip_level);
+	const uint32_t levels        = max_mip_level + 1u;
+	if (rt.view.current_mip_level > rt.attrib2.num_mip_levels) {
+		static std::atomic_bool logged_mip_view = false;
+		if (!logged_mip_view.exchange(true, std::memory_order_relaxed)) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "Warning: render-target view mip {} exceeds MAX_MIP {}; materializing the "
+			    "selected level (slot={}, base=0x{:010x}, extent={}x{}).\n",
+			    rt.view.current_mip_level, rt.attrib2.num_mip_levels, rt_slot, rt.base.addr,
+			    rt.attrib2.width + 1u, rt.attrib2.height + 1u));
+		}
+	}
+	if (levels == 0 || levels > 16) {
+		EXIT("unsupported render-target mip range: slot=%u current=%u levels=%u max_mip=%u "
+		     "base=0x%010" PRIx64 " extent=%ux%u dimension=%u tile=%u\n",
+		     rt_slot, rt.view.current_mip_level, levels, rt.attrib2.num_mip_levels, rt.base.addr,
+		     rt.attrib2.width + 1u, rt.attrib2.height + 1u, rt.attrib3.dimension,
+		     static_cast<uint32_t>(rt.attrib3.tile_mode));
 	}
 	static constexpr std::array image_types {Prospero::ImageType::kColor1D,
 	                                         Prospero::ImageType::kColor2D,

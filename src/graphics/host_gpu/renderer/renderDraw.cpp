@@ -1388,6 +1388,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
+	if (pipeline.pipeline == nullptr || pipeline.pipeline_layout == nullptr) {
+		// Keep the title alive if a host driver rejects an individual guest pipeline.
+		return;
+	}
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,

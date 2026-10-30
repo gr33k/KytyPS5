@@ -796,7 +796,9 @@ ScissorRect calc_final_scissor(const HW::ScreenViewport& vp, const HW::ScanModeC
 		uint8_t clip_rect_mask = 0;
 		if (ScissorClipRuleToIntersectionMask(vp.clip_rect_rule, &clip_rect_mask)) {
 			for (uint32_t i = 0; i < 4; i++) {
-				if ((clip_rect_mask & (1u << i)) == 0) {
+				// Unprogrammed clip rectangles are inactive; their zero-initialized
+				// coordinates must not collapse an otherwise valid intersection.
+				if ((clip_rect_mask & (1u << i)) == 0 || !vp.clip_rect_configured[i]) {
 					continue;
 				}
 

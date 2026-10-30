@@ -404,7 +404,14 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess || pipeline.pipeline == nullptr) {
+		static std::atomic_uint skipped = 0;
+		if (skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("Pipeline: skipping failed graphics pipeline VS=%" PRIu64
+			     " PS=%" PRIu64 " result=%s\n",
+			     key.stage_ids[0], key.stage_ids[3], vk::to_string(result).c_str());
+		}
+	}
 
 	graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
 	graphics.device.destroyShaderModule(tess_eval_shader_module, nullptr);
@@ -456,7 +463,13 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
 	                                                &pipeline.pipeline);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess || pipeline.pipeline == nullptr) {
+		static std::atomic_uint skipped = 0;
+		if (skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("Pipeline: skipping failed compute pipeline CS=%" PRIu64 " result=%s\n",
+			     module.info.shader_hash, vk::to_string(result).c_str());
+		}
+	}
 }
 
 } // namespace Libs::Graphics
