@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -564,6 +565,11 @@ private:
 		bool     has_sampler = false;
 	};
 
+	struct MemoryIndexUse {
+		const Inst* owner = nullptr;
+		uint32_t    count = 0;
+	};
+
 	struct ResolvedHandle {
 		const Inst* handle;
 		uint32_t pc;
@@ -831,6 +837,7 @@ private:
 		if (value.IsImmediate()) return;
 		auto* inst = value.TryInstruction();
 		if (inst == nullptr) Fail(use_pc, "invalid typed planning value");
+		if (m_srt_visited.contains(inst)) return;
 		const auto cycle = std::ranges::find(m_srt_visiting, inst);
 		if (cycle != m_srt_visiting.end()) {
 			if (std::any_of(cycle, m_srt_visiting.end(), [](const Inst* value) {
@@ -838,7 +845,6 @@ private:
 			})) return;
 			Fail(use_pc, "cyclic typed planning value without a phi");
 		}
-		if (std::ranges::find(m_srt_visited, inst) != m_srt_visited.end()) return;
 		m_srt_visiting.push_back(inst);
 		uint32_t memory_index = 0;
 		const auto* memory = ScalarReadMemory(*inst, memory_index);
@@ -860,7 +866,7 @@ private:
 				CollectScalarRead(inst->Arg(arg), use_pc);
 		}
 		m_srt_visiting.pop_back();
-		m_srt_visited.push_back(inst);
+		m_srt_visited.insert(inst);
 		if (memory == nullptr) return;
 		const auto offset = inst->Arg(1).Resolve();
 		if (!offset.IsImmediate() || offset.GetType() != Type::U32) return;
@@ -1100,22 +1106,25 @@ private:
 		           : nullptr;
 	}
 
-	bool MemoryIndexBelongsTo(uint32_t index, const Inst& owner) const {
-		for (const auto* block: m_program.blocks) {
-			for (const auto& inst: *block) {
-				const auto op = inst.GetOpcode();
-				if ((BufferAccessOf(op) == BufferAccess::None &&
-				     AddressOpcodeInfoOf(op).access == AddressAccess::None &&
-				     ImageOpcodeInfoOf(op).access == ImageAccess::None) ||
-				    &inst == &owner) {
-					continue;
-				}
-				if (inst.Flags<MemoryFlags>().index == index) {
-					return false;
+	bool MemoryIndexBelongsTo(uint32_t index, const Inst& owner) {
+		if (m_memory_index_uses.empty()) {
+			// Only descriptor planning asks, and it adds no memory instructions.
+			m_memory_index_uses.resize(m_program.memory_info.size());
+			for (const auto* block: m_program.blocks) {
+				for (const auto& inst: *block) {
+					const auto op = inst.GetOpcode();
+					if (BufferAccessOf(op) != BufferAccess::None ||
+					    AddressOpcodeInfoOf(op).access != AddressAccess::None ||
+					    ImageOpcodeInfoOf(op).access != ImageAccess::None) {
+						auto& use = m_memory_index_uses[inst.Flags<MemoryFlags>().index];
+						use.owner = &inst;
+						use.count++;
+					}
 				}
 			}
 		}
-		return true;
+		const auto& use = m_memory_index_uses[index];
+		return use.count == 0 || (use.count == 1 && use.owner == &owner);
 	}
 
 	bool MakeRuntimeTableSource(const Inst& read, DescriptorSource& descriptor) {
@@ -4344,7 +4353,8 @@ private:
 	std::vector<Program::ScalarWrite>          m_scalar_writes;
 	std::vector<ResolvedHandle>                m_resolved_handles;
 	std::vector<const Inst*>                   m_srt_visiting;
-	std::vector<const Inst*>                   m_srt_visited;
+	std::unordered_set<const Inst*>            m_srt_visited;
+	std::vector<MemoryIndexUse>                m_memory_index_uses;
 	std::vector<Inst*>                         m_scalar_reads;
 	ShaderInfo                                 m_info;
 	std::vector<DescriptorSource>              m_sources;
