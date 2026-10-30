@@ -125,6 +125,7 @@ public:
 	bool                   perf_overlay_enabled        = false;
 	bool                   skip_notice_screen          = false;
 	bool                   network_connected           = false;
+	bool                   psn_emulation_enabled       = false;
 	int                    vblank_frequency            = 60;
 	int                    console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
@@ -140,6 +141,7 @@ public:
 	QString                printf_output_file          = "_kyty.txt";
 	bool                   profiler_enabled            = false;
 	bool                   renderdoc_enabled           = false;
+	bool                   pro_enabled                 = false;
 	bool                   amd_cpu_enabled             = false;
 #if defined(_WIN32)
 	bool red_zone_protection_enabled = true;
@@ -168,6 +170,7 @@ public:
 		perf_overlay_enabled        = other.perf_overlay_enabled;
 		skip_notice_screen          = other.skip_notice_screen;
 		network_connected           = other.network_connected;
+		psn_emulation_enabled       = other.psn_emulation_enabled;
 		vblank_frequency            = other.vblank_frequency;
 		console_language            = other.console_language;
 		vulkan_validation_enabled   = other.vulkan_validation_enabled;
@@ -182,6 +185,7 @@ public:
 		printf_output_file          = other.printf_output_file;
 		profiler_enabled            = other.profiler_enabled;
 		renderdoc_enabled           = other.renderdoc_enabled;
+		pro_enabled                 = other.pro_enabled;
 		amd_cpu_enabled             = other.amd_cpu_enabled;
 #if defined(_WIN32)
 		red_zone_protection_enabled = other.red_zone_protection_enabled;

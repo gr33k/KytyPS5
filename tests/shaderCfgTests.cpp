@@ -1941,6 +1941,42 @@ void TestVertexBufferGrouping() {
   Check(!input.has_dynamic_vertex_fetch, "remapping a shader kept its previous vertex metadata");
 }
 
+void TestShaderProgramHash() {
+  using Binary = std::array<uint32_t, 22>;
+  // One code word, a 16-byte literal buffer at 16, 8 bytes of metadata, then the 0x30-byte
+  // footer, whose key and checksum cover the whole binary.
+  const auto Make = [](uint32_t literal, uint32_t metadata, uint32_t version = 1,
+                       uint32_t code_size = 4) {
+    Binary words{};
+    words[0] = EncodeSopp(0x01);
+    words[4] = literal;
+    words[8] = metadata;
+    std::memcpy(&words[10], "barefoot", 8);
+    words[12] = metadata;
+    words[14] = version;
+    words[15] = code_size;
+    words[16] = 16;
+    words[18] = metadata;
+    return words;
+  };
+  const auto Map = [](const Binary &binary) {
+    ShaderMappedData mapped{};
+    mapped.code_size_bytes = sizeof(binary);
+    HW::ComputeShaderInfo regs{};
+    regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(binary.data());
+    ShaderMapUserData(regs.cs_regs.data_addr, mapped);
+    ShaderComputeInputInfo input{};
+    return PrepareProgram(regs, input);
+  };
+  Check(Map(Make(7, 1)).hash == Map(Make(7, 2)).hash,
+        "binaries differing only in metadata got different programs");
+  Check(Map(Make(7, 1)).hash != Map(Make(8, 1)).hash, "the program hash missed the literal buffer");
+  Check(Map(Make(7, 1)).code.size() == 8, "translation must read only the hashed program bytes");
+  Check(Map(Make(7, 1, 2)).hash != Map(Make(7, 2, 2)).hash &&
+            Map(Make(7, 1, 1, 0)).hash != Map(Make(7, 2, 1, 0)).hash,
+        "a binary with an unknown footer must hash whole");
+}
+
 void TestNggVertexEntryState() {
   using namespace ShaderRecompiler;
   // PPSA03309 shader 5a39eb2021a5d2c1: retain its NGG prologue and replace
@@ -2395,6 +2431,50 @@ void TestNewShaderRecompilerVop3LaneReadDestinationEncoding() {
   Check((result.decoded_dump.find("V_READLANE_B32 s26, v5, 2") != std::string::npos),
         "VOP3 V_READLANE_B32 destination was not decoded from VDST");
   CheckSpirvBinaryValidates(result.spirv);
+}
+
+void TestVop3FloatConversionDecode() {
+  namespace Decoder = ShaderRecompiler::Decoder;
+  const std::pair<uint32_t, Decoder::Opcode> conversions[] = {
+      {0x18b, Decoder::Opcode::V_CVT_F32_F16},
+      {0x191, Decoder::Opcode::V_CVT_F32_UBYTE0},
+      {0x192, Decoder::Opcode::V_CVT_F32_UBYTE1},
+      {0x193, Decoder::Opcode::V_CVT_F32_UBYTE2},
+      {0x194, Decoder::Opcode::V_CVT_F32_UBYTE3},
+  };
+  for (const auto &[encoding, opcode] : conversions) {
+    for (const uint32_t source : {261u, 12u, 128u, 255u}) {
+      const uint32_t code[] = {
+          EncodeVop3Word0(encoding, 20, 0, 1, true),
+          EncodeVop3Word1(source, 0, 0) | (2u << 27u) | (1u << 29u),
+          0xa5a53e00u,
+      };
+      Decoder::Instruction inst;
+      Decoder::DecodeInstruction(code, 0, inst);
+      Check(inst.opcode == opcode && inst.family == Decoder::Family::VOP3 &&
+                inst.src_count == 1 && inst.word_count == (source == 255u ? 3u : 2u),
+            "VOP3 conversion lost its opcode, unary source, or literal length");
+      Check(inst.dst.kind == Decoder::OperandKind::Vgpr && inst.dst.reg == 20 &&
+                inst.dst.sdwa_sel == 6 && inst.dst.clamp && inst.dst.omod == 2,
+            "VOP3 conversion lost its full-width destination or output modifiers");
+      const bool half = opcode == Decoder::Opcode::V_CVT_F32_F16;
+      Check(inst.src0.absolute == half && inst.src0.negate == half,
+            "VOP3 conversion must apply half-float modifiers and ignore byte modifiers");
+      Decoder::Operand expected_source;
+      Decoder::DecodeScalarSource(source, 0, expected_source);
+      Check(inst.src0.kind == expected_source.kind && inst.src0.reg == expected_source.reg &&
+                (source != 255u || inst.src0.value == code[2]),
+            "VOP3 conversion changed its source register or literal value");
+    }
+    for (const uint32_t op_sel : {1u, 2u, 4u, 8u}) {
+      const uint32_t code[] = {EncodeVop3Word0(encoding, 20, op_sel),
+                               EncodeVop3Word1(261, 0, 0)};
+      Decoder::Instruction inst;
+      Decoder::DecodeInstruction(code, 0, inst);
+      Check(inst.opcode == Decoder::Opcode::UNSUPPORTED,
+            "VOP3 conversion accepted unsupported OP_SEL bits");
+    }
+  }
 }
 
 void TestNewShaderRecompilerMoreAluFamilies() {
@@ -10617,6 +10697,43 @@ void TestNewShaderRecompilerNativeU64Translation() {
         "captured VOP3 V_LSHLREV_B64 was not present in the decoded dump");
   CheckSpirvBinaryValidates(result.spirv);
 
+  const uint32_t ashrrev_i64_shader[] = {
+      0xd7010001u, 0x0000d50cu,
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded_ashrrev_i64;
+  ShaderRecompiler::Decoder::DecodeInstruction(ashrrev_i64_shader, 0u,
+                                               decoded_ashrrev_i64);
+  Check(decoded_ashrrev_i64.opcode == Decoder::Opcode::V_ASHRREV_I64 &&
+            decoded_ashrrev_i64.dst.kind == Decoder::OperandKind::Vgpr &&
+            decoded_ashrrev_i64.dst.reg == 1u &&
+            decoded_ashrrev_i64.src_count == 2u &&
+            decoded_ashrrev_i64.src0.kind == Decoder::OperandKind::Vgpr &&
+            decoded_ashrrev_i64.src0.reg == 12u &&
+            decoded_ashrrev_i64.src1.kind == Decoder::OperandKind::VccLo,
+        "decoder rejected VOP3 V_ASHRREV_I64 fields");
+  result = RecompileForTest(ashrrev_i64_shader, options);
+  Check((result.decoded_dump.find("V_ASHRREV_I64 v1, v12, vcc_lo") != std::string::npos),
+        "VOP3 V_ASHRREV_I64 was not present in the decoded dump");
+  CheckSpirvBinaryValidates(result.spirv);
+
+  const uint32_t ashrrev_captured[] = {0xd7010007u, 0x00020498u, EncodeSopp(0x01)};
+  Decoder::Instruction decoded_ashrrev_captured;
+  ShaderRecompiler::Decoder::DecodeInstruction(ashrrev_captured, 0u,
+                                               decoded_ashrrev_captured);
+  Check(decoded_ashrrev_captured.opcode == Decoder::Opcode::V_ASHRREV_I64 &&
+            decoded_ashrrev_captured.family == Decoder::Family::VOP3 &&
+            decoded_ashrrev_captured.src_count == 2u &&
+            decoded_ashrrev_captured.dst.kind == Decoder::OperandKind::Vgpr &&
+            decoded_ashrrev_captured.dst.reg == 7u &&
+            decoded_ashrrev_captured.src0.kind == Decoder::OperandKind::IntegerInlineConstant &&
+            decoded_ashrrev_captured.src0.value == 24u &&
+            decoded_ashrrev_captured.src1.kind == Decoder::OperandKind::Vgpr &&
+            decoded_ashrrev_captured.src1.reg == 2u,
+        "captured VOP3 V_ASHRREV_I64 opcode 0x301 was not decoded");
+  result = RecompileForTest(ashrrev_captured, options);
+  CheckSpirvBinaryValidates(result.spirv);
+
   const uint32_t cmpx_i64_shader[] = {
       0xd4b5007eu, 0x00020e80u, // v_cmpx_ne_i64 exec, 0, v[7:8]
       EncodeSopp(0x01),
@@ -17188,6 +17305,7 @@ int main() {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  TestVop3FloatConversionDecode();
   TestRayTracingInstructions();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();
@@ -17206,6 +17324,7 @@ int main() {
   TestNewShaderRecompilerSMovB32();
   TestShaderStageBarriers();
   TestVertexBufferGrouping();
+  TestShaderProgramHash();
   TestNggVertexEntryState();
   TestNewShaderRecompilerClipDisabledPosition();
   TestNewShaderRecompilerAuxPositionExports();

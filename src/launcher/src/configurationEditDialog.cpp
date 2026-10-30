@@ -296,6 +296,7 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->checkBox_tessellation->setChecked(info.tessellation_enabled);
 	m_ui->checkBox_skip_notice_screen->setChecked(info.skip_notice_screen);
 	m_ui->checkBox_network_connected->setChecked(info.network_connected);
+	m_ui->checkBox_psn_emulation->setChecked(info.psn_emulation_enabled);
 	m_ui->checkBox_trophy_notifications->setChecked(info.trophy_enabled);
 	m_ui->spinBox_trophy_duration->setValue(info.trophy_duration_seconds);
 	m_ui->checkBox_perf_overlay->setChecked(info.perf_overlay_enabled);
@@ -310,6 +311,7 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->checkBox_gpu_assisted_validation->setChecked(info.gpu_assisted_validation_enabled);
 	m_ui->checkBox_vulkan_validation->setChecked(info.vulkan_validation_enabled);
 	m_ui->checkBox_renderdoc_capture->setChecked(info.renderdoc_enabled);
+	m_ui->checkBox_pro->setChecked(info.pro_enabled);
 	m_ui->checkBox_amd_cpu->setChecked(info.amd_cpu_enabled);
 #if defined(__APPLE__)
 	m_ui->checkBox_amd_cpu->setVisible(false);
@@ -530,6 +532,7 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	info.tessellation_enabled      = ui.checkBox_tessellation->isChecked();
 	info.skip_notice_screen        = ui.checkBox_skip_notice_screen->isChecked();
 	info.network_connected         = ui.checkBox_network_connected->isChecked();
+	info.psn_emulation_enabled     = ui.checkBox_psn_emulation->isChecked();
 	info.trophy_enabled            = ui.checkBox_trophy_notifications->isChecked();
 	info.trophy_duration_seconds   = ui.spinBox_trophy_duration->value();
 	info.perf_overlay_enabled      = ui.checkBox_perf_overlay->isChecked();
@@ -539,6 +542,7 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	info.shader_validation_enabled = ui.checkBox_shader_validation->isChecked();
 	info.gpu_assisted_validation_enabled = ui.checkBox_gpu_assisted_validation->isChecked();
 	info.renderdoc_enabled         = ui.checkBox_renderdoc_capture->isChecked();
+	info.pro_enabled               = ui.checkBox_pro->isChecked();
 	info.amd_cpu_enabled           = ui.checkBox_amd_cpu->isChecked();
 #if defined(_WIN32)
 	info.red_zone_protection_enabled = ui.checkBox_red_zone_protection->isChecked();
