@@ -86,67 +86,67 @@ Note: the RX 580 does not support mesh shaders, so titles that require
 mesh-shader pipelines are hardware-blocked on this platform regardless of
 emulator progress.
 
-## Compatibility (Fork Retest, 2026-10-29)
+## Compatibility (Best Recorded Results and 2026-10-29 Retest)
 
-Results below reflect the 2026-10-29 retest on Windows 11 x64, Intel Core i7-5820K, Radeon RX 580 4GB. `InGame` means visible gameplay was reached; it does not imply reliable controls or full playability. The full evidence log is in [the dated compatibility notes](docs/notes/game-compatibility-check-2026-10-29.md).
+Best recorded results preserve earlier progress; the latest test is shown separately. A prior result is not claimed as reproduced by the 2026-10-29 retest. Gameplay means a gameplay scene was visible; controls and full playability may remain unverified. If game files were missing or still archived, the result is Not tested. See the [full test notes](docs/notes/game-compatibility-check-2026-10-29.md) for evidence.
 
-| Game | Title ID | Status | Latest observed result |
+| Game | Title ID | Best recorded result | 2026-10-29 test |
 | --- | --- | --- | --- |
-| A Plague Tale - Innocence | PPSA02388 | Logo | Extended launcher run rendered a scene and “PRESS” prompt, then Cross opened “Select a Slot”; all three slots displayed “Synchronization conflict.” Did not confirm a slot, reach the main menu, or verify gameplay. Existing settings/save data was unchanged. |
-| Alan Wake Remastered | PPSA01925 | InGame | Verified the main menu and Easy difficulty screen. Starting a new game and pressing Circle to skip the opening previously hit `unsupported render-target mip range: current=1 levels=1`. After changing color-target discovery to materialize the selected mip when it exceeds MAX_MIP, Circle skip progressed into the playable road scene. Forward (W) moved Alan into the light and prompted “Look up to the light”; the mapped right-stick control changed the camera view. Control response verified, but performance was poor (roughly 3–11 FPS during the scene). |
-| Alone in the Dark | — | DoesntBoot | Did not launch: `eboot.bin` missing from folder. |
-| Avatar - The Last Airbender (USA) | — | DoesntBoot | Did not launch: `eboot.bin` missing from folder. |
-| Avatar The Last Airbender - Quest for Balance | PPSA04341 | MainMenu | Nested game directory reaches the main menu; selecting Continue Story crashes with a guest access violation. |
-| Away - The Survival Series | PPSA04555 | Logo | Booted to title card/logo. |
-| Back 4 Blood | PPSA01695 | Logo | Booted to title card/logo. |
-| Beyond a Steel Sky | PPSA03979 | Logo | Booted to title card/logo. |
-| Borderlands 3 | PPSA01462 | Logo | Booted to title card/logo. |
-| Call of the Sea | PPSA01546 | Logo | Booted to title card/logo. |
-| Chernobylite | PPSA04747 | Logo | Booted to title card/logo. |
-| Resident Evil 8 - Maiden Demo | PPSA01859 | DoesntBoot | Focused relaunch still rendered black after a Cross input; no menu or gameplay/control response was visible. Earlier log records mesh draws being skipped because the host lacks mesh-shader support, followed by a GPU fence stall. Both installed GPUs (GTX 970 and RX 580) lack `VK_EXT_mesh_shader`; a capable GPU or a substantial mesh-shader fallback is needed. |
-| Control Ultimate Edition | PPSA01949 | Logo | Booted to title card/logo. |
-| DIRT5 | PPSA01552 | DoesntBoot | Emulator process ran, but captured output was black; no title/menu/gameplay visible. |
-| Fishing: North Atlantic Enhanced Edition | PPSA02985 | Logo | Found by its full title (including colon) after the initial search missed it. Correct `eboot.bin` launches; after the opening graphic, screen stays black. Cross produced no visible change. No fatal error or GPU-fence stall in this run; no menu/gameplay verified. |
-| Five Nights at Freddy's: Security Breach | PPSA04677 | DoesntBoot | Focused relaunch remained black and stopped advancing at frame 1519 (0 FPS). Cross produced no visible change. No menu/gameplay verified; log shows GPU scheduler progress stalled without a fatal error. |
-| Five Nights at Freddy's: Help Wanted 2 | PPSA18887 | DoesntBoot | Retest exits during boot with GPU flip submission failure (`result=-2144796661`, `handle=-1`, `index=-1`, `mode=2`); no menu/gameplay. |
-| Ghost of Tsushima | PPSA03208 | DoesntBoot | Emulator identified the title during launch, then exited before its game window could be captured. No menu/gameplay verified; no explicit fatal-error block in the run log. |
-| Ghostrunner | PPSA03682 | DoesntBoot | Emulator identified the game and reached frame 1915, then stalled on a GPU fence at tick 3633 and exited with code 321 after `vkQueueSubmit` returned `ErrorDeviceLost (-4)`. No menu/gameplay verified. |
-| Grand Theft Auto III - The Definitive Edition | PPSA03527 | InGame | Reached the main menu and started a new game. Opening cinematic led into the playable street scene with HUD. Mapped Triangle (C) entered the Kuruma and triggered the “Press R2 to accelerate” prompt, confirming a gameplay input response. Gameplay rendered at roughly 6–12 FPS with very dark/low-contrast scenes; full driving control not tested. |
-| Grand Theft Auto: San Andreas - The Definitive Edition | PPSA03524 | MainMenu | Reached the main menu after the Rockstar credits. Gameplay not verified: keyboard input without explicit mappings did not activate Start; a mapped-input retry exited before the menu. Existing database/GitHub report says in-game, but that was not reproduced in this test. |
-| Grand Theft Auto: Vice City - The Definitive Edition | PPSA03530 | MainMenu | Reached the main menu and started a new game. Opening cinematic rendered correctly, then transitioned to a very dark exterior scene at roughly 4–8 FPS with no HUD or clearly visible player. Mapped forward input caused no discernible change; controllable gameplay not verified. Earlier menu-only result reported a crash when starting. |
-| Ghostwire: Tokyo | PPSA01337 | MainMenu | Reached the main menu (Continue, New Game, Load, Options, Credits). Rendering is severely corrupted, mostly black with wireframe fragments. Emulator exited before navigation/control testing; no gameplay verified. |
-| Hot Wheels Unleashed | PPSA02325 | Logo | Reached the title splash, then showed a loading spinner at 0 FPS and exited. The available log is stale (2026-10-02), so its `ErrorOutOfDeviceMemory` report is not evidence for this run. Current-run exit cause, menu, and gameplay are unverified. |
-| Indiana Jones and The Great Circle | PPSA26786 | Logo | Not retested: the game folder contains only `.7z`/`.rar` packages, with no `eboot.bin` or unpacked game directory. Previous 2026-10-05 result was boot logo followed by crash before menu. |
-| It Takes Two | PPSA02343 | MainMenu | Reached the title prompt and main menu; mapped Cross confirmed through the prompt and opened Play Local > New Game/player selection. Menu/background have severe multicolored corruption though UI text remains readable. Could not proceed past player selection; no gameplay verified. |
-| THE KING OF FIGHTERS XV | PPSA02213 | MainMenu | Reached the Press Any Button prompt, main menu, and VS mode selection. Text/UI are readable, but most backgrounds/artwork are black. No match/gameplay verified; classify this run as menu only. |
-| Jumanji: The Video Game | PPSA03973 | InGame | Reached title prompt, main menu, local-game setup, character selection, and a gameplay-level scene with player and HUD visible. W was held, but the scene changed during that interval and there was no controlled before/after baseline; movement response is not confirmed. Portions are very dark; performance roughly 9–12 FPS. This improves on the prior logo-only result; cause not isolated between upstream and local dirty changes. |
-| LEGO Star Wars: The Skywalker Saga | PPSA01865 | Logo | Reached language selection, seizure warning, and accessibility-options prompt. Emulator exited after input at that prompt, before a game menu was verified. Existing log is stale (2026-10-21), so this run's exit cause is undetermined. |
-| MADiSON | PPSA07370 | MainMenu | Reached title prompt, main menu, Story/New Game, and difficulty screen. Rendering is severely black/crushed; menu text is visible but most artwork is missing. Save-slot screen displayed an overwrite warning even for the selected slot; did not confirm or modify save data. No gameplay verified. |
-| Maneater | PPSA01862 | DoesntBoot | Prior 2026-10-02 result reached the menu then crashed. In the 2026-10-29 retest, the window remained black and the process exited before a menu was visible; the existing run log did not refresh. No gameplay verified. |
-| Martha Is Dead | PPSA02006 | Logo | Reached a black title screen with “Use X to start” prompt at roughly 7–8 FPS. Mapped Cross and Circle inputs did not dismiss the prompt; no menu/gameplay verified. |
-| The Medium | PPSA03717 | MainMenu | Improved from prior no-boot result: reached the title prompt and main menu; New Game, Settings, and Credits were readable against an otherwise black background. Selecting New Game stopped rendering at 0 FPS while the window still responded. No gameplay verified. Existing run log is stale. |
-| MXGP 2020 - The Official Motocross Videogame | PPSA01646 | Logo | Prior result reached menu with graphical items missing and eventually crashed. This retest showed the legal/title splash, then the process exited before a menu; existing log is stale and does not establish this run's cause. |
-| Observer: System Redux | PPSA02118 | DoesntBoot | Direct launch rendered a black screen at roughly 0 FPS and exited before any logo/menu was visible. Existing log is stale (2026-10-21), so no current-run error cause is established. |
-| Planet Coaster (EU) | PPSA01735 | DoesntBoot | Launch displayed a PlayStation error dialog over a black screen (error code `0x80553407`) before any game menu. No gameplay verified. |
-| Planet Coaster (US) | PPSA01736 | DoesntBoot | Reached screen setup but was blocked by a PlayStation error dialog (code `0x80553407`). Confirm input did not dismiss it. No main menu/gameplay verified; previous report of main-menu status was not reproduced. |
-| Port Royale 4 | PPSA02815 | MainMenu | Reached a correctly rendered main menu with Campaign and Free Game options. This run did not successfully navigate/confirm a game mode; the “Load saved game” screen confirmed there are no saves. Prior 2026-10-02 database entry reports in-game/playable, but gameplay/control was not reproduced in this retest. |
-| The Matrix Awakens Demo | PPSA05754 | DoesntBoot | 2026-10-29 retest showed a black screen with loading dots, then the process exited before title/menu. Existing log is stale (2026-10-21) and reports unsupported `VK_EXT_mesh_shader`; that historical error is not confirmed as the cause of this run. |
-| Sackboy: A Big Adventure | PPSA01288 | DoesntBoot | 2026-10-29 retest remained black at 0 FPS, then the emulator process exited on its own about one minute later; I did not kill it. No menu/gameplay verified. The available log is stale (2026-10-21); its runtimeLinker access violation belongs to that older run and does not establish this exit's cause. |
-| Sifu | PPSA03001 | DoesntBoot | Window rendered a nearly black scene, then stopped advancing at frame 5437 / 0 FPS. Mapped Cross input produced no visible change. No menu/gameplay verified; the stalled process was closed manually. |
-| STAR WARS Jedi: Fallen Order | PPSA02198 | Logo | Reached the Respawn logo, then stopped advancing at 0 FPS before a menu. Mapped Cross input produced no visible change; the process exited afterward. Existing log is stale (2026-10-21), so the current exit cause is unknown. |
-| Terminator: Resistance Enhanced | PPSA02474 | DoesntBoot | Prior result showed logo briefly then crashed. This retest displayed a black screen with a save icon at 0 FPS; the process exited before menu. Existing log is stale (2026-10-21), so it does not establish this run's cause. |
-| The Riftbreaker | — | DoesntBoot | Direct launch process exited within 45 seconds before a game window/title was captured. No fresh log or title ID was available in the game folder; cause and menu/gameplay are unverified. |
-| Tony Hawk's Pro Skater 1 + 2 | PPSA02176 | Logo | Opening credits/video rendered at 60 FPS, then the image went black and stopped advancing at frame 12212 / 0 FPS for at least 60 seconds. Mapped Cross had no effect; I closed the stalled process manually. Prior 2026-10-05 report reached menu, but no current menu/gameplay verified. |
-| Train Sim World 2: Rush Hour | PPSA03944 | Logo | Rendered the opening train sequence, then reached the "Press Any Button to Advance" title prompt. The mapped Cross and Enter presses did not advance it during this test. No main menu or gameplay verified. Prior 2026-10-05 report claimed menu then crash loading into game; existing log is stale (2026-10-05). |
-| Tropico 6 | PPSA05682 | Logo | Reached the Tropico 6 "Press X to Start" title prompt. After mapped Cross, the image turned black and remained black for 60 seconds while frames continued advancing. No main menu or gameplay verified; process closed manually. Existing log is stale (2026-10-21). |
-| Uncharted: Legacy of Thieves Collection | PPSA05389 | DoesntBoot | 2026-10-29 retest rendered a black screen at 0 FPS; the process exited before any title/menu was visible. Existing log is stale (2026-10-21), so current exit cause is unknown. |
-| Werewolf: The Apocalypse - Earthblood | PPSA02113 | MainMenu | Reached the main menu and save-slot screen. Chose an empty New Game slot (leaving the existing save untouched), reached the Tarker's Mill loading screen and narrative cutscene, then the image turned black and stopped advancing at 0 FPS. No gameplay verified; stalled process closed manually. Existing log is stale (2026-10-05). |
-| WWE 2K22 | PPSA02460 | MainMenu | Reached the main menu after the Press Any Button prompt and a server-data warning. Menu labels and navigation are visible, but the entire background/artwork is black. Previous 2026-10-05 entry said InGame; that gameplay result was not reproduced, so this retest supports MainMenu only. Rendering regression/limitation observed; cause not isolated. Process closed manually. |
-| The Ascent | PPSA02593 | MainMenu | Improved from prior audio/no-video result: reached the title prompt, main menu, Single Player > New Game, and profile selection. Main scene is severely red-corrupted. Selecting the first blank profile caused the process to exit before gameplay; available log is stale (2026-10-21), so cause is unknown. |
-| Red Dead Redemption - PS5 | PPSA99078 | Unknown | Not launchable from the current folder: it contains a 9.7 GB `.pkg` and metadata, but no `eboot.bin` or unpacked game directory. Package was not installed/extracted. |
-| Resident Evil Village | PPSA01556 | Unknown | Not launchable from the current folder: only `.pkg` packages are present; no `eboot.bin` or unpacked game directory. Package was not installed/extracted. |
-| RIDE 4 | PPSA01599 | Logo | Prior result reached menu then crashed during menu loading. This retest displayed the copyright/legal screen, then the process exited before a menu; current log freshness was not established. |
-| Teenage Mutant Ninja Turtles: The Cowabunga Collection | PPSA04489 | InGame | Reached title screen, main menu/game selection, selected the arcade TMNT game, and reached a gameplay screen with 1UP HUD, character, and active scene. D was pressed, but no controlled before/after comparison established movement response. The arcade viewport rendered clearly at 60 FPS; some game-selection screens were corrupted. |
+| A Plague Tale - Innocence | PPSA02388 | Title/logo (2026-10-29) | Slot screen only; no menu (2026-10-29). |
+| Alan Wake Remastered | PPSA01925 | Gameplay (2026-10-29) | Gameplay scene; controls confirmed; low FPS (2026-10-29). |
+| Alone in the Dark | — | Not tested | Not tested; game files missing (2026-10-29). |
+| Avatar - The Last Airbender (USA) | — | Not tested | Not tested; game files missing (2026-10-29). |
+| Avatar The Last Airbender - Quest for Balance | PPSA04341 | Main menu (2026-10-29) | Main menu; crashes on Continue (2026-10-29). |
+| Away - The Survival Series | PPSA04555 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| Back 4 Blood | PPSA01695 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| Beyond a Steel Sky | PPSA03979 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| Borderlands 3 | PPSA01462 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| Call of the Sea | PPSA01546 | Main menu (prior: 2026-10-02) | Title/logo only (2026-10-29). |
+| Chernobylite | PPSA04747 | Main menu (prior: 2026-10-02) | Title/logo only (2026-10-29). |
+| Resident Evil 8 - Maiden Demo | PPSA01859 | Main menu (prior: 2026-10-02) | No title/menu visible (2026-10-29). |
+| Control Ultimate Edition | PPSA01949 | Gameplay (prior: 2026-10-02) | Title/logo only (2026-10-29). |
+| DIRT5 | PPSA01552 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Fishing: North Atlantic Enhanced Edition | PPSA02985 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| Five Nights at Freddy's: Security Breach | PPSA04677 | Main menu (prior: 2026-10-02) | No title/menu visible (2026-10-29). |
+| Five Nights at Freddy's: Help Wanted 2 | PPSA18887 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Ghost of Tsushima | PPSA03208 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Ghostrunner | PPSA03682 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Grand Theft Auto III - The Definitive Edition | PPSA03527 | Gameplay (2026-10-29) | Gameplay scene; vehicle interaction confirmed (2026-10-29). |
+| Grand Theft Auto: San Andreas - The Definitive Edition | PPSA03524 | Gameplay (prior: 2026-10-21) | Main menu; gameplay not verified (2026-10-29). |
+| Grand Theft Auto: Vice City - The Definitive Edition | PPSA03530 | Gameplay (prior: 2026-10-21) | New game started; dark scene, controls unconfirmed (2026-10-29). |
+| Ghostwire: Tokyo | PPSA01337 | Main menu (2026-10-29) | Main menu; gameplay not verified (2026-10-29). |
+| Hot Wheels Unleashed | PPSA02325 | Main menu (prior: 2026-10-02) | Title/logo only (2026-10-29). |
+| Indiana Jones and The Great Circle | PPSA26786 | Title/logo (prior: 2026-10-05) | Not retested; game files still archived (2026-10-29). |
+| It Takes Two | PPSA02343 | Main menu (2026-10-29) | Menu reached; stopped at player selection (2026-10-29). |
+| THE KING OF FIGHTERS XV | PPSA02213 | Main menu (2026-10-29) | Menu and VS selection; no match tested (2026-10-29). |
+| Jumanji: The Video Game | PPSA03973 | Gameplay (2026-10-29) | Gameplay scene; controls unconfirmed (2026-10-29). |
+| LEGO Star Wars: The Skywalker Saga | PPSA01865 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| MADiSON | PPSA07370 | Main menu (2026-10-29) | Menu and difficulty screen; no gameplay (2026-10-29). |
+| Maneater | PPSA01862 | Main menu (prior: 2026-10-02) | No title/menu visible (2026-10-29). |
+| Martha Is Dead | PPSA02006 | Title/logo (2026-10-29) | Title prompt only (2026-10-29). |
+| The Medium | PPSA03717 | Main menu (2026-10-29) | Menu reached; stalled on New Game (2026-10-29). |
+| MXGP 2020 - The Official Motocross Videogame | PPSA01646 | Main menu (prior: 2026-10-02) | Title/logo only (2026-10-29). |
+| Observer: System Redux | PPSA02118 | Title/logo (prior: 2026-10-02) | No title/menu visible (2026-10-29). |
+| Planet Coaster (EU) | PPSA01735 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Planet Coaster (US) | PPSA01736 | Main menu (external) | Blocked at error screen; no menu (2026-10-29). |
+| Port Royale 4 | PPSA02815 | Gameplay (prior: 2026-10-02) | Main menu; gameplay not verified (2026-10-29). |
+| The Matrix Awakens Demo | PPSA05754 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Sackboy: A Big Adventure | PPSA01288 | Title/logo (prior: 2026-10-02) | No title/menu visible (2026-10-29). |
+| Sifu | PPSA03001 | Title/logo (prior: 2026-10-02) | No title/menu visible (2026-10-29). |
+| STAR WARS Jedi: Fallen Order | PPSA02198 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| Terminator: Resistance Enhanced | PPSA02474 | Title/logo (prior: 2026-10-05) | No title/menu visible (2026-10-29). |
+| The Riftbreaker | PPSA03753 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Tony Hawk's Pro Skater 1 + 2 | PPSA02176 | Main menu (prior: 2026-10-05) | Title/logo only (2026-10-29). |
+| Train Sim World 2: Rush Hour | PPSA03944 | Main menu (prior: 2026-10-05) | Title/logo only (2026-10-29). |
+| Tropico 6 | PPSA05682 | Title/logo (2026-10-29) | Title/logo only (2026-10-29). |
+| Uncharted: Legacy of Thieves Collection | PPSA05389 | No title/menu (2026-10-29) | No title/menu visible (2026-10-29). |
+| Werewolf: The Apocalypse - Earthblood | PPSA02113 | Gameplay (prior: 2026-10-05) | Menu reached; loading scene stalled (2026-10-29). |
+| WWE 2K22 | PPSA02460 | Gameplay (prior: 2026-10-05) | Main menu; prior gameplay not reproduced (2026-10-29). |
+| The Ascent | PPSA02593 | Main menu (2026-10-29) | Menu reached; exited before gameplay (2026-10-29). |
+| Red Dead Redemption - PS5 | PPSA99078 | Not tested | Not tested; package not unpacked (2026-10-29). |
+| Resident Evil Village | PPSA01556 | Not tested | Not tested; package not unpacked (2026-10-29). |
+| RIDE 4 | PPSA01599 | Main menu (prior: 2026-10-02) | Title/logo only (2026-10-29). |
+| Teenage Mutant Ninja Turtles: The Cowabunga Collection | PPSA04489 | Gameplay (2026-10-29) | Gameplay scene; controls unconfirmed (2026-10-29). |
 
 <table align="center">
   <tr>
