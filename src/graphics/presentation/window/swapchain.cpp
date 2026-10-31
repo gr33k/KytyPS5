@@ -8,7 +8,6 @@
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
 #include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
-#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -18,15 +17,10 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/windowInternal.h"
-#include "loader/systemContent.h"
 
 #include <algorithm>
-#include <chrono>
 #include <array>
 #include <atomic>
-#include <cctype>
-#include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -36,65 +30,6 @@
 
 namespace Libs::Graphics {
 
-// GTA III's composite override feeds raw linear scene values to video-out; that title needs
-// a display encode. Keep all other titles untouched unless explicitly enabled for testing.
-[[nodiscard]] static bool PresentEncodeWantedByTitle() {
-    static const bool wanted = [] {
-        char title_id[12] = {};
-        return Loader::SystemContentParamSfoGetString("TITLE_ID", title_id, sizeof(title_id)) &&
-               std::string_view(title_id) == "PPSA03527";
-    }();
-    return wanted;
-}
-
-// KYTY_PRESENT_ENCODE=linear|off overrides the per-title choice.
-[[nodiscard]] static bool PresentEncodeRequested() {
-	static const bool requested = [] {
-		if (std::getenv("KYTY_PRESENT_NO_GAMMA") != nullptr) {
-			return false;
-		}
-		const char* value = std::getenv("KYTY_PRESENT_ENCODE");
-		if (value == nullptr) {
-			return PresentEncodeWantedByTitle();
-		}
-		std::string text {value};
-		std::ranges::transform(text, text.begin(), [](unsigned char c) {
-			return static_cast<char>(std::tolower(c));
-		});
-		return !(text == "off" || text == "none" || text == "0");
-	}();
-	return requested;
-}
-
-// KYTY_PRESENT_GAMMA=1 forces the display encode on every frame, for A/B testing.
-[[nodiscard]] static bool PresentGammaForced() {
-	static const bool forced = std::getenv("KYTY_PRESENT_GAMMA") != nullptr;
-	return forced;
-}
-
-// Exposure applied while display-encoding those frames. III composites an HDR scene
-// target and its world is very dark, so it needs a lift. Vice City and San Andreas
-// hand the presenter a display-referred-ish 8-bit target already; lifting that just
-// blows the highlights out.
-[[nodiscard]] static float PresentEncodeExposure() {
-	// The title database may not be readable the first time a frame is presented, so do not
-	// cache a failed lookup: an III frame presented with exposure 1.0 instead of 3.0 is
-	// visibly darker than the same frame from the other video-out buffer.
-	static std::atomic<float> cached {0.0f};
-	const float              known = cached.load(std::memory_order_acquire);
-	if (known > 0.0f) {
-		return known;
-	}
-	char title_id[12] = {};
-	if (!Loader::SystemContentParamSfoGetString("TITLE_ID", title_id, sizeof(title_id))) {
-		return 1.0f;
-	}
-	const std::string id      = title_id;
-	const float       exposure = id == "PPSA03527" ? 3.0f : 1.0f;
-	cached.store(exposure, std::memory_order_release);
-	return exposure;
-}
-
 struct Presenter::Frame {
 	VulkanImage   image;
 	vk::ImageView view         = nullptr;
@@ -102,8 +37,6 @@ struct Presenter::Frame {
 	bool          busy         = false;
 	bool          hdr          = false;
 	bool          blank        = false;
-	// Composited from the linear HDR scene target, so its values are not display-encoded.
-	bool          linear_source = false;
 
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
@@ -357,9 +290,8 @@ public:
 private:
 	vk::SurfaceFormatKHR SelectFormat();
 	void Destroy();
-	void DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer);
-	void EnsureOverlayPipeline();
-	void DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* source);
+	void DrawLayer(vk::CommandBuffer command, const Presenter::Layer& layer,
+	               const vk::Rect2D& rect);
 
 	WindowContext&   m_window;
 	vk::SwapchainKHR m_handle = nullptr;
@@ -431,7 +363,6 @@ struct Presenter::Impl {
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
-	uint64_t              composite_override_seen = 0;
 };
 
 vk::SurfaceFormatKHR Swapchain::SelectFormat() {
@@ -722,7 +653,8 @@ static vk::Rect2D FitAspect(const vk::Extent3D& source, const vk::Extent2D& targ
 	        {w, h}};
 }
 
-void Swapchain::EnsureOverlayPipeline() {
+void Swapchain::DrawLayer(vk::CommandBuffer command, const Presenter::Layer& layer,
+                          const vk::Rect2D& rect) {
 	auto device = m_window.graphic_ctx.device;
 	if (m_overlay_pipeline == nullptr) {
 		vk::SamplerCreateInfo sampler {};
@@ -742,8 +674,7 @@ void Swapchain::EnsureOverlayPipeline() {
 		RequireVulkanSuccess(
 		    device.createDescriptorSetLayout(&descriptors, nullptr, &m_overlay_descriptors),
 		    "create video-out overlay descriptor layout");
-		const vk::PushConstantRange alpha {vk::ShaderStageFlagBits::eFragment, 0,
-		                                  3 * sizeof(uint32_t)};
+		const vk::PushConstantRange alpha {vk::ShaderStageFlagBits::eFragment, 0, sizeof(uint32_t)};
 		vk::PipelineLayoutCreateInfo layout {};
 		layout.setLayoutCount         = 1;
 		layout.pSetLayouts            = &m_overlay_descriptors;
@@ -807,11 +738,6 @@ void Swapchain::EnsureOverlayPipeline() {
 		device.destroyShaderModule(fragment, nullptr);
 		device.destroyShaderModule(vertex, nullptr);
 	}
-	}
-
-void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer) {
-	auto device = m_window.graphic_ctx.device;
-	EnsureOverlayPipeline();
 	auto& frame = *layer.frame;
 	if (frame.view == nullptr) {
 		vk::ImageViewCreateInfo view {};
@@ -830,9 +756,11 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 	write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
 	write.pImageInfo      = &image;
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
-	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) |
-	                       (m_hdr_active ? 2u : 0u) | (frame.hdr ? 4u : 0u) |
-	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u);
+	// The main bus ignores alpha.
+	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) | (m_hdr_active ? 2u : 0u) |
+	                       (frame.hdr ? 4u : 0u) |
+	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u) |
+	                       (layer.bus == 0 ? 16u : 0u);
 	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
 	                      sizeof(flags), &flags);
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
@@ -847,89 +775,14 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 	rendering.colorAttachmentCount = 1;
 	rendering.pColorAttachments    = &attachment;
 	command.beginRendering(&rendering);
-	const auto rect = !Config::StretchEnabled() ? FitAspect(frame.image.extent, m_extent)
-	                                           : vk::Rect2D {{0, 0}, m_extent};
 	const vk::Viewport viewport {static_cast<float>(rect.offset.x),
 	                             static_cast<float>(rect.offset.y),
 	                             static_cast<float>(rect.extent.width),
-	                             static_cast<float>(rect.extent.height), 0.0f, 1.0f};
-	const vk::Rect2D scissor = rect;
+	                             static_cast<float>(rect.extent.height),
+	                             0.0f,
+	                             1.0f};
 	command.setViewport(0, 1, &viewport);
-	command.setScissor(0, 1, &scissor);
-	command.draw(3, 1, 0, 0);
-	command.endRendering();
-}
-
-void Swapchain::DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* source) {
-	EXIT_IF(source == nullptr || source->image.image == nullptr);
-	EnsureOverlayPipeline();
-	auto device = m_window.graphic_ctx.device;
-	if (source->view == nullptr) {
-		vk::ImageViewCreateInfo view {};
-		view.image            = source->image.image;
-		view.viewType         = vk::ImageViewType::e2D;
-		view.format           = source->image.format;
-		view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-		RequireVulkanSuccess(device.createImageView(&view, nullptr, &source->view),
-		                     "create present source image view");
-	}
-	const vk::DescriptorImageInfo image {m_overlay_sampler, source->view,
-	                                     vk::ImageLayout::eShaderReadOnlyOptimal};
-	vk::WriteDescriptorSet        write {};
-	write.dstBinding      = 0;
-	write.descriptorCount = 1;
-	write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-	write.pImageInfo      = &image;
-	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
-	// The world reaches the video-out as linear HDR: expose it and encode to sRGB.
-	const auto env_float = [](const char* name, float fallback) {
-		const char* value = std::getenv(name);
-		return value != nullptr ? static_cast<float>(std::atof(value)) : fallback;
-	};
-	float exposure = env_float("KYTY_PRESENT_EXPOSURE", PresentEncodeExposure());
-	// Live tuning: re-read the exposure from a file every frame while the game runs.
-	if (const char* path = std::getenv("KYTY_PRESENT_EXPOSURE_FILE")) {
-		if (std::FILE* file = std::fopen(path, "r")) {
-			float value = 0.0f;
-			if (std::fscanf(file, "%f", &value) == 1 && value > 0.0f) {
-				exposure = value;
-			}
-			std::fclose(file);
-		}
-	}
-	struct PresentPush {
-		uint32_t flags;
-		float    gamma;
-		float    exposure;
-	} push {((PresentGammaForced() || source->linear_source) ? 16u : 0u) |
-	            (m_hdr_active ? 2u : 0u) | (source->hdr ? 4u : 0u),
-	        env_float("KYTY_PRESENT_GAMMA", 2.2f), exposure};
-	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
-	                      sizeof(push), &push);
-	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
-	vk::RenderingAttachmentInfo attachment {};
-	attachment.imageView   = m_image_views[m_image_index];
-	attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
-	attachment.loadOp      = vk::AttachmentLoadOp::eClear;
-	attachment.storeOp     = vk::AttachmentStoreOp::eStore;
-	vk::ClearValue clear {};
-	clear.color.float32[3] = 1.0f;
-	attachment.clearValue  = clear;
-	vk::RenderingInfo rendering {};
-	rendering.renderArea.extent    = m_extent;
-	rendering.layerCount           = 1;
-	rendering.colorAttachmentCount = 1;
-	rendering.pColorAttachments    = &attachment;
-	command.beginRendering(&rendering);
-	const auto rect = !Config::StretchEnabled() ? FitAspect(source->image.extent, m_extent)
-	                                           : vk::Rect2D {{0, 0}, m_extent};
-	const vk::Viewport viewport {static_cast<float>(rect.offset.x),
-	                             static_cast<float>(rect.offset.y),
-	                             static_cast<float>(rect.extent.width),
-	                             static_cast<float>(rect.extent.height), 0.0f, 1.0f};
-	const vk::Rect2D scissor = rect;
-	command.setViewport(0, 1, &viewport);
-	command.setScissor(0, 1, &scissor);
+	command.setScissor(0, 1, &rect);
 	command.draw(3, 1, 0, 0);
 	command.endRendering();
 }
@@ -938,46 +791,21 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
                                       const Presenter::Layer& overlay, bool draw_system_overlay) {
 	EXIT_IF(m_image_index >= m_images.size());
 	auto       vk_command      = command.Handle();
+	const bool convert_source  = source != nullptr && source->hdr && !m_hdr_active;
+	const bool blit_source     = source != nullptr && !convert_source;
 	const bool draw_overlay    = overlay.frame != nullptr;
-	const bool draw_attachment = draw_overlay || draw_system_overlay;
-	// Frames composited from the linear HDR scene target (see g_composite_override_tick)
-	// carry no display encode, so they are drawn through the overlay pipeline with an
-	// exposure and gamma instead of being blitted. Only titles that are known to present
-	// that raw scene target get this, so other games keep their own brightness;
-	// KYTY_PRESENT_ENCODE=linear|off overrides the choice for testing.
-	const bool        gamma        = source != nullptr &&
-	                          (PresentGammaForced() ||
-	                           (PresentEncodeRequested() && source->linear_source));
-	if (source != nullptr) {
-		source->Transit(vk_command,
-		                gamma ? vk::ImageLayout::eShaderReadOnlyOptimal
-		                      : vk::ImageLayout::eTransferSrcOptimal,
-		                gamma ? vk::AccessFlagBits2::eShaderRead
-		                      : vk::AccessFlagBits2::eTransferRead);
+	const bool draw_attachment = convert_source || draw_overlay || draw_system_overlay;
+	if (blit_source) {
+		source->Transit(vk_command, vk::ImageLayout::eTransferSrcOptimal,
+		                vk::AccessFlagBits2::eTransferRead);
+	}
+	if (convert_source) {
+		source->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal,
+		                vk::AccessFlagBits2::eShaderRead);
 	}
 	if (draw_overlay) {
 		overlay.frame->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal,
 		                       vk::AccessFlagBits2::eShaderRead);
-	}
-
-	if (gamma) {
-		vk::ImageMemoryBarrier to_color {};
-		to_color.sType                           = vk::StructureType::eImageMemoryBarrier;
-		to_color.dstAccessMask                   = vk::AccessFlagBits::eColorAttachmentWrite;
-		to_color.oldLayout                       = vk::ImageLayout::eUndefined;
-		to_color.newLayout                       = vk::ImageLayout::eColorAttachmentOptimal;
-		to_color.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-		to_color.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-		to_color.image                           = m_images[m_image_index];
-		to_color.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
-		to_color.subresourceRange.baseMipLevel   = 0;
-		to_color.subresourceRange.levelCount     = 1;
-		to_color.subresourceRange.baseArrayLayer = 0;
-		to_color.subresourceRange.layerCount     = 1;
-		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-		                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
-		                           vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1, &to_color);
-		DrawPresentSource(vk_command, source);
 	}
 
 	vk::ImageMemoryBarrier to_transfer {};
@@ -994,67 +822,58 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	to_transfer.subresourceRange.baseArrayLayer = 0;
 	to_transfer.subresourceRange.layerCount     = 1;
 	// Match the acquire wait stage so the layout transition cannot precede acquisition.
-	if (!gamma) {
-		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-		                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {},
-		                           0, nullptr, 0, nullptr, 1, &to_transfer);
+	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {}, 0,
+	                           nullptr, 0, nullptr, 1, &to_transfer);
 
-		if (source != nullptr) {
-			const auto rect = !Config::StretchEnabled()
-			                      ? FitAspect(source->image.extent, m_extent)
-			                      : vk::Rect2D {{0, 0}, m_extent};
-			if (rect.extent != m_extent) {
-				const vk::ClearColorValue black {};
-				vk_command.clearColorImage(m_images[m_image_index],
-				                           vk::ImageLayout::eTransferDstOptimal, &black, 1,
-				                           &to_transfer.subresourceRange);
-				vk::ImageMemoryBarrier after_clear = to_transfer;
-				after_clear.srcAccessMask          = vk::AccessFlagBits::eTransferWrite;
-				after_clear.oldLayout              = vk::ImageLayout::eTransferDstOptimal;
-				vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-				                           vk::PipelineStageFlagBits::eTransfer,
-				                           vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1,
-				                           &after_clear);
-			}
-			vk::ImageBlit region {};
-			region.srcSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
-			region.srcSubresource.mipLevel       = 0;
-			region.srcSubresource.baseArrayLayer = 0;
-			region.srcSubresource.layerCount     = 1;
-			region.srcOffsets[1].x               = static_cast<int>(source->image.extent.width);
-			region.srcOffsets[1].y               = static_cast<int>(source->image.extent.height);
-			region.srcOffsets[1].z               = 1;
-			region.dstSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
-			region.dstSubresource.mipLevel       = 0;
-			region.dstSubresource.baseArrayLayer = 0;
-			region.dstSubresource.layerCount     = 1;
-			region.dstOffsets[0].x               = rect.offset.x;
-			region.dstOffsets[0].y               = rect.offset.y;
-			region.dstOffsets[1].x               = rect.offset.x +
-			                                      static_cast<int32_t>(rect.extent.width);
-			region.dstOffsets[1].y               = rect.offset.y +
-			                                      static_cast<int32_t>(rect.extent.height);
-			region.dstOffsets[1].z               = 1;
-			vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal,
-			                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
-			                     &region, vk::Filter::eLinear);
-		} else {
-			const vk::ClearColorValue black {};
-			vk_command.clearColorImage(m_images[m_image_index],
-			                           vk::ImageLayout::eTransferDstOptimal, &black, 1,
-			                           &to_transfer.subresourceRange);
+	const auto* aspect_source = source != nullptr ? source : overlay.frame;
+	const auto  game_rect     = !Config::StretchEnabled() && aspect_source != nullptr
+	                               ? FitAspect(aspect_source->image.extent, m_extent)
+	                               : vk::Rect2D {{0, 0}, m_extent};
+	if (source == nullptr || game_rect.extent != m_extent) {
+		const vk::ClearColorValue black {};
+		vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal,
+		                           &black, 1, &to_transfer.subresourceRange);
+		if (blit_source) {
+			vk::ImageMemoryBarrier after_clear = to_transfer;
+			after_clear.srcAccessMask          = vk::AccessFlagBits::eTransferWrite;
+			after_clear.oldLayout              = vk::ImageLayout::eTransferDstOptimal;
+			vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+			                           vk::PipelineStageFlagBits::eTransfer,
+			                           vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1,
+			                           &after_clear);
 		}
+	}
+	if (blit_source) {
+		vk::ImageBlit region {};
+		region.srcSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+		region.srcSubresource.mipLevel       = 0;
+		region.srcSubresource.baseArrayLayer = 0;
+		region.srcSubresource.layerCount     = 1;
+		region.srcOffsets[1].x               = static_cast<int>(source->image.extent.width);
+		region.srcOffsets[1].y               = static_cast<int>(source->image.extent.height);
+		region.srcOffsets[1].z               = 1;
+		region.dstSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+		region.dstSubresource.mipLevel       = 0;
+		region.dstSubresource.baseArrayLayer = 0;
+		region.dstSubresource.layerCount     = 1;
+		region.dstOffsets[0].x = game_rect.offset.x;
+		region.dstOffsets[0].y = game_rect.offset.y;
+		region.dstOffsets[1].x = game_rect.offset.x + static_cast<int>(game_rect.extent.width);
+		region.dstOffsets[1].y = game_rect.offset.y + static_cast<int>(game_rect.extent.height);
+		region.dstOffsets[1].z               = 1;
+		vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal,
+		                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
+		                     &region, vk::Filter::eLinear);
 	}
 
 	vk::ImageMemoryBarrier to_present {};
 	to_present.sType               = vk::StructureType::eImageMemoryBarrier;
-	to_present.srcAccessMask       = gamma ? vk::AccessFlagBits::eColorAttachmentWrite
-	                                       : vk::AccessFlagBits::eTransferWrite;
+	to_present.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
 	to_present.dstAccessMask       = draw_attachment ? vk::AccessFlagBits::eColorAttachmentRead |
 	                                                       vk::AccessFlagBits::eColorAttachmentWrite
 	                                                 : vk::AccessFlagBits::eMemoryRead;
-	to_present.oldLayout           = gamma ? vk::ImageLayout::eColorAttachmentOptimal
-	                                       : vk::ImageLayout::eTransferDstOptimal;
+	to_present.oldLayout           = vk::ImageLayout::eTransferDstOptimal;
 	to_present.newLayout           = draw_attachment ? vk::ImageLayout::eColorAttachmentOptimal
 	                                                 : vk::ImageLayout::ePresentSrcKHR;
 	to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1065,30 +884,37 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	to_present.subresourceRange.levelCount     = 1;
 	to_present.subresourceRange.baseArrayLayer = 0;
 	to_present.subresourceRange.layerCount     = 1;
-	vk_command.pipelineBarrier(
-	    gamma ? vk::PipelineStageFlagBits::eColorAttachmentOutput
-	          : vk::PipelineStageFlagBits::eTransfer,
-	    draw_attachment ? vk::PipelineStageFlagBits::eColorAttachmentOutput
-	                    : vk::PipelineStageFlagBits::eAllCommands,
-	    vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1, &to_present);
+	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                           draw_attachment ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+	                                           : vk::PipelineStageFlagBits::eAllCommands,
+	                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
+	                           &to_present);
 	if (draw_attachment) {
+		// Each pass blends over the color writes of the previous one.
+		to_present.srcAccessMask      = vk::AccessFlagBits::eColorAttachmentWrite;
+		to_present.oldLayout          = vk::ImageLayout::eColorAttachmentOptimal;
+		const auto attachment_barrier = [&] {
+			vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+			                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
+			                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
+			                           &to_present);
+		};
+		if (convert_source) {
+			DrawLayer(vk_command, {source, 0, false}, game_rect);
+			if (draw_overlay || draw_system_overlay) {
+				attachment_barrier();
+			}
+		}
 		if (draw_overlay) {
-			DrawOverlay(vk_command, overlay);
+			DrawLayer(vk_command, overlay, game_rect);
 			if (draw_system_overlay) {
-				to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-				to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
-				vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-				                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
-				                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0,
-				                           nullptr, 1, &to_present);
+				attachment_barrier();
 			}
 		}
 		if (draw_system_overlay) {
 			m_system_overlay->Record(vk_command, m_image_views[m_image_index]);
 		}
-		to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
 		to_present.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
-		to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
 		to_present.newLayout     = vk::ImageLayout::ePresentSrcKHR;
 		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
 		                           vk::PipelineStageFlagBits::eAllCommands,
@@ -1144,105 +970,26 @@ Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(windo
 
 Presenter::~Presenter() = default;
 
-// Diagnostic: present an arbitrary guest render target in place of the video-out buffer so a
-// scene target can be inspected on screen. The guest address can be fixed (env
-// KYTY_PRESENT_RT_ADDR) or read live from a file (env KYTY_PRESENT_RT_FILE), which allows the
-// target to be chosen after the run has started since guest addresses vary per run. Zero keeps
-// the normal video-out path.
-static uint64_t PresentTargetOverrideAddress() {
-	if (const char* path = std::getenv("KYTY_PRESENT_RT_FILE"); path != nullptr) {
-		if (FILE* file = std::fopen(path, "rb"); file != nullptr) {
-			char         buffer[64] = {};
-			const size_t read       = std::fread(buffer, 1, sizeof(buffer) - 1, file);
-			std::fclose(file);
-			if (read > 0) {
-				return std::strtoull(buffer, nullptr, 16);
-			}
-		}
-	}
-	static const uint64_t address = [] {
-		const char* value = std::getenv("KYTY_PRESENT_RT_ADDR");
-		return value == nullptr ? 0ull : std::strtoull(value, nullptr, 16);
-	}();
-	return address;
-}
-
 Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr,
                                           bool headset) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer.IsInvalid());
-	Image*  override_image = nullptr;
-	ImageId override_id {};
-	if (const uint64_t address = PresentTargetOverrideAddress(); address != 0) {
-		auto&      cache = m_impl->renderer.GetTextureCache();
-		override_id      = cache.FindImageFromRange(address, 4, false);
-		if (override_id) {
-			override_image = &cache.GetImage(override_id);
-			static std::atomic_uint override_logged {0};
-			if (override_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
-				LOGF("PresentTargetOverride: addr=0x%010" PRIx64 " -> 0x%010" PRIx64
-				     " %ux%u fmt=%s tile=%u\n",
-				     address, override_image->info.data.address, override_image->info.extent.width,
-				     override_image->info.extent.height,
-				     vk::to_string(override_image->info.pixel_format).c_str(),
-				     static_cast<uint32_t>(override_image->info.tile_mode));
-			}
-			if (override_image->info.pixel_format == vk::Format::eUndefined ||
-			    override_image->info.extent.width == 0 || override_image->info.extent.height == 0) {
-				override_image = nullptr;
-			}
-		}
-	}
-	auto frame_format =
-	    override_image != nullptr ? override_image->info.pixel_format : info.pixel_format;
+	auto frame_format = info.pixel_format;
 	switch (frame_format) {
 		case vk::Format::eR8G8B8A8Srgb: frame_format = vk::Format::eR8G8B8A8Unorm; break;
 		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
 		default: break;
 	}
-	const auto extent = override_image != nullptr
-	                        ? vk::Extent2D {override_image->info.extent.width,
-	                                        override_image->info.extent.height}
-	                        : vk::Extent2D {info.extent.width, info.extent.height};
-	auto* frame = m_impl->frames.Acquire(extent, frame_format);
+	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
 	frame->hdr   = hdr;
 	frame->blank = false;
-	// The composite override feeds the linear scene source into this presentation frame.
-	// Use the same tick-based detection as the previously stable GTA III build.
-	const auto override_tick = g_composite_override_tick.load(std::memory_order_relaxed);
-	const bool override_changed = override_tick != m_impl->composite_override_seen;
-	m_impl->composite_override_seen = override_tick;
-
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
-	Image*            override_ready = nullptr;
-	if (override_image != nullptr) {
-		override_image->usage.video_out = true;
-		m_impl->renderer.GetTextureCache().UpdateImage(override_id);
-		override_ready = override_image;
-	}
-	auto& image = override_ready != nullptr ? *override_ready : m_impl->ResolveSurface(info);
+	auto&             image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
 	}
-	// Both guest video-out buffers contain the same raw linear scene when the override is
-	// active, despite one being declared sRGB and the other UNORM. Treat them identically:
-	// skipping the sRGB-declared buffer caused it to display dark, alternating with the
-	// correctly encoded bright UNORM buffer.
-	frame->linear_source = override_changed;
 	frame->Configure(m_impl->window.graphic_ctx,
 	                 {image.backing.extent.width, image.backing.extent.height}, frame_format);
-	if (std::getenv("KYTY_PRESENT_DIAG") != nullptr) {
-		static std::atomic_uint present_logged {0};
-		if (present_logged.fetch_add(1, std::memory_order_relaxed) < 200000) {
-			std::printf("Present: seq=%llu addr=0x%010" PRIx64 " ext=%ux%u fmt=%s linear=%d\n",
-			            static_cast<unsigned long long>(
-			                g_composite_override_tick.load(std::memory_order_relaxed)),
-			            image.info.data.address, image.info.extent.width,
-			            image.info.extent.height, vk::to_string(image.info.pixel_format).c_str(),
-			            frame->linear_source ? 1 : 0);
-			std::fflush(stdout);
-		}
-	}
 	frame->CopyFrom(buffer, image);
 	if (headset) {
 		// The frame holds the raw display-encoded pixels the headset needs.
@@ -1260,8 +1007,6 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	auto*             frame  = m_impl->frames.Acquire({width, height}, format);
 	frame->hdr   = false;
 	frame->blank = true;
-	frame->linear_source = false;
-	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
 	frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
 	vk::ClearColorValue clear {};
 	clear.float32[3] = opaque ? 1.0f : 0.0f;
