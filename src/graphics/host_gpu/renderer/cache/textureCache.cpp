@@ -1872,6 +1872,13 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 bool TextureCache::DownloadImageMemory(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (image.depth_id) {
+		// TEMP DIAG: which images refuse download and why.
+		static std::atomic_uint n = 0;
+		if (n.fetch_add(1, std::memory_order_relaxed) < 5) {
+			LOGF("DownloadImageMemory: refused depth-associated image %u:%u addr=0x%llx\n",
+			     id.index, id.generation,
+			     static_cast<unsigned long long>(image.info.data.address));
+		}
 		return false;
 	}
 	if (!image.SafeToDownload() || !CanDownload(image)) {
