@@ -476,21 +476,6 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	}
 
 	auto& texture_cache = m_context.GetTextureCache();
-	// TEMP DIAG: null descriptors sample the black placeholder. Track the
-	// rate: systemic nulls mean broken descriptor fetch, not bad textures.
-	static std::atomic_uint64_t resolve_total = 0;
-	static std::atomic_uint64_t resolve_null  = 0;
-	{
-		const auto total = resolve_total.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (descriptor.IsNull()) {
-			resolve_null.fetch_add(1, std::memory_order_relaxed);
-		}
-		if (total % 200000 == 0) {
-			LOGF("ResolveTexture: resolves=%llu nulls=%llu\n",
-			     static_cast<unsigned long long>(total),
-			     static_cast<unsigned long long>(resolve_null.load(std::memory_order_relaxed)));
-		}
-	}
 	if (descriptor.IsNull()) {
 		return {.layout = vk::ImageLayout::eGeneral};
 	}
@@ -628,19 +613,6 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		return {.desc = std::move(desc), .layout = vk::ImageLayout::eGeneral};
 	}
 	auto*      image               = &texture_cache.GetImage(id);
-	// TEMP DIAG: log sampled texture addresses to find what fullscreen blits
-	// actually sample (black-screen triage: which texture is black?).
-	if (!storage &&
-	    resource.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled) {
-		static std::atomic_uint64_t tex_total = 0;
-		const auto n = tex_total.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (n % 20000 == 0) {
-			LOGF("SampledTex: #%llu addr=0x%llx extent=%ux%u fmt=%u image=%u:%u\n",
-			     static_cast<unsigned long long>(n),
-			     static_cast<unsigned long long>(address), width, height,
-			     static_cast<uint32_t>(format), id.index, id.generation);
-		}
-	}
 	const bool stencil_association = static_cast<bool>(image->depth_id);
 	if (stencil_association) {
 		id    = image->depth_id;
