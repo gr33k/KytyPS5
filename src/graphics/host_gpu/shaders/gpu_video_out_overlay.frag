@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) out vec4 color;
 
@@ -27,19 +28,27 @@ void main() {
 	color = vec4(SdrToHdr10(sampled.rgb, false), sampled.a);
 }
 #else
+#include "gpu_video_out_hdr10_to_sdr.inc"
 layout(location = 0) in vec2 uv;
 layout(binding = 0) uniform sampler2D source;
 layout(push_constant) uniform AlphaControl {
-	uint flags; // bit 0: premultiplied, bit 1: HDR target, bit 2: PQ source, bit 3: linear source
-	float gamma;    // bit 4: display encode gamma
-	float exposure; // bit 4: linear exposure applied before the encode
+	uint flags; // bit 0: premultiplied, 1: HDR target, 2: PQ source, 3: linear source,
+	            // bit 4: linear present source, bit 6: opaque main bus
+	float gamma;
+	float exposure;
 };
 
 void main() {
 	const uint HDR_TARGET = 2u;
 	const uint PQ_SOURCE = 4u;
+	const uint LINEAR_PRESENT = 16u;
+	const uint OPAQUE_MAIN_BUS = 64u;
 	vec4 sampled = texture(source, uv);
-	if ((flags & 16u) != 0u) {
+	if ((flags & OPAQUE_MAIN_BUS) != 0u) {
+		sampled.a = 1.0;
+	}
+	const bool linear_present = (flags & LINEAR_PRESENT) != 0u;
+	if (linear_present) {
 		// The title's tone-mapping pass produced nothing, so the world arrives
 		// as raw linear HDR. Apply an exposure, roll the highlights off so a
 		// brighter exposure does not clip, and encode to display sRGB.
@@ -49,14 +58,17 @@ void main() {
 		sampled.a   = 1.0;
 	}
 	bool premultiplied = (flags & 1u) != 0u;
-	bool convert_to_hdr = (flags & (HDR_TARGET | PQ_SOURCE)) == HDR_TARGET;
-	if (convert_to_hdr && premultiplied) {
+	uint conversion = flags & (HDR_TARGET | PQ_SOURCE);
+	bool convert = conversion == HDR_TARGET || conversion == PQ_SOURCE;
+	if (convert && premultiplied) {
 		sampled.rgb = sampled.a > 0.0 ? sampled.rgb / sampled.a : vec3(0.0);
 	}
-	if (convert_to_hdr) {
+	if (!linear_present && conversion == HDR_TARGET) {
 		sampled.rgb = SdrToHdr10(sampled.rgb, (flags & 8u) != 0u);
+	} else if (!linear_present && conversion == PQ_SOURCE) {
+		sampled.rgb = Hdr10ToSdr(sampled.rgb, (flags & 8u) != 0u);
 	}
-	if (!premultiplied || convert_to_hdr) {
+	if (!premultiplied || convert) {
 		sampled.rgb *= sampled.a;
 	}
 	color = sampled;

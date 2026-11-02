@@ -88,7 +88,7 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 		     rt.attrib.num_samples, rt.attrib.num_fragments);
 	}
 	const uint32_t max_mip_level = std::max(rt.attrib2.num_mip_levels, rt.view.current_mip_level);
-	const uint32_t levels        = max_mip_level + 1u;
+	uint32_t       levels        = max_mip_level + 1u;
 	if (rt.view.current_mip_level > rt.attrib2.num_mip_levels) {
 		static std::atomic_bool logged_mip_view = false;
 		if (!logged_mip_view.exchange(true, std::memory_order_relaxed)) {
@@ -195,6 +195,19 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	height = rt.attrib2.height + 1;
 	const auto target_format =
 	    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type, rt.info.channel_order);
+	// A one-level surface can alias a higher view mip when its padded pitch is unchanged.
+	uint32_t mip = rt.view.current_mip_level;
+	if (mip != 0 && rt.attrib2.num_mip_levels == 0 && samples == 1 && !volume &&
+	    TileGetTexturePitch(target_format.guest_format, std::max(width >> mip, 1u),
+	                        rt.attrib3.tile_mode) ==
+	        TileGetTexturePitch(target_format.guest_format, width, rt.attrib3.tile_mode)) {
+		mip    = 0;
+		levels = 1;
+	}
+	if (mip >= levels) {
+		EXIT("unsupported render-target mip range: current=%u levels=%u\n",
+		     rt.view.current_mip_level, levels);
+	}
 	const auto bytes_per_element = target_format.bytes_per_element;
 	if (bytes_per_element == 0) {
 		EXIT("render-target format has no valid element size\n");
@@ -273,13 +286,13 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 		    view.layer_count == 1 ? vk::ImageViewType::e2D : vk::ImageViewType::e2DArray;
 	}
 	desc.view_info.aspect      = vk::ImageAspectFlagBits::eColor;
-	desc.view_info.base_level  = rt.view.current_mip_level;
+	desc.view_info.base_level  = mip;
 	desc.view_info.level_count = 1;
 	desc.view_info.base_layer  = view.base_layer;
 	desc.view_info.layer_count = view.layer_count;
 	desc.view_info.usage       = vk::ImageUsageFlagBits::eColorAttachment;
 	auto& texture_cache        = m_context.GetTextureCache();
-	r.guest_mip_level          = rt.view.current_mip_level;
+	r.guest_mip_level          = mip;
 	r.guest_array_layer        = view.base_layer;
 	r.image_id                 = texture_cache.FindImage(r.desc, exact_format);
 	r.export_mapping           = target_format.export_mapping;

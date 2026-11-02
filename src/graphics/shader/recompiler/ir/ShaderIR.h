@@ -367,6 +367,9 @@ static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 58u);
 struct PushData {
 	static constexpr uint32_t DwordCount = 32;
 	static constexpr uint32_t MeshDrawDwordCount = 5;
+	// Indirect mesh draws read the draw parameters, then the record's first instance, from the
+	// task payload (gpu_mesh_indirect.task).
+	static constexpr uint32_t MeshTaskPayloadDwordCount = MeshDrawDwordCount + 1;
 	static constexpr uint32_t NoStart    = UINT32_MAX;
 	std::array<uint32_t, DwordCount> dwords {};
 
@@ -585,7 +588,11 @@ struct DescriptorSource {
 			uint32_t source = UINT32_MAX;
 			uint32_t stride = 0;
 			uint32_t offset = 0;
+			// V#-strided reads select records first_record + k * record_step.
+			uint32_t first_record = 0;
+			uint32_t record_step = 1;
 			uint32_t maximum = UINT32_MAX;
+			bool non_negative = false; // Signed-negative fields read as zero before the maximum.
 			uint32_t bit_offset = 0;
 			uint32_t bit_mask = UINT32_MAX;
 			bool global = false;

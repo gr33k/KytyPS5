@@ -742,8 +742,7 @@ void Swapchain::EnsureOverlayPipeline() {
 		RequireVulkanSuccess(
 		    device.createDescriptorSetLayout(&descriptors, nullptr, &m_overlay_descriptors),
 		    "create video-out overlay descriptor layout");
-		const vk::PushConstantRange alpha {vk::ShaderStageFlagBits::eFragment, 0,
-		                                  3 * sizeof(uint32_t)};
+		const vk::PushConstantRange alpha {vk::ShaderStageFlagBits::eFragment, 0, 3 * sizeof(uint32_t)};
 		vk::PipelineLayoutCreateInfo layout {};
 		layout.setLayoutCount         = 1;
 		layout.pSetLayouts            = &m_overlay_descriptors;
@@ -832,9 +831,15 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
 	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) |
 	                       (m_hdr_active ? 2u : 0u) | (frame.hdr ? 4u : 0u) |
-	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u);
+	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u) |
+	                       (layer.bus == 0 ? 64u : 0u);
+	struct OverlayPush {
+		uint32_t flags;
+		float    gamma;
+		float    exposure;
+	} push {flags, 2.2f, 1.0f};
 	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
-	                      sizeof(flags), &flags);
+	                      sizeof(push), &push);
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
 	vk::RenderingAttachmentInfo attachment {};
 	attachment.imageView   = m_image_views[m_image_index];
@@ -902,7 +907,8 @@ void Swapchain::DrawPresentSource(vk::CommandBuffer command, Presenter::Frame* s
 		float    gamma;
 		float    exposure;
 	} push {((PresentGammaForced() || source->linear_source) ? 16u : 0u) |
-	            (m_hdr_active ? 2u : 0u) | (source->hdr ? 4u : 0u),
+	            (m_hdr_active ? 2u : 0u) | (source->hdr ? 4u : 0u) |
+	            (source->image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u),
 	        env_float("KYTY_PRESENT_GAMMA", 2.2f), exposure};
 	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
 	                      sizeof(push), &push);
@@ -939,7 +945,11 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	EXIT_IF(m_image_index >= m_images.size());
 	auto       vk_command      = command.Handle();
 	const bool draw_overlay    = overlay.frame != nullptr;
-	const bool draw_attachment = draw_overlay || draw_system_overlay;
+	const bool draw_attachment = draw_overlay || draw_system_overlay ||
+	                             (source != nullptr &&
+	                              (PresentGammaForced() ||
+	                               (PresentEncodeRequested() && source->linear_source) ||
+	                               (source->hdr && !m_hdr_active)));
 	// Frames composited from the linear HDR scene target (see g_composite_override_tick)
 	// carry no display encode, so they are drawn through the overlay pipeline with an
 	// exposure and gamma instead of being blitted. Only titles that are known to present
@@ -948,11 +958,13 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	const bool        gamma        = source != nullptr &&
 	                          (PresentGammaForced() ||
 	                           (PresentEncodeRequested() && source->linear_source));
+	const bool        convert_source = source != nullptr && source->hdr && !m_hdr_active;
+	const bool        draw_source = gamma || convert_source;
 	if (source != nullptr) {
 		source->Transit(vk_command,
-		                gamma ? vk::ImageLayout::eShaderReadOnlyOptimal
+		                draw_source ? vk::ImageLayout::eShaderReadOnlyOptimal
 		                      : vk::ImageLayout::eTransferSrcOptimal,
-		                gamma ? vk::AccessFlagBits2::eShaderRead
+		                draw_source ? vk::AccessFlagBits2::eShaderRead
 		                      : vk::AccessFlagBits2::eTransferRead);
 	}
 	if (draw_overlay) {
@@ -960,7 +972,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		                       vk::AccessFlagBits2::eShaderRead);
 	}
 
-	if (gamma) {
+	if (draw_source) {
 		vk::ImageMemoryBarrier to_color {};
 		to_color.sType                           = vk::StructureType::eImageMemoryBarrier;
 		to_color.dstAccessMask                   = vk::AccessFlagBits::eColorAttachmentWrite;
@@ -994,7 +1006,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	to_transfer.subresourceRange.baseArrayLayer = 0;
 	to_transfer.subresourceRange.layerCount     = 1;
 	// Match the acquire wait stage so the layout transition cannot precede acquisition.
-	if (!gamma) {
+	if (!draw_source) {
 		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {},
 		                           0, nullptr, 0, nullptr, 1, &to_transfer);
@@ -1048,12 +1060,12 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 
 	vk::ImageMemoryBarrier to_present {};
 	to_present.sType               = vk::StructureType::eImageMemoryBarrier;
-	to_present.srcAccessMask       = gamma ? vk::AccessFlagBits::eColorAttachmentWrite
+	to_present.srcAccessMask       = draw_source ? vk::AccessFlagBits::eColorAttachmentWrite
 	                                       : vk::AccessFlagBits::eTransferWrite;
 	to_present.dstAccessMask       = draw_attachment ? vk::AccessFlagBits::eColorAttachmentRead |
 	                                                       vk::AccessFlagBits::eColorAttachmentWrite
 	                                                 : vk::AccessFlagBits::eMemoryRead;
-	to_present.oldLayout           = gamma ? vk::ImageLayout::eColorAttachmentOptimal
+	to_present.oldLayout           = draw_source ? vk::ImageLayout::eColorAttachmentOptimal
 	                                       : vk::ImageLayout::eTransferDstOptimal;
 	to_present.newLayout           = draw_attachment ? vk::ImageLayout::eColorAttachmentOptimal
 	                                                 : vk::ImageLayout::ePresentSrcKHR;
@@ -1066,7 +1078,7 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	to_present.subresourceRange.baseArrayLayer = 0;
 	to_present.subresourceRange.layerCount     = 1;
 	vk_command.pipelineBarrier(
-	    gamma ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+	    draw_source ? vk::PipelineStageFlagBits::eColorAttachmentOutput
 	          : vk::PipelineStageFlagBits::eTransfer,
 	    draw_attachment ? vk::PipelineStageFlagBits::eColorAttachmentOutput
 	                    : vk::PipelineStageFlagBits::eAllCommands,
