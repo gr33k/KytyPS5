@@ -39,6 +39,17 @@
 #include <vector>
 
 namespace Libs::Graphics {
+// Always-on compute census for black-screen triage (draw census covers
+// graphics; this covers the remaining GPU transfer path).
+static std::atomic_uint64_t g_compute_dispatch_calls = 0;
+static void LogComputeCensus(const char* kind, uint64_t shader, uint32_t mode) {
+	const auto n = g_compute_dispatch_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (n % 2000 == 0) {
+		LOGF("ComputeCensus: dispatches=%llu last=%s shader=0x%llx mode=0x%x\n",
+		     static_cast<unsigned long long>(n), kind,
+		     static_cast<unsigned long long>(shader), mode);
+	}
+}
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -247,6 +258,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
 	EXIT_IF(buffer.IsInvalid());
+	LogComputeCensus("direct", buffer.GetShaders().GetCs().cs_regs.data_addr, mode);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -482,6 +494,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
                                       uint64_t args_addr, uint32_t mode, bool async_compute) {
 	EXIT_IF(buffer.IsInvalid() || args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
+	LogComputeCensus("indirect", buffer.GetShaders().GetCs().cs_regs.data_addr, mode);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchIndirect), submit_id,
 	                    static_cast<uint32_t>(args_addr), static_cast<uint32_t>(args_addr >> 32u),

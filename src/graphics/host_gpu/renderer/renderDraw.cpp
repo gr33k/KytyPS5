@@ -1097,7 +1097,9 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 		return;
 	}
 
-	if (!draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
+	// TEMP DIAG: log every draw state (not just indexed/rect-list) so
+	// fullscreen flip-targeted quads are captured too. Still capped inside.
+	if (false && !draw.IsIndexed() && !Prospero::IsRectList(buffer.GetUserConfig().GetPrimType())) {
 		return;
 	}
 
