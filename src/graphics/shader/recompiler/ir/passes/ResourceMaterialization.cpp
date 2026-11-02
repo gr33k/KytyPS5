@@ -1770,6 +1770,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 				    "explicit-LOD gather requires None, unbiased Point, or unbiased Linear without mip snapping");
 			}
 		}
+
+		ShaderSamplerResource sampler;
+		if (!ValidSamplerDescriptor(snapshot.samplers[i], sampler)) {
+			snapshot.samplers[i].dwords.fill(0);
+		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 	return BuildResourceSpecialization(program, snapshot, specialization);
