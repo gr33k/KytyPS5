@@ -1,3 +1,2 @@
 #include <winres.h>
 
-IDI_ICON1 ICON "launcher/icons/emulator-icon.ico"
