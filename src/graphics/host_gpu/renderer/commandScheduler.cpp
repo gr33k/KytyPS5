@@ -2,71 +2,14 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
-#include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
-#include <chrono>
-#include <cstdio>
-#include <thread>
 #include <optional>
-#include <vector>
 
 namespace Libs::Graphics {
 
 static thread_local CommandScheduler* g_deferred_callback_scheduler = nullptr;
-
-namespace {
-
-void ReportVulkanFatal(const char* what, vk::Result result, uint64_t tick, uint32_t debug_op,
-                       uint64_t debug_submit, uint32_t arg0, uint32_t arg1, uint32_t arg2,
-                       uint32_t arg3, uint64_t arg4, vk::Device device = nullptr) {
-	LOGF("%s failed: %s (%d), tick=%" PRIu64 " debug_op=%u debug_submit=%" PRIu64
-	     " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
-	     what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
-	     debug_submit, arg0, arg1, arg2, arg3, arg4);
-	std::printf("%s failed: %s (%d), tick=%" PRIu64 " debug_op=%u debug_submit=%" PRIu64
-	            " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
-	            what, vk::to_string(result).c_str(), static_cast<int>(result), tick, debug_op,
-	            debug_submit, arg0, arg1, arg2, arg3, arg4);
-	std::fflush(stdout);
-	// Post-mortem device fault report: identifies the faulting addresses
-	// when the driver supports VK_EXT_device_fault.
-		if (result == vk::Result::eErrorDeviceLost && device != nullptr) {
-		if (auto func = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
-		    func != nullptr) {
-			VkDeviceFaultCountsEXT counts {};
-			if (func(static_cast<VkDevice>(device), &counts, nullptr) == VK_SUCCESS) {
-				std::printf("DeviceFault: addr=%u vendor=%u binary=%llu\n", counts.addressInfoCount,
-				            counts.vendorInfoCount,
-				            static_cast<unsigned long long>(counts.vendorBinarySize));
-				std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
-				std::vector<VkDeviceFaultVendorInfoEXT>  vendors(counts.vendorInfoCount);
-				std::vector<uint8_t>                    binary(counts.vendorBinarySize);
-				VkDeviceFaultInfoEXT info {};
-				info.sType            = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
-				info.pAddressInfos    = addrs.data();
-				info.pVendorInfos     = vendors.data();
-				info.pVendorBinaryData = binary.data();
-				if (func(static_cast<VkDevice>(device), &counts, &info) == VK_SUCCESS) {
-					for (const auto& a: addrs) {
-						std::printf("DeviceFault addr: type=%d addr=0x%016llx precision=%llu\n",
-						            static_cast<int>(a.addressType),
-						            static_cast<unsigned long long>(a.reportedAddress),
-						            static_cast<unsigned long long>(a.addressPrecision));
-					}
-					for (const auto& v: vendors) {
-						std::printf("DeviceFault vendor: %s code=0x%x data=0x%016llx\n", v.description,
-						            v.vendorFaultCode,
-						            static_cast<unsigned long long>(v.vendorFaultData));
-					}
-				}
-				std::fflush(stdout);
-			}
-		}
-	}
-}
-} // namespace
 
 CommandScheduler::CommandPool::CommandPool(GraphicContext& graphics, MasterSemaphore& master)
     : m_graphics(graphics), m_master(master) {
@@ -134,11 +77,7 @@ bool CommandScheduler::InDeferredOperation() noexcept {
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
     : m_master(graphics), m_context(context), m_graphics(graphics),
       m_command_pool(graphics, m_master), m_command(*this),
-      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }),
-      m_watchdog_thread([this](std::stop_token stop) { WatchdogThread(stop); }) {
-	std::printf("CommandScheduler create %p\n", static_cast<const void*>(this));
-	std::fflush(stdout);
-}
+      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {}
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();
@@ -171,18 +110,14 @@ void CommandScheduler::Shutdown() {
 	PopPendingOperations();
 	DrainPriorityOperations();
 	m_priority_thread.request_stop();
-	m_watchdog_thread.request_stop();
 	m_operation_available.notify_all();
 	if (m_priority_thread.joinable()) {
 		m_priority_thread.join();
 	}
-	if (m_watchdog_thread.joinable()) {
-		m_watchdog_thread.join();
-	}
 	{
 		std::lock_guard lock(m_operation_mutex);
 		EXIT_IF(!m_pending_operations.empty() || !m_priority_operations.empty() ||
-		        m_priority_active);
+		        m_priority_active_tick != 0);
 		m_operation_state = OperationState::Closed;
 	}
 	m_operation_available.notify_all();
@@ -201,16 +136,6 @@ void CommandScheduler::Begin(HW::Context& registers, HW::UserConfig& user_config
 	}
 }
 
-void CommandScheduler::BeginRendering(const RenderState& state) {
-	Current().BeginRendering(state);
-}
-
-void CommandScheduler::EndRendering() {
-	if (Active() && !m_command.IsInvalid()) {
-		Current().EndRendering();
-	}
-}
-
 void CommandScheduler::Flush() {
 	SubmitInfo submit;
 	Flush(submit);
@@ -221,23 +146,17 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 	BeginNext();
 }
 
-void CommandScheduler::FlushAndWait() {
-	const auto tick = Submit();
-	m_master.Wait(tick, "flush-and-wait");
-	BeginNext();
-}
-
 void CommandScheduler::Finish() {
 	CheckActive();
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
-	m_master.Wait(CurrentTick() - 1, "finish");
+	m_master.Wait(CurrentTick() - 1);
 	BeginNext();
 	PopPendingOperations();
 }
 
-void CommandScheduler::Wait(uint64_t tick, const char* why) {
+void CommandScheduler::Wait(uint64_t tick) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		CheckActive();
@@ -246,10 +165,10 @@ void CommandScheduler::Wait(uint64_t tick, const char* why) {
 		// resources are released only at the next GPU operation boundary.
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
-		m_master.Wait(tick, why);
+		m_master.Wait(tick);
 		BeginNext();
 	} else {
-		m_master.Wait(tick, why);
+		m_master.Wait(tick);
 	}
 }
 
@@ -285,10 +204,7 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 	std::unique_lock lock(m_operation_mutex);
 	if (m_operation_state == OperationState::Open) {
 		auto& queue = priority ? m_priority_operations : m_pending_operations;
-		// Priority completions wait on the last submitted tick: stamping the
-		// next tick hangs forever when no further submit follows (idle game
-		// waiting on that very completion). Callers flush recorded work first.
-		queue.push({std::move(operation), priority ? CurrentTick() - 1 : CurrentTick()});
+		queue.push({std::move(operation), CurrentTick()});
 		lock.unlock();
 		if (priority) {
 			m_operation_available.notify_one();
@@ -305,7 +221,7 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 
 bool CommandScheduler::HasPendingPriorityOperations() {
 	std::lock_guard lock(m_operation_mutex);
-	return !m_priority_operations.empty() || m_priority_active;
+	return !m_priority_operations.empty() || m_priority_active_tick != 0;
 }
 
 void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
@@ -321,69 +237,17 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			}
 			operation = std::move(m_priority_operations.front());
 			m_priority_operations.pop();
-			m_priority_active      = true;
 			m_priority_active_tick = operation.tick;
 		}
-		m_master.Wait(operation.tick, "priority-op");
+		m_master.Wait(operation.tick);
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
 		}
 		{
 			std::lock_guard lock(m_operation_mutex);
-			m_priority_active      = false;
 			m_priority_active_tick = 0;
 		}
 		m_operation_available.notify_all();
-	}
-}
-
-void CommandScheduler::WatchdogThread(std::stop_token stop) {
-	// GPU-progress heartbeat: distinguishes a wedged GPU (submitted advances,
-	// completed frozen) from a CPU-side stall (both frozen) in hung runs.
-	// Never aborts: a lost device simply reports its last counter.
-	uint64_t last_completed = 0;
-	uint64_t stuck_since    = 0;
-	for (uint32_t i = 0; !stop.stop_requested(); i++) {
-		for (int s = 0; s < 30 && !stop.stop_requested(); s++) {
-			std::this_thread::sleep_for(std::chrono::seconds(1));
-		}
-		if (stop.stop_requested()) {
-			break;
-		}
-		uint64_t counter = 0;
-		const bool counter_ok =
-		    m_graphics.device.getSemaphoreCounterValue(m_master.Handle(), &counter) ==
-		    vk::Result::eSuccess;
-		size_t   pending = 0, priority = 0;
-		bool     active  = false;
-		uint64_t active_tick = 0;
-		{
-			std::lock_guard lock(m_operation_mutex);
-			pending       = m_pending_operations.size();
-			priority      = m_priority_operations.size();
-			active        = m_priority_active;
-			active_tick   = m_priority_active_tick;
-		}
-		const uint64_t submitted = m_master.CurrentTick();
-		if (counter_ok && counter == last_completed && submitted > counter + 1) {
-			if (stuck_since == 0) {
-				stuck_since = i;
-			}
-		} else {
-			stuck_since = 0;
-		}
-		if (counter_ok) {
-			last_completed = counter;
-		}
-		std::printf("GpuWatchdog: sched=%p submitted=%llu completed=%llu%s pending=%zu priority=%zu "
-			            "active=%d tick=%llu stuck_min=%llu\n",
-			            static_cast<const void*>(this), static_cast<unsigned long long>(submitted),
-		            static_cast<unsigned long long>(counter_ok ? counter : 0),
-		            counter_ok ? "" : "(query-failed)",
-		            pending, priority, active ? 1 : 0,
-		            static_cast<unsigned long long>(active_tick),
-		            stuck_since == 0 ? 0 : static_cast<unsigned long long>(i - stuck_since));
-		std::fflush(stdout);
 	}
 }
 
@@ -391,14 +255,15 @@ void CommandScheduler::DrainPriorityOperations() {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
 	m_operation_available.wait(
-	    lock, [this] { return m_priority_operations.empty() && !m_priority_active; });
+	    lock, [this] { return m_priority_operations.empty() && m_priority_active_tick == 0; });
 }
 
 void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
 	m_operation_available.wait(lock, [this, tick] {
-		const bool active_before_or_at = m_priority_active && m_priority_active_tick <= tick;
+		const bool active_before_or_at =
+		    m_priority_active_tick != 0 && m_priority_active_tick <= tick;
 		const bool queued_before_or_at =
 		    !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
 		return !active_before_or_at && !queued_before_or_at;
@@ -421,14 +286,6 @@ bool CommandScheduler::IsFree(uint64_t tick) {
 }
 
 void CommandScheduler::CheckActive() const {
-	if (Active()) {
-		return;
-	}
-	// No active command (e.g. GPU work requested outside a frame). Log the
-	// calling context before aborting so the next run identifies the path.
-	LOGF("CommandScheduler: no active command (in_deferred=%d)\n",
-	     InDeferredOperation() ? 1 : 0);
-	std::fflush(stdout);
 	EXIT_IF(!Active());
 }
 
@@ -447,8 +304,6 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
-	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
-	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
@@ -483,20 +338,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 
 	if (result != vk::Result::eSuccess) {
-		ReportVulkanFatal("vkQueueSubmit", result, tick, m_command.m_debug_op,
-		                  m_command.m_debug_submit_id, m_command.m_debug_arg0,
-		                  m_command.m_debug_arg1, m_command.m_debug_arg2, m_command.m_debug_arg3,
-		                  m_command.m_debug_arg4, graphics.device);
+		EXIT("vkQueueSubmit failed: %s, tick=%" PRIu64 "\n", vk::to_string(result).c_str(), tick);
 	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
-	// Per-submit record: maps watchdog stuck ticks back to the exact queued
-	// work (debug op/id) and its semaphore waits. No flush (volume); the
-	// wedge under investigation does not crash, so nothing is lost.
-	std::printf("Submit: tick=%llu op=%u submit=%llu waits=%u signals=%u\n",
-	            static_cast<unsigned long long>(tick), m_command.m_debug_op,
-	            static_cast<unsigned long long>(m_command.m_debug_submit_id),
-	            submit.num_wait_semaphores, submit.num_signal_semaphores);
 	m_command.m_buffer = nullptr;
 	return tick;
 }

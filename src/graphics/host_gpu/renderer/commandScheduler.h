@@ -22,18 +22,16 @@ public:
 	KYTY_CLASS_NO_COPY(CommandScheduler);
 
 	void           Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
-	void           BeginRendering(const RenderState& state);
-	void           EndRendering();
+	void           EndRendering() { m_command.EndRendering(); }
 	void           Flush();
 	void           Flush(SubmitInfo& submit);
-	void           FlushAndWait();
 	void           Finish();
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
-	void                      Wait(uint64_t tick, const char* why = "sched-wait");
+	void                      Wait(uint64_t tick);
 	void                      PopPendingOperations();
 	void                      DrainPriorityOperations();
 	void                      WaitPriorityOperations(uint64_t tick);
@@ -84,7 +82,6 @@ private:
 
 	void BeginNext();
 	void PriorityOperationsThread(std::stop_token stop);
-	void WatchdogThread(std::stop_token stop);
 	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
 
@@ -99,9 +96,7 @@ private:
 	std::mutex                   m_operation_mutex;
 	std::condition_variable      m_operation_available;
 	std::jthread                 m_priority_thread;
-	std::jthread                 m_watchdog_thread;
-	bool                         m_priority_active      = false;
-	uint64_t                     m_priority_active_tick = 0;
+	uint64_t                     m_priority_active_tick = 0; // 0 while none runs
 	OperationState               m_operation_state      = OperationState::Open;
 };
 
