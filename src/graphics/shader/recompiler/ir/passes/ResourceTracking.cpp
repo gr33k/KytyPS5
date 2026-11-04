@@ -9,6 +9,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <map>
 #include <numeric>
@@ -383,6 +384,7 @@ public:
 		m_info.images.clear();
 		m_info.samplers.clear();
 		m_info.sampled_pairs.clear();
+		m_info.address_bases.clear();
 		m_info.uses_dma = false;
 		m_shader_writes = HasShaderMemoryWrites(program);
 	}
@@ -4284,6 +4286,18 @@ private:
 			if (address_info.access == AddressAccess::Write) {
 				m_program.has_address_writes = true;
 			}
+			handle = inst.Arg(0).Resolve().TryInstruction();
+			std::array<uint32_t, 2> base {};
+			for (uint32_t word = 0; word < base.size(); ++word) {
+				const auto* read = handle->Arg(word).Resolve().TryInstruction();
+				base[word]       = read != nullptr && read->GetOpcode() == ValueOpcode::ReadConst
+				                       ? read->Arg(1).Resolve().U32()
+				                       : UINT32_MAX;
+			}
+			auto& bases = m_info.address_bases;
+			if (std::ranges::max(base) != UINT32_MAX &&
+			    std::ranges::find(bases, base) == bases.end())
+				bases.push_back(base);
 			m_info.uses_dma = true;
 			return;
 		}
