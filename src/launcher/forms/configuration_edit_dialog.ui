@@ -151,6 +151,7 @@
               <property name="value"><number>60</number></property>
              </widget>
             </item>
+            <!--
             <item row="3" column="0">
              <widget class="QLabel" name="label_shader_optimization">
               <property name="text"><string>Shader optimization:</string></property>
@@ -161,6 +162,7 @@
               <property name="toolTip"><string>Optimize shaders for code size or performance</string></property>
              </widget>
             </item>
+            -->
             <item row="4" column="0">
              <widget class="QLabel" name="label_gpu">
               <property name="text"><string>GPU:</string></property>
@@ -190,9 +192,21 @@
              </widget>
             </item>
             <item row="8" column="1">
+             <widget class="QCheckBox" name="checkBox_occlusion_queries">
+              <property name="toolTip"><string>Count the samples of occlusion queries on the GPU, so hidden lights and objects stay hidden. Costs some performance.</string></property>
+              <property name="text"><string>Enable occlusion queries</string></property>
+             </widget>
+            </item>
+            <item row="9" column="1">
              <widget class="QCheckBox" name="checkBox_hdr">
               <property name="toolTip"><string>Enable HDR10 output for supported games. Requires HDR enabled on the host display.</string></property>
               <property name="text"><string>Enable HDR display support</string></property>
+             </widget>
+            </item>
+            <item row="10" column="1">
+             <widget class="QCheckBox" name="checkBox_shader_cache">
+              <property name="toolTip"><string>Save compiled shaders and pipelines per game and load them at startup.</string></property>
+              <property name="text"><string>Cache shaders</string></property>
              </widget>
             </item>
            </layout>
@@ -513,12 +527,6 @@
             <property name="clearButtonEnabled"><bool>true</bool></property>
            </widget>
           </item>
-         <item row="5" column="0" colspan="4">
-          <widget class="QCheckBox" name="checkBox_gpu_assisted_validation">
-           <property name="toolTip"><string>Bounds-check shader accesses on the GPU. Implies Vulkan validation; very slow</string></property>
-           <property name="text"><string>GPU-assisted validation (very slow)</string></property>
-          </widget>
-         </item>
          </layout>
         </widget>
        </item>

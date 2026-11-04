@@ -31,9 +31,6 @@ public:
 	void SetRuntimeDirectory(const QString& directory) { m_runtime_directory = directory; }
 	void SetControllerPreview(ControllerPreview* preview) { m_controller_preview = preview; }
 
-	[[nodiscard]] bool IsGridView() const { return m_grid_view; }
-	[[nodiscard]] int  GridIconWidth() const { return m_grid_icon_width; }
-
 	[[nodiscard]] const ConfigurationItem* GetSelectedItem() const { return m_selected_item; }
 	ConfigurationItem*                     GetSelectedItem() { return m_selected_item; }
 
@@ -47,16 +44,7 @@ public:
 	bool EnsureGameDirectory();
 	void ScanGameDirectory();
 	void ViewTrophies();
-	void EditPatches();
-
-	[[nodiscard]] int GetGameCount() const;
-	[[nodiscard]] int GetColumnCount() const;
-	[[nodiscard]] QString GetColumnTitle(int section) const;
-	[[nodiscard]] bool IsColumnVisible(int section) const;
-	void SetColumnVisible(int section, bool visible);
-
 	void ViewTrophyOverview();
-
 
 signals:
 
@@ -64,43 +52,42 @@ signals:
 	void Select();
 	void PreviewControllerColor(const QString& color);
 
+protected:
+	void changeEvent(QEvent* event) override;
+
 public slots:
 	void WriteSettings();
 	void ReadSettings();
+
+protected slots:
+
 	void edit_configuration();
 	void delete_configuartion();
 	void edit_global_settings();
 	void edit_input_mapping();
-
 	void list_itemDoubleClicked(QTreeWidgetItem* witem, int column);
-
 	void open_game_folder();
 	void remove_save_data();
 	void compress_game();
 	void filter_configurations(const QString& text);
-	void SetGridView(bool grid);
-	void SetGridSize(int width);
-
-protected slots:
 
 private:
 	void               SelectItem(QTreeWidgetItem* witem);
 	void               ShowContextMenu(QTreeWidgetItem* witem);
 	void               ApplyCompatibility();
+	void               UpdateToolbarIcons();
 	void               ImportGameSettings(QWidget* parent);
 	void               ExportGameSettings(QWidget* parent) const;
 	[[nodiscard]] bool HasValidGameDirectory() const;
 
 	ConfigurationItem*            m_selected_item = nullptr;
 	bool                          m_run_enabled   = true;
-	bool                          m_grid_view     = false;
-	int                           m_grid_icon_width = 224;
 	Ui::ConfigurationListWidget*  m_ui            = nullptr;
 	QString                       m_settings_file;
-	QString                       m_filter_text;
 	QString                       m_runtime_directory;
 	QStringList                   m_game_dirs;
 	QString                       m_addons_dir;
+	QMap<QString, QStringList>    m_addcont; // User add-ons by title ID.
 	Configuration                 m_global_info;
 	QMap<QString, Configuration*> m_custom_infos;
 	CompatibilityDatabase*        m_compatibility = nullptr;

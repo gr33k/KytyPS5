@@ -5,14 +5,7 @@ class QApplication;
 
 namespace LauncherTheme {
 
-enum class Theme {
-	System,
-	Light,
-	Dark,
-};
-
 void Initialize(QApplication& application);
-void ApplyTheme(Theme theme);
 
 } // namespace LauncherTheme
 

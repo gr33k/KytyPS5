@@ -71,11 +71,9 @@ static vk::StencilOp ConvertStencilOp(uint8_t value, uint8_t write_mask, uint8_t
 	}
 }
 
-// False when the guest needs different replacement values that cannot share
-// Vulkan's single per-face reference; the caller skips the draw.
-static bool ConvertStencilState(
+static vk::StencilOpState ConvertStencilState(
     uint8_t compare, const std::array<uint8_t, 3>& operations, uint8_t op_value,
-    const vk::StencilOpState& state, vk::StencilOpState& out) {
+    const vk::StencilOpState& state) {
 	const auto test_value = state.reference;
 	auto reference       = test_value;
 	auto required_bits   = state.compareMask;
@@ -94,22 +92,17 @@ static bool ConvertStencilState(
 			replacement = op_value;
 		}
 		if (((reference ^ replacement) & required_bits & state.writeMask) != 0) {
-			static std::atomic_uint stencil_log = 0;
-			if (stencil_log.fetch_add(1, std::memory_order_relaxed) < 4) {
-				LOGF("DepthStencil: skipping draw with unrepresentable stencil replacement: "
-				     "compare=%u, compare mask=0x%02" PRIx32 ", write mask=0x%02" PRIx32
-				     ", operation value=0x%02" PRIx8 ", test value=0x%02" PRIx32 "\n",
-				     compare, state.compareMask, state.writeMask, op_value, test_value);
-			}
-			return false;
+			DepthFatal("unsupported stencil replacement: compare=%u, compare mask=0x%02" PRIx32
+			           ", write mask=0x%02" PRIx32 ", operation value=0x%02" PRIx8
+			           ", test value=0x%02" PRIx32,
+			           compare, state.compareMask, state.writeMask, op_value, test_value);
 		}
 		// Vulkan shares one reference between comparison and every replacement on this face.
 		reference = (reference & ~state.writeMask) | (replacement & state.writeMask);
 		required_bits |= state.writeMask;
 	}
-	out = {converted[0], converted[1], converted[2], static_cast<vk::CompareOp>(compare),
-	       state.compareMask, state.writeMask, reference};
-	return true;
+	return {converted[0], converted[1], converted[2], static_cast<vk::CompareOp>(compare),
+	        state.compareMask, state.writeMask, reference};
 }
 
 [[nodiscard]] static vk::Format ResolveHostDepthAttachmentFormat(const CommandBuffer&     buffer,
@@ -258,7 +251,7 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
+void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
 	KYTY_PROFILER_FUNCTION();
 	const auto& hw          = buffer.GetRegisters();
 	const auto& z           = hw.GetDepthRenderTarget();
@@ -272,7 +265,7 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	const bool stencil_active =
 	    has_stencil && (dc.stencil_enable || rc.stencil_clear_enable || rc.copy_stencil_to_color);
 	if (!depth_active && !stencil_active) {
-		return true;
+		return;
 	}
 	const bool attachment_unbound =
 	    z.z_info.format == Prospero::DepthFormat::kInvalid &&
@@ -296,7 +289,7 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 		if (!logged.exchange(true, std::memory_order_relaxed)) {
 			LOGF("DepthTarget: ignoring enabled depth/stencil state without a bound attachment\n");
 		}
-		return true;
+		return;
 	}
 	if (rc.copy_stencil_to_color ||
 	    dc.zfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
@@ -336,19 +329,15 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 		     dc.stencilfunc_bf > static_cast<uint8_t>(vk::CompareOp::eAlways))) {
 			DepthFatal("unsupported stencil compare state");
 		}
-		if (!ConvertStencilState(
-		        dc.stencilfunc, {sc.stencil_fail, sc.stencil_zpass, sc.stencil_zfail},
-		        sm.stencil_opval, {.compareMask = sm.stencil_mask, .writeMask = front_write_mask,
-		                           .reference = sm.stencil_testval}, r.stencil_front)) {
-			return false;
-		}
+		r.stencil_front = ConvertStencilState(
+		    dc.stencilfunc, {sc.stencil_fail, sc.stencil_zpass, sc.stencil_zfail},
+		    sm.stencil_opval, {.compareMask = sm.stencil_mask, .writeMask = front_write_mask,
+		                       .reference = sm.stencil_testval});
 		if (dc.backface_enable) {
-			if (!ConvertStencilState(
-			        dc.stencilfunc_bf, {sc.stencil_fail_bf, sc.stencil_zpass_bf, sc.stencil_zfail_bf},
-			        sm.stencil_opval_bf, {.compareMask = sm.stencil_mask_bf, .writeMask = back_write_mask,
-		                                  .reference = sm.stencil_testval_bf}, r.stencil_back)) {
-				return false;
-			}
+			r.stencil_back = ConvertStencilState(
+			    dc.stencilfunc_bf, {sc.stencil_fail_bf, sc.stencil_zpass_bf, sc.stencil_zfail_bf},
+			    sm.stencil_opval_bf, {.compareMask = sm.stencil_mask_bf, .writeMask = back_write_mask,
+			                          .reference = sm.stencil_testval_bf});
 		} else {
 			r.stencil_back = r.stencil_front;
 		}
@@ -356,7 +345,6 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	auto& cache = m_context.GetTextureCache();
 	r.image_id = cache.FindImage(r.desc);
 	BindRenderTarget(r.image_id);
-	return true;
 }
 
 bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {

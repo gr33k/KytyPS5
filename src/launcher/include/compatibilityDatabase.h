@@ -30,12 +30,8 @@ signals:
 
 private:
 	void Save() const;
-	void LoadLocalFile();
-	void ApplyLocalOverrides();
-	void PruneDefault(const QString& key);
 
 	QMap<QString, CompatibilityEntry> m_entries;
-	QMap<QString, CompatibilityEntry> m_local_entries;
 	bool                              m_local = false;
 };
 

@@ -1,7 +1,6 @@
 #include "compatibilityDatabase.h"
 
 #include <QDebug>
-#include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
@@ -131,37 +130,26 @@ const CompatibilityEntry* CompatibilityDatabase::Find(const QString& title_id) c
 	return entry != m_entries.constEnd() ? &entry.value() : nullptr;
 }
 
-void CompatibilityDatabase::LoadLocalFile() {
-	// Next to the launcher executable, not the working directory: the DB must
-	// be the same file no matter how the launcher is started.
-	QFile file(QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(FILE_NAME));
-	if (!file.exists()) {
-		return;
-	}
-	if (!file.open(QIODevice::ReadOnly)) {
-		qWarning() << "Could not open compatibility database:" << file.errorString();
-		return;
-	}
-	auto result = Parse(file.readAll());
-	if (!result.error.isEmpty()) {
-		qWarning() << result.error;
-		return;
-	}
-	m_local_entries = std::move(result.entries);
-}
-
-void CompatibilityDatabase::ApplyLocalOverrides() {
-	for (auto it = m_local_entries.constBegin(); it != m_local_entries.constEnd(); ++it) {
-		m_entries[it.key()] = it.value();
-	}
-}
-
 void CompatibilityDatabase::Load() {
-	// Local overrides always apply on top of the remote database, so the
-	// user's own per-game status and comments survive refreshes.
-	LoadLocalFile();
-	ApplyLocalOverrides();
-	emit Updated();
+	if (m_local) {
+		QFile file(QDir(".").absoluteFilePath(FILE_NAME));
+		if (!file.exists()) {
+			emit Updated();
+			return;
+		}
+		if (!file.open(QIODevice::ReadOnly)) {
+			qWarning() << "Could not open compatibility database:" << file.errorString();
+			return;
+		}
+		auto result = Parse(file.readAll());
+		if (!result.error.isEmpty()) {
+			qWarning() << result.error;
+			return;
+		}
+		m_entries = std::move(result.entries);
+		emit Updated();
+		return;
+	}
 
 	auto* watcher = new QFutureWatcher<LoadResult>(this);
 	connect(watcher, &QFutureWatcher<LoadResult>::finished, this, [this, watcher]() {
@@ -172,71 +160,38 @@ void CompatibilityDatabase::Load() {
 			return;
 		}
 		m_entries = result.entries;
-		ApplyLocalOverrides();
 		emit Updated();
 	});
 	watcher->setFuture(QtConcurrent::run(Download));
 }
 
-void CompatibilityDatabase::PruneDefault(const QString& key) {
-	const auto it = m_local_entries.constFind(key);
-	if (it != m_local_entries.constEnd() &&
-	    it->status == Configuration::GameStatus::Unknown && it->comment.isEmpty()) {
-		m_local_entries.erase(it);
-	}
-}
-
 void CompatibilityDatabase::SetStatus(const QString& title_id, Configuration::GameStatus status) {
 	const auto key = TitleKey(title_id);
-	if (key.isEmpty()) {
+	if (!m_local || key.isEmpty()) {
 		return;
 	}
-	m_entries[key].status       = status;
-	m_local_entries[key].status = status;
-	PruneDefault(key);
+	m_entries[key].status = status;
 	Save();
 }
 
 void CompatibilityDatabase::SetComment(const QString& title_id, const QString& comment) {
 	const auto key = TitleKey(title_id);
-	if (key.isEmpty()) {
+	if (!m_local || key.isEmpty()) {
 		return;
 	}
-	m_entries[key].comment       = comment;
-	m_local_entries[key].comment = comment;
-	PruneDefault(key);
+	m_entries[key].comment = comment;
 	Save();
 }
 
 void CompatibilityDatabase::Save() const {
-	// Merge with what's on disk (in-memory entries win): a stale launcher
-	// instance holding an old map must not clobber entries saved by a newer
-	// session when it writes.
-	QMap<QString, CompatibilityEntry> merged;
-	QFile disk(QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(FILE_NAME));
-	if (disk.exists() && disk.open(QIODevice::ReadOnly)) {
-		const auto disk_result = Parse(disk.readAll());
-		if (disk_result.error.isEmpty()) {
-			merged = disk_result.entries;
-		}
-	}
-	for (auto it = m_local_entries.constBegin(); it != m_local_entries.constEnd(); ++it) {
-		merged[it.key()] = it.value();
-	}
 	QJsonObject root;
-	for (auto it = merged.constBegin(); it != merged.constEnd(); ++it) {
-		// Defaults carry no information; dropping them keeps the file small
-		// and preserves PruneDefault semantics across the merge.
-		if (it.value().status == Configuration::GameStatus::Unknown &&
-		    it.value().comment.isEmpty()) {
-			continue;
-		}
+	for (auto it = m_entries.constBegin(); it != m_entries.constEnd(); ++it) {
 		root.insert(it.key(),
 		            QJsonObject {{QStringLiteral("status"), StatusToText(it.value().status)},
 		                         {QStringLiteral("comment"), it.value().comment}});
 	}
 
-	QSaveFile  file(QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(FILE_NAME));
+	QSaveFile  file(QDir(".").absoluteFilePath(FILE_NAME));
 	const auto data = QJsonDocument(root).toJson(QJsonDocument::Indented);
 	if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
 		qWarning() << "Could not save compatibility database:" << file.errorString();
