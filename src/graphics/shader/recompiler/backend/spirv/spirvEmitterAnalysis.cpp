@@ -4,6 +4,8 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <cstdlib>
+
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
 uint32_t PixelParameterLocation(const EmitterState& state, uint32_t attr) {
@@ -66,10 +68,10 @@ uint32_t          ConstantU32(EmitterState& state, uint32_t value);
 	std::abort();
 }
 
-uint32_t DescriptorElementPointer(EmitterState& state, uint32_t result_ptr_type,
-                                  uint32_t variable_id, uint32_t array_index,
-                                  IR::DescriptorBindingKind kind, uint32_t resource,
-                                  const char* variable_name) {
+static uint32_t DescriptorElementPointer(EmitterState& state, uint32_t result_ptr_type,
+                                         uint32_t variable_id, uint32_t array_index,
+                                         IR::DescriptorBindingKind kind, uint32_t resource,
+                                         const char* variable_name) {
 	if (variable_id == 0) {
 		ExitDescriptorBindingFailure(state, kind, resource, variable_name);
 	}

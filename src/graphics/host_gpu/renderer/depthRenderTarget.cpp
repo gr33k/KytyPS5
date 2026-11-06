@@ -71,11 +71,9 @@ static vk::StencilOp ConvertStencilOp(uint8_t value, uint8_t write_mask, uint8_t
 	}
 }
 
-// False when the guest needs different replacement values that cannot share
-// Vulkan's single per-face reference; the caller skips the draw.
-static bool ConvertStencilState(
+static vk::StencilOpState ConvertStencilState(
     uint8_t compare, const std::array<uint8_t, 3>& operations, uint8_t op_value,
-    const vk::StencilOpState& state, vk::StencilOpState& out) {
+    const vk::StencilOpState& state) {
 	const auto test_value = state.reference;
 	auto reference       = test_value;
 	auto required_bits   = state.compareMask;
@@ -94,22 +92,17 @@ static bool ConvertStencilState(
 			replacement = op_value;
 		}
 		if (((reference ^ replacement) & required_bits & state.writeMask) != 0) {
-			static std::atomic_uint stencil_log = 0;
-			if (stencil_log.fetch_add(1, std::memory_order_relaxed) < 4) {
-				LOGF("DepthStencil: skipping draw with unrepresentable stencil replacement: "
-				     "compare=%u, compare mask=0x%02" PRIx32 ", write mask=0x%02" PRIx32
-				     ", operation value=0x%02" PRIx8 ", test value=0x%02" PRIx32 "\n",
-				     compare, state.compareMask, state.writeMask, op_value, test_value);
-			}
-			return false;
+			DepthFatal("unsupported stencil replacement: compare=%u, compare mask=0x%02" PRIx32
+			           ", write mask=0x%02" PRIx32 ", operation value=0x%02" PRIx8
+			           ", test value=0x%02" PRIx32,
+			           compare, state.compareMask, state.writeMask, op_value, test_value);
 		}
 		// Vulkan shares one reference between comparison and every replacement on this face.
 		reference = (reference & ~state.writeMask) | (replacement & state.writeMask);
 		required_bits |= state.writeMask;
 	}
-	out = {converted[0], converted[1], converted[2], static_cast<vk::CompareOp>(compare),
-	       state.compareMask, state.writeMask, reference};
-	return true;
+	return {converted[0], converted[1], converted[2], static_cast<vk::CompareOp>(compare),
+	        state.compareMask, state.writeMask, reference};
 }
 
 [[nodiscard]] static vk::Format ResolveHostDepthAttachmentFormat(const CommandBuffer&     buffer,
@@ -156,14 +149,11 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	if (samples == 0) {
 		DepthFatal("unsupported depth fragment count: %u", z.z_info.num_samples);
 	}
-	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
-	switch (view.type) {
-		case TargetViewType::Image2D:
-		case TargetViewType::Image2DArray: break;
-		case TargetViewType::Unsupported:
-			DepthFatal("invalid depth view: base=%u last=%u", z.depth_view.slice_start,
-			           z.depth_view.slice_max);
+	if (z.depth_view.slice_start > z.depth_view.slice_max) {
+		DepthFatal("invalid depth view: base=%u last=%u", z.depth_view.slice_start,
+		           z.depth_view.slice_max);
 	}
+	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
 	// EXPCLEAR permits an HTile acceleration state; the host attachment is already expanded.
 	if (z.z_info.max_mip_level != 0 || unsupported_shading_rate_encoding || depth_address == 0 ||
 	    (depth_address & 0xffffu) != 0) {
@@ -204,11 +194,11 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	}
 	const auto     guest_format = policy->guest_format;
 	const uint32_t bytes        = policy->bytes_per_element;
-	const auto     pitch        = TileGetDepthPitch(width, bytes, z.z_info.num_samples);
+	const auto     pitch        = TileGetRenderTargetPitch(width, bytes, z.z_info.num_samples);
 	TileSizeAlign depth_size {};
 	TileSizeAlign stencil_size {};
 	TileSizeAlign htile_size {};
-	if (!TileGetDepthSize(width, height, 0, z.z_info.format, z.stencil_info.format, has_htile,
+	if (!TileGetDepthSize(width, height, z.z_info.format, z.stencil_info.format, has_htile,
 	                      stencil_size, htile_size, depth_size, z.z_info.num_samples) ||
 	    depth_size.align != 65536 || depth_size.size == 0 ||
 	    (has_stencil != (stencil_size.align == 65536 && stencil_size.size != 0)) ||
@@ -261,7 +251,7 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
+void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
 	KYTY_PROFILER_FUNCTION();
 	const auto& hw          = buffer.GetRegisters();
 	const auto& z           = hw.GetDepthRenderTarget();
@@ -270,12 +260,16 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	const auto& sc          = hw.GetStencilControl();
 	const auto& sm          = hw.GetStencilMask();
 	const bool  has_stencil = z.stencil_info.format != Prospero::StencilFormat::kInvalid;
-	const bool depth_active = dc.z_enable || dc.depth_bounds_enable ||
-	                          rc.depth_clear_enable || rc.copy_depth_to_color;
+	// With HTile, DEPTH_COMPRESS_DISABLE expands touched tiles even with depth/stencil tests off.
+	// PPSA32236 fast-clears HTile each frame, runs this pass, then samples the depth as raw memory.
+	// Unbound, the clear never lands: NaN depth makes one compute pass ~95 ms (60 -> 10 fps).
+	const bool depth_active = dc.z_enable || dc.depth_bounds_enable || rc.depth_clear_enable ||
+	                          rc.copy_depth_to_color ||
+	                          (rc.depth_compress_disable && z.z_info.htile_acceleration);
 	const bool stencil_active =
 	    has_stencil && (dc.stencil_enable || rc.stencil_clear_enable || rc.copy_stencil_to_color);
 	if (!depth_active && !stencil_active) {
-		return true;
+		return;
 	}
 	const bool attachment_unbound =
 	    z.z_info.format == Prospero::DepthFormat::kInvalid &&
@@ -299,7 +293,7 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 		if (!logged.exchange(true, std::memory_order_relaxed)) {
 			LOGF("DepthTarget: ignoring enabled depth/stencil state without a bound attachment\n");
 		}
-		return true;
+		return;
 	}
 	if (rc.copy_stencil_to_color ||
 	    dc.zfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
@@ -339,19 +333,15 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 		     dc.stencilfunc_bf > static_cast<uint8_t>(vk::CompareOp::eAlways))) {
 			DepthFatal("unsupported stencil compare state");
 		}
-		if (!ConvertStencilState(
-		        dc.stencilfunc, {sc.stencil_fail, sc.stencil_zpass, sc.stencil_zfail},
-		        sm.stencil_opval, {.compareMask = sm.stencil_mask, .writeMask = front_write_mask,
-		                           .reference = sm.stencil_testval}, r.stencil_front)) {
-			return false;
-		}
+		r.stencil_front = ConvertStencilState(
+		    dc.stencilfunc, {sc.stencil_fail, sc.stencil_zpass, sc.stencil_zfail},
+		    sm.stencil_opval, {.compareMask = sm.stencil_mask, .writeMask = front_write_mask,
+		                       .reference = sm.stencil_testval});
 		if (dc.backface_enable) {
-			if (!ConvertStencilState(
-			        dc.stencilfunc_bf, {sc.stencil_fail_bf, sc.stencil_zpass_bf, sc.stencil_zfail_bf},
-			        sm.stencil_opval_bf, {.compareMask = sm.stencil_mask_bf, .writeMask = back_write_mask,
-		                                  .reference = sm.stencil_testval_bf}, r.stencil_back)) {
-				return false;
-			}
+			r.stencil_back = ConvertStencilState(
+			    dc.stencilfunc_bf, {sc.stencil_fail_bf, sc.stencil_zpass_bf, sc.stencil_zfail_bf},
+			    sm.stencil_opval_bf, {.compareMask = sm.stencil_mask_bf, .writeMask = back_write_mask,
+			                          .reference = sm.stencil_testval_bf});
 		} else {
 			r.stencil_back = r.stencil_front;
 		}
@@ -359,7 +349,6 @@ bool RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	auto& cache = m_context.GetTextureCache();
 	r.image_id = cache.FindImage(r.desc);
 	BindRenderTarget(r.image_id);
-	return true;
 }
 
 bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
@@ -395,9 +384,9 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 	auto& destination = cache.GetImage(write_id);
 	EXIT_IF(read_id == write_id || source.backing.format != destination.backing.format);
 
-	auto& scheduler = m_context.GetCommandScheduler();
-	scheduler.EndRendering();
-	const auto command = scheduler.Current().Handle();
+	buffer.EndRendering();
+	const auto command = buffer.Handle();
+
 	const ImageSubresourceRange range {read_desc.view_info.base_level, 1,
 	                                  read_desc.view_info.base_layer,
 	                                  read_desc.view_info.layer_count};

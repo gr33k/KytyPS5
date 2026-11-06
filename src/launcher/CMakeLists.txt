@@ -18,12 +18,11 @@ add_executable(launcher WIN32
 	${launcher_src}
 	${launcher_forms}
 	resources.qrc
-	$<IF:$<BOOL:${WIN32}>,launcher.rc,>
 )
 
 
 target_link_libraries(launcher Qt6::Concurrent Qt6::Network Qt6::Widgets Vulkan::Headers SDL3::SDL3-static
-	LibAtrac9 kyty_git_version common)
+	LibAtrac9 kyty_git_version common FFmpeg::ffmpeg)
 if(LINUX)
 	find_package(Qt6 COMPONENTS DBus REQUIRED)
 	target_link_libraries(launcher Qt6::DBus)
@@ -37,6 +36,16 @@ target_link_libraries(launcher pthread)
 endif()
 target_include_directories(launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set_target_properties(launcher PROPERTIES AUTOUIC ON AUTOMOC ON AUTORCC ON)
+
+add_executable(launcher_game_views_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/LauncherGameViewsTests.cpp"
+	src/gameContent.cpp
+	src/launcherTheme.cpp
+	resources.qrc
+)
+target_link_libraries(launcher_game_views_tests Qt6::Widgets common)
+target_include_directories(launcher_game_views_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+set_target_properties(launcher_game_views_tests PROPERTIES AUTOUIC ON AUTORCC ON)
 
 if(WIN32 AND NOT KYTY_CLANG_CL)
 	set_target_properties(launcher PROPERTIES LINK_FLAGS "${KYTY_LD_OPTIONS}")

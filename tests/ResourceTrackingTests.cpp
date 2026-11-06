@@ -5521,14 +5521,6 @@ void TestImagesSamplersAndAliases() {
   fixture.Emit(ValueOpcode::ImageAtomicIAdd32,
                {storage, image_address, Value(1u), Value(true)},
                fixture.AddMemory(storage_memory, 16));
-
-  const auto buffer = fixture.Buffer(
-      {image_words[0], image_words[1], image_words[2], image_words[3]}, 20);
-  MemoryInfo buffer_memory;
-  buffer_memory.kind = ResourceKind::Buffer;
-  fixture.Emit(ValueOpcode::LoadBufferU32,
-               {buffer, Value(0u), Value(0u), Value(0u), Value(true)},
-               fixture.AddMemory(buffer_memory, 20));
   fixture.PlanAndTrack();
 
   Check(fixture.program.info.images.size() == 3 &&
@@ -5546,8 +5538,6 @@ void TestImagesSamplersAndAliases() {
   const auto sampler_source = fixture.program.info.samplers[0].source;
   Check(fixture.program.descriptor_sources[sampler_source].dwords[3].U32() == 0,
         "unused sampler border color was not canonicalized");
-  Check(fixture.program.info.buffers[0].image_alias == 0,
-        "buffer/image descriptor alias was not linked");
 }
 
 void TestIndependentImageSamplerPairs() {
@@ -8349,6 +8339,23 @@ void TestDmaAddressMaterialization() {
                {based, Value(0u), Value(0u), Value(true)},
                fixture.AddMemory(global, 4));
 
+  // A global base loaded through a scalar pointer.
+  const auto table =
+      fixture.Address(fixture.UserData(2), fixture.UserData(3), 12);
+  std::array<Value, 2> words;
+  for (uint32_t word = 0; word < words.size(); ++word) {
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    scalar.offset = word * 4u;
+    words[word] = fixture.Emit(ValueOpcode::LoadAddressU32,
+                               {table, Value(0u), Value(0u), Value(true)},
+                               fixture.AddMemory(scalar, 12 + word * 4u));
+  }
+  fixture.Emit(ValueOpcode::LoadAddressU32,
+               {fixture.Address(words[0], words[1], 20), Value(0u), Value(0u),
+                Value(true)},
+               fixture.AddMemory(global, 20));
+
   const auto undef = fixture.Emit(ValueOpcode::UndefU32);
   const auto unbased = fixture.Address(undef, undef, 8);
   MemoryInfo flat;
@@ -8362,13 +8369,22 @@ void TestDmaAddressMaterialization() {
 
   Check(fixture.program.info.uses_dma,
         "typed address operations did not enable DMA");
-  std::array<uint32_t, 2> user_data{0x2008u, 0u};
+  std::array<uint32_t, 4> user_data{0x2008u, 0u, 0x1000u, 0u};
+  TestMemory memory;
+  memory.words[0] = 0x4000u;
+  memory.words[1] = 0x12u;
+  FakeGuestMemory fake(ReadTestMemory, &memory);
   SrtRuntime runtime{.user_data = user_data};
   ResourceSnapshot snapshot;
   ResourceSpecialization specialization;
   Check(MaterializeResources(resource_plan, runtime, snapshot,
                              specialization),
         "DMA shader resources did not materialize");
+  const auto &bases = fixture.program.info.address_bases;
+  const auto &srt = snapshot.flattened_srt;
+  Check(bases.size() == 1 && srt[bases[0][0]] == 0x4000u &&
+            srt[bases[0][1]] == 0x12u,
+        "flattened global access base was not recorded");
   ApplyResourceSpecialization(fixture.program, specialization);
 }
 
@@ -9132,27 +9148,21 @@ int main() {
 // target links only fmt; keep assertion failures observable without widening
 // its focused build manifest.
 namespace Common {
-int DbgExitHandler(const char *, int, std::string_view text) {
+void DbgExitHandler(const char *, int, std::string_view text) {
   throw std::runtime_error(std::string(text));
 }
 
-int DbgExitHandler(const char *, int, fmt::text_style, std::string_view text) {
-  throw std::runtime_error(std::string(text));
-}
-
-int DbgExitIfHandler(const char *expression, const char *file, int line) {
+void DbgExitIfHandler(const char *expression, const char *file, int line) {
   throw std::runtime_error(std::string("typed IR assertion: ") + expression +
                            " at " + file + ':' + std::to_string(line));
 }
 
-int DbgNotImplementedHandler(const char *expression, const char *file,
-                             int line) {
+void DbgNotImplementedHandler(const char *expression, const char *file,
+                              int line) {
   throw std::runtime_error(std::string("typed IR not implemented: ") +
                            expression + " at " + file + ':' +
                            std::to_string(line));
 }
-
-void DbgExit(int) { throw std::runtime_error("typed IR assertion failed"); }
 } // namespace Common
 
 // Keep this focused standalone target self-contained by amalgamating its small

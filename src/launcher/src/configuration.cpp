@@ -35,6 +35,8 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(readback_tiled_images);
 	KYTY_CFG_SET(sync_raw_image_buffers);
 	KYTY_CFG_SET(tessellation_enabled);
+	KYTY_CFG_SET(occlusion_queries_enabled);
+	KYTY_CFG_SET(shader_cache_enabled);
 	KYTY_CFG_SET(trophy_enabled);
 	KYTY_CFG_SET(trophy_duration_seconds);
 	KYTY_CFG_SET(perf_overlay_enabled);
@@ -45,8 +47,6 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(console_language);
 	KYTY_CFG_SET(vulkan_validation_enabled);
 	KYTY_CFG_SET(shader_validation_enabled);
-	KYTY_CFG_SET(gpu_assisted_validation_enabled);
-	KYTY_CFG_SET(shader_optimization_type);
 	KYTY_CFG_SET(shader_log_direction);
 	KYTY_CFG_SET(shader_log_folder);
 	KYTY_CFG_SET(command_buffer_dump_enabled);
@@ -91,7 +91,9 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(readback_tiled_images);
 	KYTY_CFG_GET(sync_raw_image_buffers);
 	KYTY_CFG_GET(tessellation_enabled);
-	trophy_enabled   = s.value("trophy_enabled", trophy_enabled).toBool();
+	KYTY_CFG_GET(occlusion_queries_enabled);
+	shader_cache_enabled = s.value("shader_cache_enabled", shader_cache_enabled).toBool();
+	trophy_enabled       = s.value("trophy_enabled", trophy_enabled).toBool();
 	KYTY_CFG_GET(trophy_duration_seconds);
 	KYTY_CFG_GET(perf_overlay_enabled);
 	KYTY_CFG_GET(skip_notice_screen);
@@ -104,8 +106,6 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	}
 	KYTY_CFG_GET(vulkan_validation_enabled);
 	KYTY_CFG_GET(shader_validation_enabled);
-	KYTY_CFG_GET(gpu_assisted_validation_enabled);
-	KYTY_CFG_GET(shader_optimization_type);
 	KYTY_CFG_GET(shader_log_direction);
 	KYTY_CFG_GET(shader_log_folder);
 	KYTY_CFG_GET(command_buffer_dump_enabled);

@@ -1,51 +1,24 @@
+/* The views get their transparent background from their own styleSheet in
+   configuration_list_widget.ui: Breeze paints black behind the scrollbars of views without one. */
+QTreeWidget#cfgs_list,
 QListView#cfgs_grid {
-    background: palette(base);
-    border: 1px solid palette(mid);
-    color: palette(text);
-}
-
-QListView#cfgs_grid::item {
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 8px;
-}
-
-QListView#cfgs_grid::item:hover:!selected {
-    background: palette(midlight);
-    border-color: palette(mid);
-}
-
-QListView#cfgs_grid::item:selected {
-    background: palette(highlight);
-    border-color: palette(highlight);
-    color: palette(highlighted-text);
-}
-
-QListView#cfgs_grid::item:focus {
-    background: transparent;
-    border-color: transparent;
-    outline: 0;
-}
-
-GameListTreeWidget#cfgs_list {
-    background: transparent;
     border: 1px solid palette(mid);
     color: palette(text);
     outline: 0;
 }
 
-GameListTreeWidget#cfgs_list::item {
+QTreeWidget#cfgs_list::item {
     background: transparent;
     border-bottom: 1px solid palette(mid);
     padding: 4px;
 }
 
-GameListTreeWidget#cfgs_list::item:selected {
+QTreeWidget#cfgs_list::item:selected {
     background: palette(highlight);
     color: palette(highlighted-text);
 }
 
-GameListTreeWidget#cfgs_list QHeaderView::section {
+QTreeWidget#cfgs_list QHeaderView::section {
     background: palette(button);
     color: palette(button-text);
     border: 0;
@@ -68,6 +41,40 @@ QLineEdit#search_line_edit:focus {
     border-color: palette(highlight);
 }
 
+QToolButton#grid_view_button,
+QToolButton#refresh_button,
+QToolButton#global_settings_button,
+QToolButton#input_mapping_button,
+QToolButton#edit_button,
+QToolButton#trophy_overview_button,
+QToolButton#delete_button {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 3px;
+}
+
+QToolButton#grid_view_button:hover,
+QToolButton#refresh_button:hover,
+QToolButton#global_settings_button:hover,
+QToolButton#input_mapping_button:hover,
+QToolButton#edit_button:hover,
+QToolButton#trophy_overview_button:hover,
+QToolButton#delete_button:hover {
+    background: palette(button);
+    border-color: palette(mid);
+}
+
+QToolButton#grid_view_button:checked,
+QToolButton#grid_view_button:pressed,
+QToolButton#refresh_button:pressed,
+QToolButton#global_settings_button:pressed,
+QToolButton#input_mapping_button:pressed,
+QToolButton#edit_button:pressed,
+QToolButton#trophy_overview_button:pressed,
+QToolButton#delete_button:pressed {
+    background: palette(midlight);
+}
 
 QComboBox#game_status_editor {
     background: transparent;
@@ -110,94 +117,4 @@ QLineEdit#game_comment_editor:focus {
 QLabel#game_status_indicator {
     border: 1px solid palette(base);
     border-radius: 6px;
-}
-
-QMainWindow {
-    background: palette(window);
-}
-
-QMenuBar {
-    background: palette(window);
-    color: palette(window-text);
-    padding: 2px;
-}
-
-QMenuBar::item {
-    background: transparent;
-    border-radius: 4px;
-    padding: 4px 8px;
-}
-
-QMenuBar::item:selected {
-    background: palette(highlight);
-    color: palette(highlighted-text);
-}
-
-QMenu {
-    background: palette(base);
-    border: 1px solid palette(mid);
-    color: palette(text);
-    padding: 4px;
-}
-
-QMenu::item {
-    border-radius: 4px;
-    padding: 5px 28px 5px 8px;
-}
-
-QMenu::item:selected {
-    background: palette(highlight);
-    color: palette(highlighted-text);
-}
-
-QMenu::separator {
-    background: palette(mid);
-    height: 1px;
-    margin: 4px 8px;
-}
-
-QToolBar {
-    background: palette(window);
-    border: 0;
-    border-bottom: 1px solid palette(mid);
-    padding: 3px;
-    spacing: 2px;
-}
-
-QToolBar QToolButton {
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 5px;
-    color: palette(window-text);
-    padding: 4px 6px;
-}
-
-QToolBar QToolButton:hover {
-    background: palette(button);
-    border-color: palette(mid);
-}
-
-QToolBar QToolButton:pressed {
-    background: palette(midlight);
-}
-
-QToolBar::separator {
-    background: palette(mid);
-    margin: 4px;
-    width: 1px;
-}
-
-QStatusBar {
-    background: palette(window);
-    color: palette(window-text);
-}
-
-QStatusBar::item {
-    border: 0;
-}
-
-QStatusBar QLabel {
-    color: palette(window-text);
-    padding-bottom: 3px;
-    padding-right: 12px;
 }

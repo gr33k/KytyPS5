@@ -9,6 +9,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <map>
 #include <numeric>
@@ -140,7 +141,6 @@ const char* StageName(ShaderType stage) {
 	switch (stage) {
 		case ShaderType::Vertex: return "vertex";
 		case ShaderType::Pixel: return "pixel";
-		case ShaderType::Fetch: return "fetch";
 		case ShaderType::Compute: return "compute";
 		default: return "unknown";
 	}
@@ -384,6 +384,7 @@ public:
 		m_info.images.clear();
 		m_info.samplers.clear();
 		m_info.sampled_pairs.clear();
+		m_info.address_bases.clear();
 		m_info.uses_dma = false;
 		m_shader_writes = HasShaderMemoryWrites(program);
 	}
@@ -402,7 +403,6 @@ public:
 				Collect(inst);
 			}
 		}
-		LinkImageAliases();
 		for (const auto& patch: m_handle_patches) {
 			patch.handle->SetFlags<uint32_t>(patch.resource);
 		}
@@ -4278,7 +4278,7 @@ private:
 					Fail(flags.pc, "scratch operation requires GetScratchResource");
 				}
 				if (m_program.scratch_dwords == 0) {
-					Fail(flags.pc, "scratch operation requires a nonzero AGC per-thread size");
+					Fail(flags.pc, "scratch operation requires a nonzero per-thread scratch size");
 				}
 				return;
 			}
@@ -4286,6 +4286,18 @@ private:
 			if (address_info.access == AddressAccess::Write) {
 				m_program.has_address_writes = true;
 			}
+			handle = inst.Arg(0).Resolve().TryInstruction();
+			std::array<uint32_t, 2> base {};
+			for (uint32_t word = 0; word < base.size(); ++word) {
+				const auto* read = handle->Arg(word).Resolve().TryInstruction();
+				base[word]       = read != nullptr && read->GetOpcode() == ValueOpcode::ReadConst
+				                       ? read->Arg(1).Resolve().U32()
+				                       : UINT32_MAX;
+			}
+			auto& bases = m_info.address_bases;
+			if (std::ranges::max(base) != UINT32_MAX &&
+			    std::ranges::find(bases, base) == bases.end())
+				bases.push_back(base);
 			m_info.uses_dma = true;
 			return;
 		}
@@ -4340,31 +4352,6 @@ private:
 
 	const DescriptorSource* Source(uint32_t source) const {
 		return source < m_sources.size() ? &m_sources[source] : nullptr;
-	}
-
-	void LinkImageAliases() {
-		for (auto& buffer: m_info.buffers) {
-			const auto* buffer_source = Source(buffer.source);
-			if (buffer_source == nullptr || buffer_source->dword_count != 4) {
-				continue;
-			}
-			for (uint32_t image = 0; image < m_info.images.size(); image++) {
-				const auto* image_source = Source(m_info.images[image].source);
-				if (image_source == nullptr || image_source->dword_count != 8 ||
-				    image_source->indirect_descriptor.has_value()) {
-					continue;
-				}
-				bool alias = true;
-				for (uint32_t dword = 0; dword < 4; dword++) {
-					alias = alias && EquivalentValue(m_program, buffer_source->dwords[dword],
-					                                 image_source->dwords[dword]);
-				}
-				if (alias) {
-					buffer.image_alias = image;
-					break;
-				}
-			}
-		}
 	}
 
 	Program&                                   m_program;

@@ -78,9 +78,6 @@ public:
 
 	static QString NormalizeResolution(const QString& text);
 
-	enum class ShaderOptimizationType { None, Size, Performance };
-	Q_ENUM(ShaderOptimizationType)
-
 	enum class PresentMode { Fifo, Mailbox, Immediate };
 	Q_ENUM(PresentMode)
 
@@ -92,16 +89,18 @@ public:
 
 	Configuration() = default;
 
-	QString    name;
-	QString    title_id;    /* Serial / title id from sce_sys/param.json */
-	QString    gameVersion; /* appVersion / contentVersion from sce_sys/param.json */
-	QString    firmwareVer; /* requiredSystemSoftwareVersion from sce_sys/param.json */
-	QString    basedir;     /* Game base directory */
-	QString    game_path;   /* Launcher-unique game path */
-	QString    addons_dir;  /* Global setting; not saved per game. */
-	bool       custom_settings = false;
-	GameStatus game_status     = GameStatus::Unknown;
-	QString    game_comment;
+	QString     name;
+	QString     title_id;    /* Serial / title id from sce_sys/param.json */
+	QString     gameVersion; /* appVersion / contentVersion from sce_sys/param.json */
+	QString     firmwareVer; /* requiredSystemSoftwareVersion from sce_sys/param.json */
+	QString     basedir;     /* Game base directory */
+	QString     game_path;   /* Launcher-unique game path */
+	QString     addons_dir;  /* Global setting; not saved per game. */
+	QStringList addcont;     /* User add-ons ("LABEL" or "LABEL=DIR"), saved by title ID. */
+	bool        custom_settings = false;
+	bool        pro_supported   = false; /* attribute3 bit 22 from sce_sys/param.json */
+	GameStatus  game_status     = GameStatus::Unknown;
+	QString     game_comment;
 
 	// Controller preferences always come from the global configuration.
 	ControllerSettings controller;
@@ -120,6 +119,8 @@ public:
 	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
 	bool                   tessellation_enabled        = false;
+	bool                   occlusion_queries_enabled   = false;
+	bool                   shader_cache_enabled        = true;
 	bool                   trophy_enabled              = true;
 	int                    trophy_duration_seconds     = 6;
 	bool                   perf_overlay_enabled        = false;
@@ -129,10 +130,7 @@ public:
 	int                    vblank_frequency            = 60;
 	int                    console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
-	bool                   shader_validation_enabled   = true;
-	bool                   gpu_assisted_validation_enabled = false;
-
-	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::Performance;
+	bool                   shader_validation_enabled   = false;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	QString                shader_log_folder           = "_Shaders";
 	bool                   command_buffer_dump_enabled = false;
@@ -145,7 +143,7 @@ public:
 	bool                   amd_cpu_enabled             = false;
 	bool                   guest_tsc_enabled           = false;
 #if defined(_WIN32)
-	bool red_zone_protection_enabled = true;
+	bool red_zone_protection_enabled = false;
 #endif
 	QStringList host_input_mapping;
 
@@ -166,6 +164,8 @@ public:
 		readback_tiled_images       = other.readback_tiled_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;
 		tessellation_enabled        = other.tessellation_enabled;
+		occlusion_queries_enabled   = other.occlusion_queries_enabled;
+		shader_cache_enabled        = other.shader_cache_enabled;
 		trophy_enabled              = other.trophy_enabled;
 		trophy_duration_seconds     = other.trophy_duration_seconds;
 		perf_overlay_enabled        = other.perf_overlay_enabled;
@@ -176,8 +176,6 @@ public:
 		console_language            = other.console_language;
 		vulkan_validation_enabled   = other.vulkan_validation_enabled;
 		shader_validation_enabled   = other.shader_validation_enabled;
-		gpu_assisted_validation_enabled = other.gpu_assisted_validation_enabled;
-		shader_optimization_type    = other.shader_optimization_type;
 		shader_log_direction        = other.shader_log_direction;
 		shader_log_folder           = other.shader_log_folder;
 		command_buffer_dump_enabled = other.command_buffer_dump_enabled;
@@ -203,10 +201,10 @@ public:
 		basedir         = other.basedir;
 		game_path       = other.game_path;
 		custom_settings = other.custom_settings;
+		pro_supported   = other.pro_supported;
 		game_status     = other.game_status;
 		game_comment    = other.game_comment;
 	}
-
 
 	void WriteSettings(QSettings* s) const;
 	void ReadSettings(QSettings* s);
@@ -218,7 +216,6 @@ public:
 private:
 	template <class Settings>
 	void ReadGameSettingsValues(const Settings& s);
-
 };
 
 Q_DECLARE_METATYPE(Configuration*)
