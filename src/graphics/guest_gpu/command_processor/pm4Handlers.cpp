@@ -481,6 +481,12 @@ KYTY_CP_OP_PARSER(CpOpGetLodStats) {
 	auto* dst = reinterpret_cast<volatile uint32_t*>((buffer[1] & 0xffffffc0u) |
 	                                                 (static_cast<uint64_t>(buffer[2]) << 32u));
 
+	if (Config::LodStatsEnabled()) {
+		// Bit 18 or 19 resets the counters after the report.
+		cp.GetLodStats(dst, buffer_size, (buffer[3] & 0xc0000u) != 0);
+		return 4;
+	}
+
 	// Mip statistics are not collected: each of up to 256 2-dword slots after the 16-dword header
 	// reports its id (dword 0 bits 24-31) and finest sampled mip 15 (dword 1 bits 24-27), i.e. no
 	// samples. A non-zero dword 0 then marks the report complete.
@@ -697,42 +703,47 @@ KYTY_CP_OP_PARSER(CpOpDmaData) {
 KYTY_CP_OP_PARSER(CpOpDrawIndex) {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0073a00 && cmd_id != 0xc0042700);
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0042700);
 
-	if (cmd_id == 0xc0073a00) {
-		uint32_t index_count = buffer[0];
-		auto*    index_addr =
-		    reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
-		uint32_t max_instance_count = buffer[3];
-		uint32_t instance_count     = buffer[6];
-		uint32_t flags              = buffer[7];
+	uint32_t max_index_count = buffer[0];
+	auto*    index_addr =
+	    reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
+	uint32_t index_count = buffer[3];
+	uint32_t flags       = buffer[4];
 
-		EXIT_NOT_IMPLEMENTED(instance_count > max_instance_count);
-		EXIT_NOT_IMPLEMENTED((flags & ~0xa0u) != 0);
+	EXIT_NOT_IMPLEMENTED(index_count > max_index_count);
+	EXIT_NOT_IMPLEMENTED((flags & ~0x20u) != 0);
 
+	cp.DrawIndex({.index_count = index_count, .index_addr = index_addr});
+
+	return 5;
+}
+
+// The instance count, the object-ID table (one ID per instance, not modelled), the index
+// buffer size, the index buffer, the index count and the draw initiator.
+KYTY_CP_OP_PARSER(CpOpDrawIndexMultiInst) {
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0073a00);
+
+	uint32_t instance_count  = buffer[0];
+	uint32_t max_index_count = buffer[3];
+	auto*    index_addr =
+	    reinterpret_cast<void*>(buffer[4] | (static_cast<uint64_t>(buffer[5]) << 32u));
+	uint32_t index_count = buffer[6];
+	uint32_t flags       = buffer[7];
+
+	EXIT_NOT_IMPLEMENTED(index_count > max_index_count);
+	EXIT_NOT_IMPLEMENTED((flags & ~0xa0u) != 0);
+
+	// DrawIndex replaces a zero instance count with NUM_INSTANCES.
+	if (instance_count != 0) {
 		cp.DrawIndex({.index_count    = index_count,
 		              .index_addr     = index_addr,
 		              .instance_count = instance_count});
-
-		return 8;
 	}
 
-	if (cmd_id == 0xc0042700) {
-		uint32_t max_index_count = buffer[0];
-		auto*    index_addr =
-		    reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
-		uint32_t index_count = buffer[3];
-		uint32_t flags       = buffer[4];
-
-		EXIT_NOT_IMPLEMENTED(index_count > max_index_count);
-		EXIT_NOT_IMPLEMENTED((flags & ~0x20u) != 0);
-
-		cp.DrawIndex({.index_count = index_count, .index_addr = index_addr});
-
-		return 5;
-	}
-
-	return 1;
+	return 8;
 }
 
 KYTY_CP_OP_PARSER(CpOpDrawIndirect) {
@@ -2150,8 +2161,9 @@ static constexpr auto MakeShaderIndirectTable() {
 	                             Pm4::SPI_SHADER_PACE_ID_PS, Pm4::SPI_GRAPHICS_SHADER_CONTROL_PS}) {
 		table[cmd_offset] = IgnoreRegister;
 	}
-	// GS-front allocation metadata; the native GS resource registers already carry it.
+	// GS- and HS-front allocation metadata; the fused GS and HS resource registers carry it.
 	table[0x0ca] = IgnoreRegister;
+	table[0x14a] = IgnoreRegister;
 
 	for (uint32_t slot = 0; slot < 16; slot++) {
 		table[Pm4::COMPUTE_USER_DATA_0 + slot] = [](KYTY_HW_REG_ARGS) {
