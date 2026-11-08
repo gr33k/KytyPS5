@@ -53,6 +53,7 @@
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 #include <cerrno>
+#include <pthread.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -1053,17 +1054,6 @@ constexpr uint32_t EncodeSopp(uint32_t opcode, uint32_t simm = 0) {
   return 0x80000000u | (0x7fu << 23u) | ((opcode & 0x7fu) << 16u) |
          (simm & 0xffffu);
 }
-
-// A loop without an exit has no merge to structure; it reaches the dispatcher.
-constexpr uint32_t kDispatcherLoop[] = {
-    EncodeSopc(0x06, 1, 129),  // L: s_cmp_eq_u32 s1, 1
-    EncodeSopp(0x05, 2),       // s_cbranch_scc1 M
-    EncodeSMovB32(1, 129),     // N: s_mov_b32 s1, 1
-    EncodeSopp(0x02, 0xfffcu), // s_branch L
-    EncodeSMovB32(1, 128),     // M: s_mov_b32 s1, 0
-    EncodeSopp(0x02, 0xfffau), // s_branch L
-    EncodeSopp(0x01),
-};
 
 void TestShaderBufferResourceSize() {
   ShaderBufferResource descriptor;
@@ -6710,11 +6700,15 @@ void TestNewShaderRecompilerCfgFailedStructurizationPreservesGraph() {
   Decoder::DecodeProgram(std::span{shader}, decoded);
   auto graph = CFG::BuildGraph(decoded);
   const auto original = graph;
-  Check(graph.natural_loops.size() == 1u,
+  Check(graph.natural_loops.size() == 1u && !graph.irreducible,
         "failed structurization fixture must have one reducible loop");
   const auto failed = CFG::Structurize(graph);
-  Check(failed.unsupported && !failed.unsupported_reason.empty(),
+  Check(failed.unsupported &&
+            failed.failure_kind == CFG::FailureKind::StructuredControlFlow &&
+            !failed.unsupported_reason.empty(),
         "loop without a merge did not retain its structurization failure");
+  Check(failed.failure_block == UINT32_MAX,
+        "failed structurization exposed a discarded synthetic block ID");
   Check(CfgInstructionCoverage(graph, decoded.instructions.size()) ==
             CfgInstructionCoverage(original, decoded.instructions.size()),
         "failed structurization changed instruction coverage");
@@ -6728,7 +6722,7 @@ void TestNewShaderRecompilerCfgFailedStructurizationPreservesGraph() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
-void TestNewShaderRecompilerCfgIrreducibleStructured() {
+void TestNewShaderRecompilerCfgIrreducibleDispatcher() {
   const uint32_t shader[] = {
       EncodeSopp(0x05, 2),       // entry -> B, fallthrough A
       EncodeSopp(0x02, 0),       // A -> C
@@ -6737,33 +6731,71 @@ void TestNewShaderRecompilerCfgIrreducibleStructured() {
       0xbf810000u,
   };
 
-  const auto options = MakeCompileOptions(ShaderType::Compute);
-  auto result = RecompileForTest(shader, options);
-  Check(!result.program.dispatcher_fallback && result.program.cyclic,
-        "two-entry cycle did not structure into a loop");
-  Check(SpirvContainsOpcode(result.spirv, 246) &&
-            !SpirvContainsOpcode(result.spirv, 251),
-        "structured two-entry cycle lacks OpLoopMerge or kept an OpSwitch");
-  CheckSpirvBinaryValidates(result.spirv);
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.dump_ir = true;
 
-  // Without an exit there is no merge to structure; neither cycle block
-  // dominates the other.
-  const uint32_t endless[] = {
-      EncodeSopp(0x05, 1),       // entry -> B, fallthrough A
-      EncodeSopp(0x02, 0),       // A -> B
-      EncodeSopp(0x02, 0xfffeu), // B -> A
-      EncodeSopp(0x01),
-  };
-  result = RecompileForTest(endless, options);
-  Check(result.program.dispatcher_fallback && result.program.cyclic,
-        "endless two-entry cycle is not a cyclic dispatcher program");
+  auto result = RecompileForTest(shader, options);
+  Check((result.ir_dump.find("irreducible CFG") != std::string::npos),
+        "irreducible CFG reason was not retained");
+  Check((result.ir_dump.find("mode=dispatcher") != std::string::npos),
+        "irreducible CFG did not select dispatcher fallback");
+  Check(SpirvContainsOpcode(result.spirv, 246),
+        "dispatcher SPIR-V lacks OpLoopMerge");
+  Check(SpirvContainsOpcode(result.spirv, 251),
+        "dispatcher SPIR-V lacks OpSwitch");
+  CheckSpirvBinaryValidates(result.spirv);
 }
+
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+void TestNewShaderRecompilerCfgComponentsOfLongPath() {
+  using namespace ShaderRecompiler;
+  // Each s_branch to the next instruction ends a block, so the loop below spans blocks 1..path.
+  constexpr uint32_t path = 1024;
+  std::vector<uint32_t> shader(path, EncodeSopp(0x02, 0));
+  shader.push_back(EncodeSopp(0x04, 0u - path)); // s_cbranch_scc0 back to block 1
+  shader.push_back(EncodeSopp(0x01));            // s_endpgm
+  struct Build {
+    Decoder::Program decoded;
+    CFG::Graph graph;
+  } build;
+  Decoder::DecodeProgram(std::span{shader}, build.decoded);
+
+  // A 64 KiB stack holds far fewer host frames than the path has blocks.
+  pthread_attr_t attributes;
+  Check(pthread_attr_init(&attributes) == 0 &&
+            pthread_attr_setstacksize(&attributes, 64 * 1024) == 0,
+        "configure a small translation stack");
+  pthread_t thread;
+  Check(pthread_create(&thread, &attributes, [](void *opaque) -> void * {
+    auto &build = *static_cast<Build *>(opaque);
+    build.graph = CFG::BuildGraph(build.decoded);
+    return nullptr;
+  }, &build) == 0 && pthread_join(thread, nullptr) == 0,
+        "build the CFG on a 64 KiB stack");
+  pthread_attr_destroy(&attributes);
+
+  const auto &components = build.graph.components;
+  Check(components.size() == 3u &&
+            components[0].blocks == std::vector<uint32_t>{path + 1u} &&
+            components[1].blocks.size() == path &&
+            components[1].entry_blocks == std::vector<uint32_t>{1u} &&
+            components[2].blocks == std::vector<uint32_t>{0u},
+        "long block path lost its loop component or the completion order");
+}
+#endif
 
 void TestNewShaderRecompilerDispatcherSpillsU32x3() {
   using namespace ShaderRecompiler;
 
+  const uint32_t shader[] = {
+      EncodeSopp(0x05, 2),       // entry -> B, fallthrough A
+      EncodeSopp(0x02, 0),       // A -> C
+      EncodeSopp(0x05, 0xfffeu), // C -> A, fallthrough B
+      EncodeSopp(0x02, 0xfffeu), // B -> C
+      EncodeSopp(0x01),
+  };
   auto options = MakeCompileOptions(ShaderType::Compute);
-  auto result = RecompileForTest(kDispatcherLoop, options);
+  auto result = RecompileForTest(shader, options);
   Check(result.program.dispatcher_fallback &&
             result.program.blocks.size() >= 3u,
         "U32x3 spill fixture did not select dispatcher mode");
@@ -6788,7 +6820,7 @@ void TestNewShaderRecompilerDispatcherSpillsU32x3() {
           "dispatcher spilled a value defined by its dominating prologue");
   }
 
-  auto spill_result = RecompileForTest(kDispatcherLoop, options);
+  auto spill_result = RecompileForTest(shader, options);
   auto program = std::move(spill_result.program);
   IR::IREmitter definition(program.blocks[1]);
   const auto vector =
@@ -7034,7 +7066,11 @@ void TestNewShaderRecompilerNativeU64Translation() {
             direct_metrics.function_variables == 0u,
         "native U64 translation exceeded its declaration/code-size ratchet");
 
-  result = RecompileForTest(kDispatcherLoop, options);
+  const uint32_t dispatcher_shader[] = {
+      EncodeSopp(0x05, 2),       EncodeSopp(0x02, 0), EncodeSopp(0x05, 0xfffeu),
+      EncodeSopp(0x02, 0xfffeu), EncodeSopp(0x01),
+  };
+  result = RecompileForTest(dispatcher_shader, options);
   Check(result.program.dispatcher_fallback &&
             result.program.blocks.size() >= 3u,
         "U64 spill fixture did not select dispatcher mode");
@@ -7300,7 +7336,7 @@ void TestGraphicsComputeGetreg() {
       IR::Program program;
       program.wave_size = wave;
       IR::Block block;
-      Frontend::Translator translator(program, &block, 1, false, true);
+      Frontend::Translator translator(program, &block, 1, Frontend::NoLaneSpills, false, true);
       translator.TranslateInstruction(decoded);
       bool wrote_vcc = false;
       for (const auto& inst : block) {
@@ -8402,8 +8438,7 @@ void TestNewShaderRecompilerPrunesUnreachableSetpcMetadata() {
   ShaderRecompiler::Decoder::DecodeProgram(std::span{shader}, decoded);
   ShaderRecompiler::CFG::Graph graph;
   graph = ShaderRecompiler::CFG::BuildGraph(decoded);
-  Check(graph.code_table_load_pcs.empty() &&
-            !ShaderRecompiler::CFG::Structurize(graph).unsupported,
+  Check(!graph.irreducible && graph.code_table_load_pcs.empty(),
         "unreachable S_SETPC retained jump-table metadata or dispatcher mode");
 
   ShaderRecompiler::IR::Program ir;
@@ -13472,20 +13507,28 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
   Check((wqm_result.ir_dump.find("WqmU64") != std::string::npos),
         "WQM size fixture no longer reaches scalar mask expansion");
 
-  auto dispatcher_result = compile("dispatcher", kDispatcherLoop,
-                                   {.words = 235,
-                                    .instructions = 65,
-                                    .variables = 2,
-                                    .function_variables = 2,
-                                    .loads = 2,
-                                    .stores = 3,
-                                    .phis = 2,
-                                    .labels = 10,
-                                    .loop_merges = 1,
-                                    .selection_merges = 1,
-                                    .branches = 7,
-                                    .conditional_branches = 1,
-                                    .switches = 1});
+  const uint32_t dispatcher[] = {
+      EncodeSopp(0x05, 2),       // entry -> B, fallthrough A
+      EncodeSopp(0x02, 0),       // A -> C
+      EncodeSopp(0x05, 0xfffeu), // C -> A, fallthrough B
+      EncodeSopp(0x02, 0xfffeu), // B -> C
+      EncodeSopp(0x01),
+  };
+  auto dispatcher_result = compile("dispatcher", dispatcher,
+                                         {.words = 255,
+                                          .instructions = 70,
+                                          .variables = 3,
+                                          .function_variables = 3,
+                                          .loads = 3,
+                                          .stores = 6,
+                                          .phis = 2,
+                                          .labels = 13,
+                                          .loop_merges = 1,
+                                          .selection_merges = 1,
+                                          .branches = 10,
+                                          .conditional_branches = 1,
+                                          .switches = 1,
+                                          .ballots = 1});
   Check(dispatcher_result.program.dispatcher_fallback &&
             (dispatcher_result.ir_dump.find("Phi") != std::string::npos) &&
             SpirvInstructionOpcodeCount(dispatcher_result.spirv, 245u) == 2u &&
@@ -13620,7 +13663,10 @@ int main() {
   TestNewShaderRecompilerCfgSharedTerminalEarlyExit();
   TestNewShaderRecompilerCfgPrunesUnreachableSelectionEntry();
   TestNewShaderRecompilerCfgFailedStructurizationPreservesGraph();
-  TestNewShaderRecompilerCfgIrreducibleStructured();
+  TestNewShaderRecompilerCfgIrreducibleDispatcher();
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+  TestNewShaderRecompilerCfgComponentsOfLongPath();
+#endif
   TestNewShaderRecompilerDispatcherSpillsU32x3();
   TestNewShaderRecompilerPlanningOnlyLoads();
   TestNewShaderRecompilerNativeU64Translation();
