@@ -37,6 +37,7 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(sync_raw_image_buffers);
 	KYTY_CFG_SET(tessellation_enabled);
 	KYTY_CFG_SET(occlusion_queries_enabled);
+	KYTY_CFG_SET(relaxed_shader_float);
 	KYTY_CFG_SET(shader_cache_enabled);
 	KYTY_CFG_SET(trophy_enabled);
 	KYTY_CFG_SET(trophy_duration_seconds);
@@ -57,6 +58,8 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(profiler_enabled);
 	KYTY_CFG_SET(renderdoc_enabled);
 	KYTY_CFG_SET(pro_enabled);
+	KYTY_CFG_SET(pssr_upscaler);
+	KYTY_CFG_SET(dlss_folder);
 	KYTY_CFG_SET(amd_cpu_enabled);
 	KYTY_CFG_SET(guest_tsc_enabled);
 #if defined(_WIN32)
@@ -94,6 +97,7 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(sync_raw_image_buffers);
 	KYTY_CFG_GET(tessellation_enabled);
 	KYTY_CFG_GET(occlusion_queries_enabled);
+	KYTY_CFG_GET(relaxed_shader_float);
 	shader_cache_enabled = s.value("shader_cache_enabled", shader_cache_enabled).toBool();
 	trophy_enabled       = s.value("trophy_enabled", trophy_enabled).toBool();
 	KYTY_CFG_GET(trophy_duration_seconds);
@@ -117,6 +121,8 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	KYTY_CFG_GET(profiler_enabled);
 	KYTY_CFG_GET(renderdoc_enabled);
 	KYTY_CFG_GET(guest_tsc_enabled);
+	KYTY_CFG_GET(pssr_upscaler);
+	KYTY_CFG_GET(dlss_folder);
 	pro_enabled     = s.value("pro_enabled", false).toBool();
 	amd_cpu_enabled = s.value("amd_cpu_enabled", false).toBool();
 #if defined(_WIN32)
