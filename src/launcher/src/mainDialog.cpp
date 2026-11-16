@@ -247,6 +247,9 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 
 void MainDialogPrivate::BuildChrome() {
 	auto* window = m_main_dialog;
+	auto* menu_bar = window->menuBar();
+	menu_bar->setNativeMenuBar(false);
+	menu_bar->setVisible(true);
 
 	m_action_run = new QAction(window->style()->standardIcon(QStyle::SP_MediaPlay),
 	                           tr("&Run"), window);

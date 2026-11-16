@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSaveFile>
+#include <QSet>
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
@@ -22,12 +23,15 @@
 namespace {
 
 constexpr char FILE_NAME[]    = "compatibility_db.json";
+constexpr char OVERRIDES_FILE_NAME[] = "compatibility_overrides.json";
 constexpr char URL[]          = "https://kytyps5.github.io/data/compatibility.json";
 constexpr int  RETRY_COUNT    = 3;
 constexpr int  RETRY_DELAY_MS = 750;
 
 struct LoadResult {
 	QMap<QString, CompatibilityEntry> entries;
+	QSet<QString>                    status_fields;
+	QSet<QString>                    comment_fields;
 	QString                           error;
 };
 
@@ -82,6 +86,12 @@ LoadResult Parse(const QByteArray& data) {
 		ret.entries.insert(title_id,
 		                   {StatusFromText(object.value(QStringLiteral("status")).toString()),
 		                    object.value(QStringLiteral("comment")).toString()});
+		if (object.contains(QStringLiteral("status"))) {
+			ret.status_fields.insert(title_id);
+		}
+		if (object.contains(QStringLiteral("comment"))) {
+			ret.comment_fields.insert(title_id);
+		}
 	}
 	return ret;
 }
@@ -103,10 +113,10 @@ LoadResult DownloadOnce() {
 	loop.exec();
 
 	if (!timeout.isActive()) {
-		return {{}, QStringLiteral("Compatibility download timed out")};
+		return {{}, {}, {}, QStringLiteral("Compatibility download timed out")};
 	}
 	if (reply->error() != QNetworkReply::NoError) {
-		return {{}, reply->errorString()};
+		return {{}, {}, {}, reply->errorString()};
 	}
 	return Parse(reply->readAll());
 }
@@ -151,6 +161,24 @@ void CompatibilityDatabase::Load() {
 		return;
 	}
 
+	QFile overrides_file(QDir(".").absoluteFilePath(OVERRIDES_FILE_NAME));
+	if (overrides_file.exists()) {
+		if (!overrides_file.open(QIODevice::ReadOnly)) {
+			qWarning() << "Could not open compatibility overrides:" << overrides_file.errorString();
+		} else {
+			auto result = Parse(overrides_file.readAll());
+			if (!result.error.isEmpty()) {
+				qWarning() << result.error;
+			} else {
+				m_overrides = std::move(result.entries);
+				m_status_overrides = std::move(result.status_fields);
+				m_comment_overrides = std::move(result.comment_fields);
+				ApplyOverrides();
+				emit Updated();
+			}
+		}
+	}
+
 	auto* watcher = new QFutureWatcher<LoadResult>(this);
 	connect(watcher, &QFutureWatcher<LoadResult>::finished, this, [this, watcher]() {
 		const auto result = watcher->result();
@@ -160,6 +188,7 @@ void CompatibilityDatabase::Load() {
 			return;
 		}
 		m_entries = result.entries;
+		ApplyOverrides();
 		emit Updated();
 	});
 	watcher->setFuture(QtConcurrent::run(Download));
@@ -167,31 +196,58 @@ void CompatibilityDatabase::Load() {
 
 void CompatibilityDatabase::SetStatus(const QString& title_id, Configuration::GameStatus status) {
 	const auto key = TitleKey(title_id);
-	if (!m_local || key.isEmpty()) {
+	if (key.isEmpty()) {
 		return;
 	}
 	m_entries[key].status = status;
+	m_overrides[key]      = m_entries.value(key);
+	m_status_overrides.insert(key);
 	Save();
 }
 
 void CompatibilityDatabase::SetComment(const QString& title_id, const QString& comment) {
 	const auto key = TitleKey(title_id);
-	if (!m_local || key.isEmpty()) {
+	if (key.isEmpty()) {
 		return;
 	}
 	m_entries[key].comment = comment;
+	m_overrides[key]       = m_entries.value(key);
+	m_comment_overrides.insert(key);
 	Save();
+}
+
+void CompatibilityDatabase::ApplyOverrides() {
+	for (const auto& key: m_status_overrides) {
+		m_entries[key].status = m_overrides.value(key).status;
+	}
+	for (const auto& key: m_comment_overrides) {
+		m_entries[key].comment = m_overrides.value(key).comment;
+	}
 }
 
 void CompatibilityDatabase::Save() const {
 	QJsonObject root;
-	for (auto it = m_entries.constBegin(); it != m_entries.constEnd(); ++it) {
-		root.insert(it.key(),
-		            QJsonObject {{QStringLiteral("status"), StatusToText(it.value().status)},
-		                         {QStringLiteral("comment"), it.value().comment}});
+	if (m_local) {
+		for (auto it = m_entries.constBegin(); it != m_entries.constEnd(); ++it) {
+			root.insert(it.key(),
+			            QJsonObject {{QStringLiteral("status"), StatusToText(it.value().status)},
+			                         {QStringLiteral("comment"), it.value().comment}});
+		}
+	} else {
+		for (auto it = m_overrides.constBegin(); it != m_overrides.constEnd(); ++it) {
+			QJsonObject entry;
+			if (m_status_overrides.contains(it.key())) {
+				entry.insert(QStringLiteral("status"), StatusToText(it.value().status));
+			}
+			if (m_comment_overrides.contains(it.key())) {
+				entry.insert(QStringLiteral("comment"), it.value().comment);
+			}
+			root.insert(it.key(), entry);
+		}
 	}
 
-	QSaveFile  file(QDir(".").absoluteFilePath(FILE_NAME));
+	const auto file_name = m_local ? FILE_NAME : OVERRIDES_FILE_NAME;
+	QSaveFile  file(QDir(".").absoluteFilePath(QString::fromLatin1(file_name)));
 	const auto data = QJsonDocument(root).toJson(QJsonDocument::Indented);
 	if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
 		qWarning() << "Could not save compatibility database:" << file.errorString();

@@ -7,3 +7,5 @@ _Build/
 cmake-build-debug/
 _PipelineCache/
 CMakeUserPresets.json
+compatibility_db.json
+compatibility_overrides.json

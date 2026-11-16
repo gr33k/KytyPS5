@@ -5,6 +5,7 @@
 
 #include <QMap>
 #include <QObject>
+#include <QSet>
 #include <QString>
 
 struct CompatibilityEntry {
@@ -29,9 +30,13 @@ signals:
 	void Updated();
 
 private:
+	void ApplyOverrides();
 	void Save() const;
 
 	QMap<QString, CompatibilityEntry> m_entries;
+	QMap<QString, CompatibilityEntry> m_overrides;
+	QSet<QString>                    m_status_overrides;
+	QSet<QString>                    m_comment_overrides;
 	bool                              m_local = false;
 };
 

@@ -500,7 +500,7 @@ void ConfigurationListWidget::ApplyCompatibility() {
 
 		const QSignalBlocker blocker(item->GetStatusCombo());
 		item->Update();
-		item->SetCompatibilityEditable(m_compatibility->IsLocal() && !title_id.trimmed().isEmpty());
+		item->SetCompatibilityEditable(!title_id.trimmed().isEmpty());
 	}
 
 	m_ui->cfgs_list->setSortingEnabled(sorting_enabled);
@@ -755,20 +755,14 @@ void ConfigurationListWidget::ScanGameDirectory() {
 			const QSignalBlocker status_blocker(item->GetStatusCombo());
 			item->GetInfo().CopyGameInfoFrom(*info);
 			item->Update(true);
-			item->SetCompatibilityEditable(m_compatibility->IsLocal() &&
-			                               !item->GetInfo().title_id.trimmed().isEmpty());
+			item->SetCompatibilityEditable(!item->GetInfo().title_id.trimmed().isEmpty());
 			return;
 		}
 
 		auto* item = new ConfigurationItem(std::move(info), m_ui->cfgs_list);
-		item->SetCompatibilityEditable(m_compatibility->IsLocal() &&
-		                               !item->GetInfo().title_id.trimmed().isEmpty());
+		item->SetCompatibilityEditable(!item->GetInfo().title_id.trimmed().isEmpty());
 		connect(item->GetStatusCombo(), &QComboBox::currentIndexChanged, item,
 		        [this, item](int /*index*/) {
-			        if (!m_compatibility->IsLocal()) {
-				        return;
-			        }
-
 			        const auto& title_id = item->GetInfo().title_id;
 			        if (title_id.trimmed().isEmpty()) {
 				        return;
@@ -781,10 +775,6 @@ void ConfigurationListWidget::ScanGameDirectory() {
 			        SelectItem(item);
 		        });
 		connect(item->GetCommentEdit(), &QLineEdit::editingFinished, item, [this, item]() {
-			if (!m_compatibility->IsLocal()) {
-				return;
-			}
-
 			const auto& title_id = item->GetInfo().title_id;
 			if (title_id.trimmed().isEmpty()) {
 				return;
