@@ -45,6 +45,15 @@ public:
 	void ScanGameDirectory();
 	void ViewTrophies();
 	void ViewTrophyOverview();
+	int GetColumnCount() const;
+	int GetGameCount() const;
+	QString GetColumnTitle(int column) const;
+	bool IsColumnVisible(int column) const;
+	void SetColumnVisible(int column, bool visible);
+	bool IsGridView() const;
+	int GridIconWidth() const;
+	void SetGridView(bool enabled);
+	void SetGridSize(int width);
 
 signals:
 
@@ -59,7 +68,7 @@ public slots:
 	void WriteSettings();
 	void ReadSettings();
 
-protected slots:
+public slots:
 
 	void edit_configuration();
 	void delete_configuartion();
@@ -70,6 +79,7 @@ protected slots:
 	void remove_save_data();
 	void compress_game();
 	void filter_configurations(const QString& text);
+	void EditPatches();
 
 private:
 	void               SelectItem(QTreeWidgetItem* witem);

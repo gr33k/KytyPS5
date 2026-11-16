@@ -631,6 +631,14 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 
 	h->code = code;
 
+	if (h->file_header != 0x34333231 || h->version != 0x00000018) {
+		std::printf("AGC shader header unsupported: file_header=0x%08" PRIx32
+		            " version=0x%08" PRIx32 " type=%u header_size=%u shader_size=%u "
+		            "target=%u code=%p\n",
+		            h->file_header, h->version, h->type, h->header_size, h->shader_size, h->target,
+		            const_cast<const void*>(static_cast<const volatile void*>(code)));
+		std::fflush(stdout);
+	}
 	EXIT_NOT_IMPLEMENTED(h->file_header != 0x34333231);
 	EXIT_NOT_IMPLEMENTED(h->version != 0x00000018);
 

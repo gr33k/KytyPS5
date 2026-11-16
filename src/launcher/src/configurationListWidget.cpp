@@ -296,6 +296,52 @@ ConfigurationListWidget::~ConfigurationListWidget() {
 	delete m_ui;
 }
 
+int ConfigurationListWidget::GetColumnCount() const {
+	return m_ui->cfgs_list->columnCount();
+}
+
+int ConfigurationListWidget::GetGameCount() const {
+	return m_ui->cfgs_list->topLevelItemCount();
+}
+
+QString ConfigurationListWidget::GetColumnTitle(int column) const {
+	const auto* header = m_ui->cfgs_list->headerItem();
+	return header != nullptr ? header->text(column) : QString();
+}
+
+bool ConfigurationListWidget::IsColumnVisible(int column) const {
+	return !m_ui->cfgs_list->isColumnHidden(column);
+}
+
+void ConfigurationListWidget::SetColumnVisible(int column, bool visible) {
+	m_ui->cfgs_list->setColumnHidden(column, !visible);
+	WriteSettings();
+}
+
+bool ConfigurationListWidget::IsGridView() const {
+	return m_ui->grid_view_button->isChecked();
+}
+
+int ConfigurationListWidget::GridIconWidth() const {
+	return m_ui->grid_size_slider->value();
+}
+
+void ConfigurationListWidget::SetGridView(bool enabled) {
+	m_ui->grid_view_button->setChecked(enabled);
+}
+
+void ConfigurationListWidget::SetGridSize(int width) {
+	m_ui->grid_size_slider->setValue(width);
+}
+
+void ConfigurationListWidget::EditPatches() {
+	if (m_selected_item != nullptr &&
+	    Cheats::IsSupportedTitleId(m_selected_item->GetInfo().title_id)) {
+		auto* dialog = new PatchesDialog(m_selected_item->GetInfo(), this);
+		dialog->show();
+	}
+}
+
 void ConfigurationListWidget::changeEvent(QEvent* event) {
 	QWidget::changeEvent(event);
 	if (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange) {

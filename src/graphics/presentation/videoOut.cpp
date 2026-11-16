@@ -516,24 +516,50 @@ static int ReserveFlipRequest(VideoOutDriver::Impl& driver, int handle, int inde
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
 	if (!IsValidFlipMode(flip_mode)) {
+		std::printf("VideoOut flip rejected: invalid mode handle=%d index=%d mode=%d source=%u\n",
+		            handle, index, flip_mode, static_cast<unsigned>(source));
+		std::fflush(stdout);
 		return VIDEO_OUT_ERROR_INVALID_FLIP_MODE;
 	}
 	if (!IsValidBufferIndex(index)) {
+		std::printf("VideoOut flip rejected: invalid index handle=%d index=%d mode=%d source=%u\n",
+		            handle, index, flip_mode, static_cast<unsigned>(source));
+		std::fflush(stdout);
 		return VIDEO_OUT_ERROR_INVALID_INDEX;
 	}
 
 	Common::LockGuard lock(video_out->mutex);
 	if ((video_out->master != nullptr) != (flip_mode == VIDEO_OUT_FLIP_MODE_SLAVE) ||
 	    (video_out->slave_count != 0) != (flip_mode == VIDEO_OUT_FLIP_MODE_MASTER)) {
+		std::printf("VideoOut flip rejected: incompatible mode handle=%d index=%d mode=%d "
+		            "source=%u master=%d slaves=%d\n",
+		            handle, index, flip_mode, static_cast<unsigned>(source),
+		            video_out->master != nullptr, video_out->slave_count);
+		std::fflush(stdout);
 		return VIDEO_OUT_ERROR_INVALID_FLIP_MODE;
 	}
 	// The headset port can flip before its reprojection buffers are registered; those show blank.
-	if (!video_out->opened ||
+	const bool unregistered_buffer = !video_out->opened ||
 	    (!IsSpecialBufferIndex(index) && !video_out->buffers[index].Occupied() &&
-	     video_out->bus != VIDEO_OUT_BUS_TYPE_HMD2_MAIN)) {
-		return VIDEO_OUT_ERROR_INVALID_INDEX;
+	     video_out->bus != VIDEO_OUT_BUS_TYPE_HMD2_MAIN);
+	int reserve_index = index;
+	if (unregistered_buffer) {
+		std::printf("VideoOut flip rejected: unregistered buffer handle=%d index=%d mode=%d "
+		            "source=%u opened=%d bus=%d buffer_group=%d groups=%d,%d,%d,%d\n",
+		            handle, index, flip_mode, static_cast<unsigned>(source), video_out->opened,
+		            video_out->bus, video_out->buffers[index].group_index,
+		            video_out->groups[0].occupied, video_out->groups[1].occupied,
+			            video_out->groups[2].occupied, video_out->groups[3].occupied);
+		std::fflush(stdout);
+		if (source != FlipRequestSource::GpuEop) {
+			return VIDEO_OUT_ERROR_INVALID_INDEX;
+		}
+		// A stale GPU EOP can outlive the registration of the surface it names. Keep
+		// the command stream moving and deliver a blank flip instead of terminating
+		// the emulator on this teardown/reconfiguration race.
+		reserve_index = VIDEO_OUT_BUFFER_INDEX_BLANK;
 	}
-	if (!driver.GetFlipQueue().Reserve(*video_out, index, flip_arg, source, request_id)) {
+	if (!driver.GetFlipQueue().Reserve(*video_out, reserve_index, flip_arg, source, request_id)) {
 		return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
 	}
 	return OK;
@@ -1314,6 +1340,11 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
                                            const VideoOutBufferAttribute2* attribute, int category,
                                            void* option) {
 	PRINT_NAME();
+	std::printf("VideoOutRegisterBuffers2 enter handle=%d set=%d start=%d count=%d "
+	            "buffers=%p attribute=%p category=%d option=%p\n",
+	            handle, set_index, buffer_index_start, buffer_num, static_cast<const void*>(buffers),
+	            static_cast<const void*>(attribute), category, option);
+	std::fflush(stdout);
 
 	auto* ctx = DriverState().Get(handle);
 	if (ctx == nullptr) {
@@ -1430,6 +1461,9 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 		     buffer_index_start + i, buffer.data_address, buffer.metadata_address,
 		     attribute->dcc_control);
 	}
+	std::printf("VideoOutRegisterBuffers2 success handle=%d set=%d start=%d count=%d\n", handle,
+	            set_index, buffer_index_start, buffer_num);
+	std::fflush(stdout);
 
 	return OK;
 }
@@ -1478,6 +1512,8 @@ KYTY_SYSV_ABI int VideoOutSubmitChangeBufferAttribute2(int handle, int set_index
 
 KYTY_SYSV_ABI int VideoOutUnregisterBuffers(int handle, int set_index) {
 	PRINT_NAME();
+	std::printf("VideoOutUnregisterBuffers enter handle=%d set=%d\n", handle, set_index);
+	std::fflush(stdout);
 
 	auto* ctx = DriverState().Get(handle);
 	if (ctx == nullptr) {
@@ -1500,6 +1536,8 @@ KYTY_SYSV_ABI int VideoOutUnregisterBuffers(int handle, int set_index) {
 			buffer = VideoOutBuffer {};
 		}
 	}
+	std::printf("VideoOutUnregisterBuffers success handle=%d set=%d\n", handle, set_index);
+	std::fflush(stdout);
 
 	return OK;
 }

@@ -18,6 +18,7 @@ add_executable(launcher WIN32
 	${launcher_src}
 	${launcher_forms}
 	resources.qrc
+	$<IF:$<BOOL:${WIN32}>,launcher.rc,>
 )
 
 
@@ -42,6 +43,7 @@ add_executable(launcher_game_views_tests EXCLUDE_FROM_ALL
 	src/gameContent.cpp
 	src/launcherTheme.cpp
 	resources.qrc
+	$<IF:$<BOOL:${WIN32}>,launcher.rc,>
 )
 target_link_libraries(launcher_game_views_tests Qt6::Widgets common)
 target_include_directories(launcher_game_views_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
