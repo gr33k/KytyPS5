@@ -82,6 +82,9 @@ All results in the compatibility table were measured on:
 - GPU: Radeon RX 580 4GB (amdvlk driver)
 - RAM: 16GB
 
+Community game test results for upstream builds are also available in the
+[KytyPS5 Compatibility List](https://kytyps5.github.io/compatibility).
+
 Note: the RX 580 does not support mesh shaders, so titles that require
 mesh-shader pipelines are hardware-blocked on this platform regardless of
 emulator progress.

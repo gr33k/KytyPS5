@@ -84,7 +84,7 @@ public:
 	enum class LogDirection { Silent, Console, File };
 	Q_ENUM(LogDirection)
 
-	enum class PssrUpscaler { Linear, DLSS };
+	enum class PssrUpscaler { Linear, DLSS, FSR };
 	Q_ENUM(PssrUpscaler)
 
 	enum class GameStatus { Unknown, InGame, Logo, DoesntBoot, MainMenu };
@@ -122,9 +122,11 @@ public:
 	bool                   readback_tiled_images       = false;
 	bool                   readback_storage_images     = false;
 	bool                   sync_raw_image_buffers      = false;
+	int                    flush_draws                 = 0;
 	bool                   tessellation_enabled        = false;
 	bool                   occlusion_queries_enabled   = false;
 	bool                   relaxed_shader_float        = false;
+	bool                   native_rt                   = false;
 	bool                   shader_cache_enabled        = true;
 	bool                   trophy_enabled              = true;
 	int                    trophy_duration_seconds     = 6;
@@ -147,6 +149,7 @@ public:
 	bool                   pro_enabled                 = false;
 	PssrUpscaler           pssr_upscaler               = PssrUpscaler::Linear;
 	QString                dlss_folder;
+	QString                fsr_folder;
 	bool                   amd_cpu_enabled             = false;
 	bool                   guest_tsc_enabled           = false;
 #if defined(_WIN32)
@@ -171,9 +174,11 @@ public:
 		readback_tiled_images       = other.readback_tiled_images;
 		readback_storage_images     = other.readback_storage_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;
+		flush_draws                 = other.flush_draws;
 		tessellation_enabled        = other.tessellation_enabled;
 		occlusion_queries_enabled   = other.occlusion_queries_enabled;
 		relaxed_shader_float        = other.relaxed_shader_float;
+		native_rt                   = other.native_rt;
 		shader_cache_enabled        = other.shader_cache_enabled;
 		trophy_enabled              = other.trophy_enabled;
 		trophy_duration_seconds     = other.trophy_duration_seconds;
@@ -196,6 +201,7 @@ public:
 		pro_enabled                 = other.pro_enabled;
 		pssr_upscaler               = other.pssr_upscaler;
 		dlss_folder                 = other.dlss_folder;
+		fsr_folder                  = other.fsr_folder;
 		amd_cpu_enabled             = other.amd_cpu_enabled;
 		guest_tsc_enabled           = other.guest_tsc_enabled;
 #if defined(_WIN32)

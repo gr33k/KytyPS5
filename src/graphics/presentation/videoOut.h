@@ -37,7 +37,7 @@ public:
 	void PrepareFlip(uint64_t request_id, Graphics::CommandBuffer& buffer);
 	void CompleteFlip(uint64_t request_id);
 	void WaitForSubmitSlot(int handle);
-	void WaitFlipDone(int handle, int index);
+	void WaitFlipDone(const uint64_t* label);
 
 	[[nodiscard]] Impl& State() noexcept;
 
@@ -48,6 +48,9 @@ private:
 [[nodiscard]] VideoOutDriver& VideoOutInit(uint32_t width, uint32_t height,
                                            Graphics::Presenter& presenter);
 void                          VideoOutShutdown();
+// The labels the flip and wait packets name a port's buffers by, and the port's bus; nullptr for a
+// closed port.
+uint64_t* VideoOutGetBufferLabels(int handle, int* bus);
 
 // Frames actually presented (for run-progress tracking).
 [[nodiscard]] uint64_t PresentedFrames() noexcept;

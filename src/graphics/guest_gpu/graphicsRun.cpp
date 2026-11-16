@@ -182,6 +182,22 @@ void CommandProcessor::Reset() {
 	m_dispatch_indirect_args_base_addr = 0;
 }
 
+// Pops a pushed context, then resets the register state the operation bits name.
+void CommandProcessor::ResetQueue(uint32_t op) {
+	if ((op & Pm4::ResetQueueOp::PopContext) != 0 && m_saved_ctx.has_value()) {
+		ApplyContextStateOperation(ContextStateOperation::Pop);
+	}
+	if ((op & Pm4::ResetQueueOp::CxState) != 0) {
+		m_ctx.Reset();
+	}
+	if ((op & Pm4::ResetQueueOp::ShState) != 0) {
+		m_sh_ctx.Reset();
+	}
+	if ((op & Pm4::ResetQueueOp::UcState) != 0) {
+		m_ucfg.Reset();
+	}
+}
+
 void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operation) {
 	switch (operation) {
 		case ContextStateOperation::Clear: m_ctx.Reset(); break;
@@ -203,6 +219,7 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 }
 
 void CommandProcessor::BufferInit() {
+	m_draws = 0;
 	GetScheduler().Begin(m_ctx, m_ucfg, m_sh_ctx);
 }
 
@@ -704,7 +721,20 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	}
 }
 
+// Submits the recorded work every N draws so the host GPU starts before a long buffer ends.
+void CommandProcessor::CountDraw() {
+	if (m_flush_draws == 0) {
+		return;
+	}
+	if (m_draws == m_flush_draws) {
+		GetScheduler().Flush();
+		m_draws = 0;
+	}
+	m_draws++;
+}
+
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
+	CountDraw();
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
@@ -769,6 +799,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          const volatile uint32_t* count_addr,
                                          uint32_t stride_in_bytes, IndirectDrawRegisters registers,
                                          uint32_t draw_initiator, bool indexed) {
+	CountDraw();
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != (indexed ? 0u : 2u));
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 	// The guest records match Vulkan's indirect commands byte for byte.
@@ -857,17 +888,17 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
+	CountDraw();
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(CurrentBuffer(), args);
 }
 
-void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
+void CommandProcessor::WaitFlipDone(const uint64_t* label) {
 	BufferFlush();
 
-	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
-	                                      static_cast<int>(display_buffer_index));
+	m_renderer.GetVideoOut().WaitFlipDone(label);
 }
 
 void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector, void* address,

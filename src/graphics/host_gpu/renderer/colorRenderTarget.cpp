@@ -172,8 +172,9 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	const uint32_t width  = rt.attrib2.width + 1;
 	const uint32_t height = rt.attrib2.height + 1;
 	const auto target_format =
-	    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type, rt.info.channel_order);
-	// A one-level surface can alias a higher view mip when its padded pitch is unchanged.
+	    TextureGetRenderTargetFormat(m_context.GetGraphics(), rt.info.format, rt.info.channel_type,
+	                                 rt.info.channel_order);
+	// A surface with one stored level aliases mip 0 when its padded pitch is unchanged.
 	uint32_t mip = rt.view.current_mip_level;
 	if (mip != 0 && rt.attrib2.num_mip_levels == 0 && samples == 1 && !volume &&
 	    TileGetTexturePitch(target_format.guest_format, std::max(width >> mip, 1u),
